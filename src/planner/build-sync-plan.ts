@@ -1,4 +1,10 @@
-import type { PlannerInputItemV1, SyncPlanSummaryV1, SyncPlanV1, SyncRunContextV1 } from './types'
+import type { GraphStateV1 } from '../state'
+import type {
+  PlannerInputItemV1,
+  SyncPlanSummaryV1,
+  SyncPlanV1,
+  SyncRunContextV1,
+} from './types'
 import {
   PAGE_ACTION_ORDER_V1,
   type PageSyncActionV1,
@@ -50,31 +56,11 @@ const pickNextUpdatedAfter = (items: PlannerInputItemV1[]) => {
 export const buildSyncPlanV1 = (
   runContext: SyncRunContextV1,
   items: PlannerInputItemV1[],
+  graphState: GraphStateV1,
 ): SyncPlanV1 => {
-  const actions = sortActions(items.map((item) => planPageActionV1(item, {
-    graphId: runContext.graphId,
-    graphName: runContext.graphName,
-    readwiseAccountId: null,
-    archiveNamespace: 'Readwise Archived',
-    uuidCompatMode: 'rw-location-url-v1',
-    documentFormat: runContext.documentFormat,
-    runState: {
-      status: 'planning',
-      phase: 'planning',
-      runId: runContext.runId,
-      startedAt: runContext.startedAt,
-      endedAt: null,
-      message: null,
-      activeUserBookId: null,
-    },
-    checkpoint: runContext.checkpointBeforeRun,
-    pageIndex: {},
-    pendingRelinkQueue: [],
-    lastRunSummary: null,
-    lastSuccessAt: null,
-    lastFailureAt: null,
-    lastFailureSummary: null,
-  })))
+  const actions = sortActions(
+    items.map((item) => planPageActionV1(item, graphState)),
+  )
   const checkpointDecision = buildCheckpointDecisionV1(
     actions,
     runContext.checkpointBeforeRun,

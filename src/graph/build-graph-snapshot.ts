@@ -1,13 +1,11 @@
 import type { PageEntity } from '@logseq/libs/dist/LSPlugin'
 
+import { loadCurrentGraphContextV1 } from './load-current-graph-context'
 import type {
   GraphPageCandidateV1,
   GraphPageSnapshotSourceV1,
   GraphSnapshotV1,
 } from './types'
-
-const toGraphId = (graph: Awaited<ReturnType<typeof logseq.App.getCurrentGraph>>) =>
-  graph?.path ?? graph?.name ?? 'unknown-graph'
 
 const toPageTitle = (page: GraphPageSnapshotSourceV1): string =>
   page.originalName ?? page.title ?? page.name
@@ -67,10 +65,13 @@ export const buildGraphSnapshotV1 = (
 }
 
 export const loadCurrentGraphSnapshotV1 = async (): Promise<GraphSnapshotV1> => {
-  const [graph, pages] = await Promise.all([
-    logseq.App.getCurrentGraph(),
+  const [graphContext, pages] = await Promise.all([
+    loadCurrentGraphContextV1(),
     logseq.Editor.getAllPages(),
   ])
 
-  return buildGraphSnapshotV1(toGraphId(graph), (pages ?? []) as PageEntity[])
+  return buildGraphSnapshotV1(
+    graphContext.graphId,
+    (pages ?? []) as PageEntity[],
+  )
 }

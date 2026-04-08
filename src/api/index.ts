@@ -53,3 +53,4 @@ export const createReadwiseClient = (token: string) => {
 }
 
 export type ReadwiseClient = ReturnType<typeof createReadwiseClient>
+export * from './load-all-exported-books'

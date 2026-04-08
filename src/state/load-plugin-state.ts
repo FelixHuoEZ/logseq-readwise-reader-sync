@@ -1,3 +1,4 @@
+import { loadCurrentGraphContextV1 } from '../graph'
 import { createEmptyPluginStateV1 } from './defaults'
 import type { PluginStateV1 } from './types'
 
@@ -15,16 +16,8 @@ const isPluginStateV1 = (value: unknown): value is PluginStateV1 => {
   return typeof value.machineId === 'string'
 }
 
-const getCurrentGraphContext = () => {
-  const graphId = window.location.pathname || 'unknown-graph'
-  const graphName =
-    document.title.trim() || window.location.pathname || 'Current Graph'
-
-  return { graphId, graphName }
-}
-
 export const loadPluginStateV1 = async (): Promise<PluginStateV1> => {
-  const { graphId, graphName } = getCurrentGraphContext()
+  const { graphId, graphName } = await loadCurrentGraphContextV1()
   const raw = logseq.settings?.[PLUGIN_STATE_JSON_KEY]
 
   if (typeof raw !== 'string' || raw.trim() === '') {

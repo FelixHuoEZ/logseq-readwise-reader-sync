@@ -33,32 +33,44 @@ export const prepareSyncPlanV1 = ({
   assertSupportedDocumentFormat(graphState.documentFormat)
 
   const items: PreparedSyncItemV1[] = rawBooks.map((rawBook) => {
-    const book = normalizeBookExport(rawBook)
-    const existingPageIndexEntry =
-      graphState.pageIndex[String(book.userBookId)] ?? null
-    const runtime = buildRenderRuntimeContextV1(
-      book,
-      existingPageIndexEntry,
-      graphState.documentFormat,
-      startedAt,
-    )
-    const renderedPage = renderPage(
-      buildPageRenderContext(book, runtime),
-      computeCompatibleHighlightUuid,
-    )
-    const plannerInput = buildPlannerInputItemV1(
-      book,
-      renderedPage,
-      graphState,
-      graphSnapshot,
-    )
+    try {
+      const book = normalizeBookExport(rawBook)
+      const existingPageIndexEntry =
+        graphState.pageIndex[String(book.userBookId)] ?? null
+      const runtime = buildRenderRuntimeContextV1(
+        book,
+        existingPageIndexEntry,
+        graphState.documentFormat,
+        startedAt,
+      )
+      const renderedPage = renderPage(
+        buildPageRenderContext(book, runtime),
+        computeCompatibleHighlightUuid,
+      )
+      const plannerInput = buildPlannerInputItemV1(
+        book,
+        renderedPage,
+        graphState,
+        graphSnapshot,
+      )
 
-    return {
-      rawBook,
-      book,
-      runtime,
-      renderedPage,
-      plannerInput,
+      return {
+        rawBook,
+        book,
+        runtime,
+        renderedPage,
+        plannerInput,
+      }
+    } catch (error) {
+      const title =
+        typeof rawBook.title === 'string' && rawBook.title.length > 0
+          ? rawBook.title
+          : '<untitled>'
+      const message = error instanceof Error ? error.message : String(error)
+
+      throw new Error(
+        `Failed to prepare preview item for userBookId=${rawBook.user_book_id}, title=${title}: ${message}`,
+      )
     }
   })
 

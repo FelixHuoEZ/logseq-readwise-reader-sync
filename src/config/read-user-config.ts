@@ -20,6 +20,7 @@ const toPositiveInteger = (value: unknown, fallback: number) => {
 export const readUserConfig = (): UserConfigV1 => {
   const settings = (logseq.settings ?? {}) as Record<string, unknown>
   const rawToken = settings.apiToken
+  const rawLastSyncTimestamp = settings.lastSyncTimestamp
 
   return {
     apiToken: typeof rawToken === 'string' ? rawToken.trim() : '',
@@ -28,5 +29,10 @@ export const readUserConfig = (): UserConfigV1 => {
       settings.syncIntervalMinutes,
       DEFAULT_SYNC_INTERVAL_MINUTES,
     ),
+    legacyLastSyncTimestamp:
+      typeof rawLastSyncTimestamp === 'string' &&
+      rawLastSyncTimestamp.trim().length > 0
+        ? rawLastSyncTimestamp.trim()
+        : null,
   }
 }

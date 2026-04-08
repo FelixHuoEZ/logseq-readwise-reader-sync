@@ -96,6 +96,15 @@ export const planPageActionV1 = (
       }
     }
 
+    if (item.propertyMatchCandidates.length > 0) {
+      return createSkipAction(
+        item,
+        'awaiting_manual_relink',
+        'property_match_pending_confirmation',
+        'The mapped page is missing but URL/property candidates exist and require manual confirmation.',
+      )
+    }
+
     if (item.exactTitleCandidates.length > 0) {
       return createSkipAction(
         item,
@@ -119,6 +128,15 @@ export const planPageActionV1 = (
       'local_missing_but_deleted_remote',
       'remote_deleted_local_missing',
       'Remote book is deleted and there is no local mapping to archive.',
+    )
+  }
+
+  if (item.propertyMatchCandidates.length > 0) {
+    return createSkipAction(
+      item,
+      'awaiting_manual_relink',
+      'property_match_pending_confirmation',
+      'A URL/property local candidate exists and requires manual confirmation before any write.',
     )
   }
 

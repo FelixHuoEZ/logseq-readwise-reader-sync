@@ -1,3 +1,4 @@
+export * from './build-runtime-page-index'
 export * from './defaults'
 export * from './load-plugin-state'
 export * from './save-plugin-state'

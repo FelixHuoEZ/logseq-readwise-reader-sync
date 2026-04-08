@@ -75,6 +75,7 @@ export interface PageIndexEntryV1 {
   lastAppliedRenderHash: string | null
   lastSeenHighlightCount: number | null
   lastKnownPagePath: string | null
+  identitySource?: 'page_property' | 'settings_cache'
 }
 
 export interface PendingRelinkEntryV1 {
@@ -83,7 +84,7 @@ export interface PendingRelinkEntryV1 {
   candidatePageUuid: string
   candidatePageTitle: string
   detectedAt: string
-  reason: 'title_exact_match'
+  reason: 'title_exact_match' | 'property_match'
   status: PendingRelinkStatusV1
 }
 

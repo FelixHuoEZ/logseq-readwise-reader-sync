@@ -20,7 +20,15 @@ export const buildPendingRelinkQueueV1 = (
   const nextQueue: PendingRelinkEntryV1[] = []
 
   for (const item of items) {
-    const candidates = item.plannerInput.exactTitleCandidates
+    const candidates = [
+      ...item.plannerInput.exactTitleCandidates,
+      ...item.plannerInput.propertyMatchCandidates,
+    ].filter(
+      (candidate, index, allCandidates) =>
+        allCandidates.findIndex(
+          (existing) => existing.pageUuid === candidate.pageUuid,
+        ) === index,
+    )
 
     if (item.plannerInput.acceptedPendingRelink || candidates.length === 0) {
       continue
@@ -37,7 +45,10 @@ export const buildPendingRelinkQueueV1 = (
           candidatePageUuid: candidate.pageUuid,
           candidatePageTitle: candidate.pageTitle,
           detectedAt,
-          reason: 'title_exact_match',
+          reason:
+            candidate.matchKind === 'property_url'
+              ? 'property_match'
+              : 'title_exact_match',
           status: 'pending',
         },
       )

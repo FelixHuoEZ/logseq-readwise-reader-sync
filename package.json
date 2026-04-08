@@ -10,10 +10,10 @@
     "main": "dist/index.html"
   },
   "scripts": {
-    "dev": "bunx vite",
-    "build": "bunx vite build",
+    "dev": "vite",
+    "build": "vite build",
     "prepare": "husky",
-    "lint:precommit": "echo \"Running biome\" && bunx biome check . --write && echo \"Running tsc\" && bunx tsc --noEmit"
+    "lint:precommit": "echo \"Running biome\" && biome check . --write && echo \"Running tsc\" && tsc --noEmit"
   },
   "release": {
     "branches": [

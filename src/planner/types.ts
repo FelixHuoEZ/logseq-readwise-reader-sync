@@ -15,6 +15,7 @@ export interface PlannerInputItemV1 {
   renderedPage: RenderedPage
   existingPageIndexEntry: PageIndexEntryV1 | null
   exactTitleCandidates: GraphPageCandidateV1[]
+  propertyMatchCandidates: GraphPageCandidateV1[]
   mappedPageExists: boolean
   acceptedPendingRelink: PendingRelinkEntryV1 | null
 }
@@ -34,6 +35,7 @@ export type PlanReasonCodeV1 =
   | 'mapped_page_exists_remote_changed'
   | 'mapped_page_missing'
   | 'title_exact_match_pending_confirmation'
+  | 'property_match_pending_confirmation'
   | 'remote_deleted_local_exists'
   | 'remote_deleted_local_missing'
   | 'manual_pause'

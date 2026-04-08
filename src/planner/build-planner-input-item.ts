@@ -1,7 +1,8 @@
+import type { GraphSnapshotV1 } from '../graph'
 import type { NormalizedBookExport } from '../normalizer'
 import type { RenderedPage } from '../renderer'
 import type { GraphStateV1 } from '../state'
-import type { GraphSnapshotV1, PlannerInputItemV1 } from './types'
+import type { PlannerInputItemV1 } from './types'
 
 export const buildPlannerInputItemV1 = (
   book: NormalizedBookExport,

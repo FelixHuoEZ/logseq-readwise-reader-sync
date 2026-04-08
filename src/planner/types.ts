@@ -1,3 +1,4 @@
+import type { GraphPageCandidateV1, GraphSnapshotV1 } from '../graph'
 import type { NormalizedBookExport } from '../normalizer'
 import type { RenderedPage } from '../renderer'
 import type {
@@ -7,18 +8,7 @@ import type {
   PendingRelinkEntryV1,
   SyncCheckpointV1,
 } from '../state'
-
-export interface GraphPageCandidateV1 {
-  pageUuid: string
-  pageTitle: string
-  path: string | null
-}
-
-export interface GraphSnapshotV1 {
-  graphId: string
-  pageUuidExists: Record<string, boolean>
-  pagesByExactTitle: Record<string, GraphPageCandidateV1[]>
-}
+export type { GraphPageCandidateV1, GraphSnapshotV1 } from '../graph'
 
 export interface PlannerInputItemV1 {
   book: NormalizedBookExport

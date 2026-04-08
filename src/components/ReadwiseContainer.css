@@ -135,6 +135,7 @@
 
 .rw-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 16px 20px;
   border-top: 1px solid #f0f0f0;
@@ -142,6 +143,7 @@
 
 .rw-btn {
   flex: 1;
+  min-width: 108px;
   padding: 8px 16px;
   border-radius: 8px;
   border: 1px solid #e5e7eb;

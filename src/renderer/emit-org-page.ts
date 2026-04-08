@@ -58,7 +58,7 @@ const emitHighlightMainText = (
       : ''
 
   return [
-    `** ${highlight.text}${locationSuffix}`,
+    `${highlight.text}${locationSuffix}`,
     ':PROPERTIES:',
     `:created: [[${highlight.createdDate}]]`,
     `:tags: [[ReadwiseHighlights]]${tagSuffix}`,
@@ -71,7 +71,7 @@ const emitHighlightBlocks = (page: SemanticPage): EmittedBlock[] =>
   page.highlights.map((highlight) => ({
     text: emitHighlightMainText(highlight),
     children: highlight.note
-      ? [{ text: `- *Note*: ${highlight.note}` }]
+      ? [{ text: `*Note*: ${highlight.note}` }]
       : undefined,
   }))
 
@@ -82,7 +82,7 @@ export const emitOrgPage = (page: SemanticPage): EmitResult => {
 
   const outputParts = [
     metadataText,
-    syncHeaderText ? `* ${syncHeaderText}` : null,
+    syncHeaderText,
     ...highlightBlocks.map((block) =>
       [block.text, ...(block.children?.map((child) => child.text) ?? [])].join(
         '\n',

@@ -23,4 +23,12 @@ export const settingsSchema: SettingSchemaDesc[] = [
     description: 'Internal — managed by the plugin. Do not edit manually.',
     default: false,
   },
+  {
+    key: 'debugSyncMaxBooks',
+    type: 'number',
+    title: 'Debug Sync Max Books',
+    description:
+      'Temporary debug limit for real sync. Set 0 to disable the limit and allow full sync.',
+    default: 5,
+  },
 ]

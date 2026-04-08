@@ -3,8 +3,18 @@ import './ReadwiseContainer.css'
 import { useRef, useState } from 'react'
 
 import { createReadwiseClient } from '../api'
-import { setupProps } from '../services/setup-properties'
-import { buildBookIdToPageMap, syncBook } from '../services/sync-highlights'
+import {
+  type GraphCheckpointSourceV1,
+  loadGraphCheckpointStateV1,
+  saveGraphCheckpointStateV1,
+} from '../graph'
+import {
+  buildBookIdToPageMap,
+  setupProps,
+  syncBook,
+  syncRenderedDebugPage,
+} from '../services'
+import { deriveNextUpdatedAfterV1 } from '../sync'
 import type {
   ExportedBook,
   ExportParams,
@@ -13,7 +23,12 @@ import type {
 } from '../types'
 
 export const ReadwiseContainer = () => {
+  const debugSyncMaxBooksLimit = 5
+  const debugNamespacePrefix = 'ReadwiseDebug'
   const cancelledRef = useRef(false)
+  const [propsReady, setPropsReady] = useState(
+    () => !!logseq.settings?.propsConfigured,
+  )
   const [status, setStatus] = useState<SyncStatus>('idle')
   const [current, setCurrent] = useState(0)
   const [total, setTotal] = useState(0)
@@ -21,10 +36,16 @@ export const ReadwiseContainer = () => {
   const [statusMessage, setStatusMessage] = useState('')
   const [errors, setErrors] = useState<{ book: string; message: string }[]>([])
 
-  const propsReady = !!logseq.settings?.propsConfigured
-
   const handleSetupProps = async () => {
-    await setupProps()
+    const result = await setupProps()
+    if (!result.success) return
+
+    setPropsReady(true)
+    setStatusMessage(
+      result.compatibilityMode
+        ? 'Setup completed in compatibility mode. Start Sync is available now.'
+        : 'Schema setup completed. Start Sync is available now.',
+    )
   }
 
   const handleCancel = () => {
@@ -34,7 +55,70 @@ export const ReadwiseContainer = () => {
     setCurrentBook('')
   }
 
-  const handleSync = async () => {
+  const handleClearDebugPages = async () => {
+    setErrors([])
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage(`Deleting ${debugNamespacePrefix} pages...`)
+
+    try {
+      const pagesFromNamespace =
+        (await logseq.Editor.getPagesFromNamespace(debugNamespacePrefix)) ?? []
+      const rootPage = await logseq.Editor.getPage(debugNamespacePrefix)
+
+      const pageNames = new Set<string>()
+
+      for (const page of pagesFromNamespace) {
+        const pageName =
+          (typeof page.originalName === 'string' && page.originalName) ||
+          (typeof page.name === 'string' && page.name) ||
+          (typeof page.title === 'string' && page.title) ||
+          ''
+
+        if (pageName.startsWith(`${debugNamespacePrefix}/`)) {
+          pageNames.add(pageName)
+        }
+      }
+
+      for (const pageName of pageNames) {
+        await logseq.Editor.deletePage(pageName)
+      }
+
+      if (rootPage) {
+        await logseq.Editor.deletePage(debugNamespacePrefix)
+      }
+
+      setStatus('completed')
+      setStatusMessage(
+        `Deleted ${pageNames.size}${rootPage ? ' + namespace root' : ''} debug page(s).`,
+      )
+      console.info('[Readwise Sync] cleared debug pages', {
+        namespacePrefix: debugNamespacePrefix,
+        deletedPages: pageNames.size,
+        deletedRootPage: !!rootPage,
+      })
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to clear debug pages', err)
+      setStatus('error')
+      setStatusMessage(
+        `Failed to clear debug pages: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  const runSync = async ({
+    ignoreCheckpoint = false,
+    namespacePrefix = null,
+    renderedDebugPages = false,
+    maxBooksOverride = null,
+  }: {
+    ignoreCheckpoint?: boolean
+    namespacePrefix?: string | null
+    renderedDebugPages?: boolean
+    maxBooksOverride?: number | null
+  } = {}) => {
     const token = logseq.settings?.apiToken as string
     if (!token) {
       setStatus('error')
@@ -53,8 +137,26 @@ export const ReadwiseContainer = () => {
     const client = createReadwiseClient(token)
     const allBooks: ExportedBook[] = []
     let cursor: string | null = null
-    const updatedAfter =
-      (logseq.settings?.lastSyncTimestamp as string) || undefined
+    const checkpointBeforeRun = await loadGraphCheckpointStateV1()
+    const updatedAfter = ignoreCheckpoint
+      ? undefined
+      : checkpointBeforeRun?.updatedAfter ?? undefined
+    const rawDebugSyncMaxBooks = Number(logseq.settings?.debugSyncMaxBooks ?? 20)
+    const configuredDebugSyncMaxBooks =
+      Number.isFinite(rawDebugSyncMaxBooks) && rawDebugSyncMaxBooks > 0
+        ? Math.floor(rawDebugSyncMaxBooks)
+        : null
+    const debugSyncMaxBooks =
+      typeof maxBooksOverride === 'number' && maxBooksOverride > 0
+        ? Math.floor(maxBooksOverride)
+        : configuredDebugSyncMaxBooks
+    console.info('[Readwise Sync] starting sync')
+    console.info('[Readwise Sync] checkpointBeforeRun', checkpointBeforeRun)
+    console.info('[Readwise Sync] updatedAfter', updatedAfter ?? null)
+    console.info('[Readwise Sync] debugSyncMaxBooks', debugSyncMaxBooks)
+    console.info('[Readwise Sync] ignoreCheckpoint', ignoreCheckpoint)
+    console.info('[Readwise Sync] namespacePrefix', namespacePrefix)
+    console.info('[Readwise Sync] renderedDebugPages', renderedDebugPages)
 
     try {
       do {
@@ -66,21 +168,51 @@ export const ReadwiseContainer = () => {
 
         const page: ExportResponse = await client.exportHighlights(params)
         allBooks.push(...page.results)
+        if (debugSyncMaxBooks != null && allBooks.length > debugSyncMaxBooks) {
+          allBooks.length = debugSyncMaxBooks
+        }
         setTotal(allBooks.length)
-        setStatusMessage(`Fetched ${allBooks.length} book(s) so far...`)
+        setStatusMessage(
+          debugSyncMaxBooks != null
+            ? `Fetched ${allBooks.length} / ${debugSyncMaxBooks} debug book(s) so far...`
+            : `Fetched ${allBooks.length} book(s) so far...`,
+        )
+        console.info('[Readwise Sync] export page', {
+          pageResultCount: page.results.length,
+          totalFetched: allBooks.length,
+          nextPageCursor: page.nextPageCursor,
+          debugSyncMaxBooks,
+        })
+        if (debugSyncMaxBooks != null && allBooks.length >= debugSyncMaxBooks) {
+          console.info('[Readwise Sync] debug limit reached', {
+            debugSyncMaxBooks,
+          })
+          cursor = null
+          break
+        }
         cursor = page.nextPageCursor
       } while (cursor)
 
       if (allBooks.length === 0) {
         setStatus('completed')
         setStatusMessage('No new highlights to sync.')
+        console.info('[Readwise Sync] no new highlights')
         return
       }
 
       setStatus('syncing')
       setTotal(allBooks.length)
+      setStatusMessage(
+        debugSyncMaxBooks != null
+          ? ignoreCheckpoint
+            ? `Debug sync mode: processing ${allBooks.length} book(s) from scratch into ${namespacePrefix ?? 'default'}; checkpoint will not advance.`
+            : `Debug sync mode: processing ${allBooks.length} book(s); checkpoint will not advance.`
+          : `Syncing ${allBooks.length} book(s)...`,
+      )
 
-      const bookIdToPage = await buildBookIdToPageMap()
+      const bookIdToPage = renderedDebugPages
+        ? null
+        : await buildBookIdToPageMap({ namespacePrefix })
 
       for (let i = 0; i < allBooks.length; i++) {
         if (cancelledRef.current) return
@@ -90,22 +222,82 @@ export const ReadwiseContainer = () => {
         setCurrentBook(book.title)
 
         try {
-          await syncBook(book, bookIdToPage)
+          if (renderedDebugPages) {
+            await syncRenderedDebugPage(book, namespacePrefix ?? 'ReadwiseDebug')
+          } else {
+            await syncBook(book, bookIdToPage!, { namespacePrefix })
+          }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err)
           setErrors((prev) => [...prev, { book: book.title, message: msg }])
         }
       }
 
-      logseq.updateSettings({ lastSyncTimestamp: new Date().toISOString() })
+      const nextUpdatedAfter = deriveNextUpdatedAfterV1(
+        allBooks,
+        checkpointBeforeRun?.updatedAfter ?? null,
+      )
+
+      if (debugSyncMaxBooks != null || ignoreCheckpoint) {
+        console.info('[Readwise Sync] skipping checkpoint save in debug mode', {
+          debugSyncMaxBooks,
+          nextUpdatedAfter,
+          ignoreCheckpoint,
+        })
+      } else if (nextUpdatedAfter != null) {
+        const checkpointSource: GraphCheckpointSourceV1 =
+          checkpointBeforeRun?.updatedAfter == null
+            ? 'full_sync'
+            : 'incremental_sync'
+        const checkpointToSave = {
+          schemaVersion: 1 as const,
+          updatedAfter: nextUpdatedAfter,
+          committedAt: new Date().toISOString(),
+          source: checkpointSource,
+        }
+        console.info('[Readwise Sync] saving graph checkpoint', checkpointToSave)
+        await saveGraphCheckpointStateV1({
+          schemaVersion: 1,
+          updatedAfter: nextUpdatedAfter,
+          committedAt: checkpointToSave.committedAt,
+          source: checkpointToSave.source,
+        })
+        console.info('[Readwise Sync] saved graph checkpoint', checkpointToSave)
+      }
+
       setStatus('completed')
-      setStatusMessage(`Sync complete. ${allBooks.length} book(s) processed.`)
+      setStatusMessage(
+        debugSyncMaxBooks != null || ignoreCheckpoint
+          ? `Debug sync complete. ${allBooks.length} book(s) processed${namespacePrefix ? ` in ${namespacePrefix}` : ''}. Checkpoint was not advanced.`
+          : `Sync complete. ${allBooks.length} book(s) processed.`,
+      )
+      console.info('[Readwise Sync] sync completed', {
+        processedBooks: allBooks.length,
+        nextUpdatedAfter,
+        debugSyncMaxBooks,
+        ignoreCheckpoint,
+        namespacePrefix,
+      })
     } catch (err: unknown) {
+      console.error('[Readwise Sync] sync failed', err)
       setStatus('error')
       setStatusMessage(
         `Sync failed: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
+  }
+
+  const handleSync = async () => {
+    await runSync()
+  }
+
+  const handleDebugSyncFromScratch = async () => {
+    await runSync({
+      ignoreCheckpoint: true,
+      namespacePrefix: debugNamespacePrefix,
+      renderedDebugPages: true,
+      maxBooksOverride: debugSyncMaxBooksLimit,
+    })
   }
 
   const progressPct = total > 0 ? Math.round((current / total) * 100) : 0
@@ -183,6 +375,16 @@ export const ReadwiseContainer = () => {
           {propsReady && status === 'idle' && (
             <button className="rw-btn rw-btn-primary" onClick={handleSync}>
               Start Sync
+            </button>
+          )}
+          {propsReady && status === 'idle' && (
+            <button className="rw-btn" onClick={handleDebugSyncFromScratch}>
+              Start Debug Sync (5)
+            </button>
+          )}
+          {propsReady && status === 'idle' && (
+            <button className="rw-btn" onClick={handleClearDebugPages}>
+              Clear Debug Pages
             </button>
           )}
           {isBusy && (

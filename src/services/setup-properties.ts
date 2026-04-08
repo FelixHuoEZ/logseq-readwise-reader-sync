@@ -1,5 +1,10 @@
 import { ReadwisePageProp } from '../types'
 
+export interface SetupPropsResult {
+  success: boolean
+  compatibilityMode: boolean
+}
+
 const readwisePageProps: ReadwisePageProp[] = [
   { key: 'rw-id', schema: { type: 'number' } },
   { key: 'rw-author', schema: { type: 'node', cardinality: 'many' } },
@@ -16,7 +21,61 @@ const readwisePageProps: ReadwisePageProp[] = [
   { key: 'rw-summary', schema: { type: 'default' } },
 ]
 
-export const setupProps = async () => {
+const ensureReadwiseTagPage = async () => {
+  const existing = await logseq.Editor.getPage('Readwise')
+  if (existing) return existing
+
+  return logseq.Editor.createPage('Readwise', {}, { redirect: false })
+}
+
+const tryGetAllProperties = async () => {
+  try {
+    return {
+      props: await logseq.Editor.getAllProperties(),
+      supported: true,
+    }
+  } catch (error) {
+    console.warn(
+      '[Readwise Sync] getAllProperties is not available in this Logseq version; skipping property introspection.',
+      error,
+    )
+    return {
+      props: [],
+      supported: false,
+    }
+  }
+}
+
+const tryUpsertProperty = async (
+  key: string,
+  schema: ReadwisePageProp['schema'],
+) => {
+  try {
+    await logseq.Editor.upsertProperty(key, schema, { name: key })
+    return true
+  } catch (error) {
+    console.warn(
+      `[Readwise Sync] upsertProperty is not available for "${key}" in this Logseq version; skipping property schema creation.`,
+      error,
+    )
+    return false
+  }
+}
+
+const tryAddTagProperty = async (tagName: string, key: string) => {
+  try {
+    await logseq.Editor.addTagProperty(tagName, key)
+    return true
+  } catch (error) {
+    console.warn(
+      `[Readwise Sync] addTagProperty is not available for "${key}" in this Logseq version; skipping tag schema binding.`,
+      error,
+    )
+    return false
+  }
+}
+
+export const setupProps = async (): Promise<SetupPropsResult> => {
   try {
     const loadingMsg = await logseq.UI.showMsg(
       'Setting up schema. Please wait...',
@@ -24,10 +83,12 @@ export const setupProps = async () => {
       { timeout: 0 },
     )
 
-    await logseq.Editor.createTag('Readwise')
+    await ensureReadwiseTagPage()
 
-    const allPropsInLs = await logseq.Editor.getAllProperties()
+    const { props: allPropsInLs, supported: canInspectProperties } =
+      await tryGetAllProperties()
     const existingIdentifiers = new Set(allPropsInLs?.map((prop) => prop.ident))
+    let compatibilityMode = !canInspectProperties
 
     const pluginName = 'logseq-readwise-plugin'
     const propsToCreate = readwisePageProps.filter(({ key }) => {
@@ -36,19 +97,28 @@ export const setupProps = async () => {
     })
 
     for (const { key, schema } of propsToCreate) {
-      await logseq.Editor.upsertProperty(key, schema, { name: key })
+      const created = await tryUpsertProperty(key, schema)
+      if (!created) compatibilityMode = true
     }
 
     for (const { key } of readwisePageProps) {
-      await logseq.Editor.addTagProperty('Readwise', key)
+      const bound = await tryAddTagProperty('Readwise', key)
+      if (!bound) compatibilityMode = true
     }
 
-    logseq.updateSettings({ propsConfigured: true })
+    await logseq.updateSettings({ propsConfigured: true })
 
     logseq.UI.closeMsg(loadingMsg)
-    await logseq.UI.showMsg('Readwise schema setup completed.', 'success')
+    await logseq.UI.showMsg(
+      compatibilityMode
+        ? 'Readwise setup completed in compatibility mode. You can start sync now.'
+        : 'Readwise schema setup completed.',
+      'success',
+    )
+    return { success: true, compatibilityMode }
   } catch (err) {
     console.error('Failed to setup properties:', err)
-    logseq.UI.showMsg(`Failed to setup properties: ${err}`, 'error')
+    await logseq.UI.showMsg(`Failed to setup properties: ${err}`, 'error')
+    return { success: false, compatibilityMode: true }
   }
 }

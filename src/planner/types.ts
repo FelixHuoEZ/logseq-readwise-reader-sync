@@ -1,4 +1,8 @@
-import type { GraphPageCandidateV1, GraphSnapshotV1 } from '../graph'
+import type {
+  GraphCheckpointStateV1,
+  GraphPageCandidateV1,
+  GraphSnapshotV1,
+} from '../graph'
 import type { NormalizedBookExport } from '../normalizer'
 import type { RenderedPage } from '../renderer'
 import type {
@@ -6,7 +10,6 @@ import type {
   GraphStateV1,
   PageIndexEntryV1,
   PendingRelinkEntryV1,
-  SyncCheckpointV1,
 } from '../state'
 export type { GraphPageCandidateV1, GraphSnapshotV1 } from '../graph'
 
@@ -25,7 +28,7 @@ export interface SyncRunContextV1 {
   graphId: string
   graphName: string
   startedAt: string
-  checkpointBeforeRun: SyncCheckpointV1 | null
+  checkpointBeforeRun: GraphCheckpointStateV1 | null
   documentFormat: GraphStateV1['documentFormat']
 }
 

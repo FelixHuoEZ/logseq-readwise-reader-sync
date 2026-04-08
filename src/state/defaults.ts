@@ -41,7 +41,6 @@ export const createEmptyGraphStateV1 = (
   uuidCompatMode: 'rw-location-url-v1',
   documentFormat: 'org',
   runState: createEmptyRunStateV1(),
-  checkpoint: null,
   pageIndex: {},
   pendingRelinkQueue: [],
   lastRunSummary: null,

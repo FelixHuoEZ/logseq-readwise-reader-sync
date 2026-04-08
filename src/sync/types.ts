@@ -1,4 +1,4 @@
-import type { GraphSnapshotV1 } from '../graph'
+import type { GraphCheckpointStateV1, GraphSnapshotV1 } from '../graph'
 import type { NormalizedBookExport } from '../normalizer'
 import type { PlannerInputItemV1, SyncPlanV1, SyncRunContextV1 } from '../planner'
 import type { RenderRuntimeContext, RenderedPage } from '../renderer'
@@ -17,6 +17,7 @@ export interface PrepareSyncPlanParamsV1 {
   rawBooks: ExportedBook[]
   graphState: GraphStateV1
   graphSnapshot: GraphSnapshotV1
+  checkpointBeforeRun: GraphCheckpointStateV1 | null
   startedAt?: string
   runId?: string
 }

@@ -1,10 +1,10 @@
 import type { UserConfigV1 } from '../config'
-import type { GraphStateV1 } from '../state'
+import type { GraphCheckpointStateV1 } from '../graph'
 
 export const resolvePreviewUpdatedAfterV1 = (
-  graphState: GraphStateV1,
+  checkpointState: GraphCheckpointStateV1 | null,
   userConfig: UserConfigV1,
 ): string | null =>
-  graphState.checkpoint?.updatedAfter ??
+  checkpointState?.updatedAfter ??
   userConfig.legacyLastSyncTimestamp ??
   null

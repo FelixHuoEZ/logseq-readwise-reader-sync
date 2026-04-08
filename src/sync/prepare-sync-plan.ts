@@ -27,6 +27,7 @@ export const prepareSyncPlanV1 = ({
   rawBooks,
   graphState,
   graphSnapshot,
+  checkpointBeforeRun,
   startedAt = new Date().toISOString(),
   runId,
 }: PrepareSyncPlanParamsV1): PreparedSyncPlanV1 => {
@@ -77,6 +78,7 @@ export const prepareSyncPlanV1 = ({
   const runContext = buildSyncRunContextV1(
     graphState,
     graphSnapshot,
+    checkpointBeforeRun,
     startedAt,
     runId,
   )

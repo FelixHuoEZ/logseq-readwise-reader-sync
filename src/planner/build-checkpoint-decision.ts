@@ -1,4 +1,4 @@
-import type { SyncCheckpointV1 } from '../state'
+import type { GraphCheckpointStateV1 } from '../graph'
 import type {
   CheckpointDecisionV1,
   PageSyncActionV1,
@@ -16,7 +16,7 @@ const deriveReasons = (
 
 export const buildCheckpointDecisionV1 = (
   actions: PageSyncActionV1[],
-  checkpointBeforeRun: SyncCheckpointV1 | null,
+  checkpointBeforeRun: GraphCheckpointStateV1 | null,
   nextUpdatedAfter: string | null,
 ): CheckpointDecisionV1 => {
   const reasons = deriveReasons(actions)

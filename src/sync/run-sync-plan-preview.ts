@@ -1,6 +1,9 @@
 import { createReadwiseClient, loadAllExportedBooks } from '../api'
 import { readUserConfig } from '../config'
-import { loadCurrentGraphSnapshotV1 } from '../graph'
+import {
+  loadCurrentGraphSnapshotV1,
+  loadGraphCheckpointStateV1,
+} from '../graph'
 import {
   buildRuntimeGraphStateV1,
   loadPluginStateV1,
@@ -31,7 +34,10 @@ export const runSyncPlanPreviewV1 =
       throw new Error('Readwise API token is not configured.')
     }
 
-    const pluginState = await loadPluginStateV1()
+    const [pluginState, checkpointBeforeRun] = await Promise.all([
+      loadPluginStateV1(),
+      loadGraphCheckpointStateV1(),
+    ])
     const runId = createRunId()
     const startedAt = new Date().toISOString()
 
@@ -50,12 +56,13 @@ export const runSyncPlanPreviewV1 =
     try {
       const client = createReadwiseClient(userConfig.apiToken)
       const updatedAfter = resolvePreviewUpdatedAfterV1(
-        pluginState.activeGraph,
+        checkpointBeforeRun,
         userConfig,
       )
       const maxBooks = updatedAfter == null ? 20 : undefined
       console.info('[Readwise V1 Preview] updatedAfter', updatedAfter)
       console.info('[Readwise V1 Preview] sampleMode', updatedAfter == null)
+      console.info('[Readwise V1 Preview] checkpointBeforeRun', checkpointBeforeRun)
       if (maxBooks != null) {
         pluginState.activeGraph.runState = {
           ...pluginState.activeGraph.runState,
@@ -112,6 +119,7 @@ export const runSyncPlanPreviewV1 =
         rawBooks,
         graphState: pluginState.activeGraph,
         graphSnapshot,
+        checkpointBeforeRun,
         startedAt,
         runId,
       })

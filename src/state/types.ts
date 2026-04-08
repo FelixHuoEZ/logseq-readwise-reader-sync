@@ -16,8 +16,6 @@ export type RunPhaseV1 =
   | 'writing'
   | 'finalizing'
 
-export type CheckpointSourceV1 = 'full_sync' | 'incremental_sync'
-
 export type PendingRelinkStatusV1 = 'pending' | 'accepted' | 'rejected'
 
 export type CheckpointBlockReasonV1 =
@@ -40,7 +38,6 @@ export interface GraphStateV1 {
   uuidCompatMode: 'rw-location-url-v1'
   documentFormat: StoredDocumentFormatV1
   runState: RunStateV1
-  checkpoint: SyncCheckpointV1 | null
   pageIndex: Record<string, PageIndexEntryV1>
   pendingRelinkQueue: PendingRelinkEntryV1[]
   lastRunSummary: LastRunSummaryV1 | null
@@ -57,12 +54,6 @@ export interface RunStateV1 {
   endedAt: string | null
   message: string | null
   activeUserBookId: number | null
-}
-
-export interface SyncCheckpointV1 {
-  updatedAfter: string | null
-  committedAt: string
-  source: CheckpointSourceV1
 }
 
 export interface PageIndexEntryV1 {

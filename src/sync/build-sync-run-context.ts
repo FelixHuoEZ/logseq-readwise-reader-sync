@@ -1,4 +1,4 @@
-import type { GraphSnapshotV1 } from '../graph'
+import type { GraphCheckpointStateV1, GraphSnapshotV1 } from '../graph'
 import type { SyncRunContextV1 } from '../planner'
 import type { GraphStateV1 } from '../state'
 
@@ -9,6 +9,7 @@ const createRunId = (): string =>
 export const buildSyncRunContextV1 = (
   graphState: GraphStateV1,
   graphSnapshot: GraphSnapshotV1,
+  checkpointBeforeRun: GraphCheckpointStateV1 | null,
   startedAt: string = new Date().toISOString(),
   runId: string = createRunId(),
 ): SyncRunContextV1 => ({
@@ -16,6 +17,6 @@ export const buildSyncRunContextV1 = (
   graphId: graphSnapshot.graphId,
   graphName: graphState.graphName,
   startedAt,
-  checkpointBeforeRun: graphState.checkpoint,
+  checkpointBeforeRun,
   documentFormat: graphState.documentFormat,
 })

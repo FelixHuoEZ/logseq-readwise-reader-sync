@@ -1,6 +1,9 @@
 import { createReadwiseClient, loadAllExportedBooks } from '../api'
 import { readUserConfig } from '../config'
-import { loadCurrentGraphSnapshotV1 } from '../graph'
+import {
+  loadCurrentGraphSnapshotV1,
+  loadGraphCheckpointStateV1,
+} from '../graph'
 import { buildRuntimeGraphStateV1, loadPluginStateV1 } from '../state'
 
 import { prepareSyncPlanV1 } from './prepare-sync-plan'
@@ -14,10 +17,16 @@ export const loadSyncPlanPreviewV1 = async (): Promise<PreparedSyncPlanV1> => {
     throw new Error('Readwise API token is not configured.')
   }
 
-  const pluginState = await loadPluginStateV1()
+  const [pluginState, checkpointBeforeRun] = await Promise.all([
+    loadPluginStateV1(),
+    loadGraphCheckpointStateV1(),
+  ])
   const graphState = pluginState.activeGraph
   const client = createReadwiseClient(userConfig.apiToken)
-  const updatedAfter = resolvePreviewUpdatedAfterV1(graphState, userConfig)
+  const updatedAfter = resolvePreviewUpdatedAfterV1(
+    checkpointBeforeRun,
+    userConfig,
+  )
   const maxBooks = updatedAfter == null ? 20 : undefined
   const rawBooks = await loadAllExportedBooks(client, {
     updatedAfter: updatedAfter ?? undefined,
@@ -35,5 +44,6 @@ export const loadSyncPlanPreviewV1 = async (): Promise<PreparedSyncPlanV1> => {
     rawBooks,
     graphState: runtimeGraphState,
     graphSnapshot,
+    checkpointBeforeRun,
   })
 }

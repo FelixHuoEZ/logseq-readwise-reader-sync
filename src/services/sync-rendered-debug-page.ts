@@ -6,17 +6,22 @@ import { buildPageRenderContext, renderPage } from '../renderer'
 import type { ExportedBook } from '../types'
 
 const buildDebugPageName = (
+  bookTitle: string,
   userBookId: number,
   namespacePrefix: string,
-): string => `${namespacePrefix}-book-${userBookId}`
+  mode: 'flat' | 'namespace' = 'flat',
+): string =>
+  mode === 'namespace'
+    ? `${namespacePrefix}/${bookTitle
+        .replaceAll('\\', '＼')
+        .replaceAll('/', '／')
+        .trim()}`
+    : `${namespacePrefix}-book-${userBookId}`
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
     window.setTimeout(resolve, ms)
   })
-
-const processBlockContent = (content: string) =>
-  content.replaceAll(/\n(\s*)-/gm, '\n$1\\-')
 
 const createDebugHighlightUuid = (): string => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -108,9 +113,15 @@ const createPageWithRenderedContent = async (
 export const syncRenderedDebugPage = async (
   book: ExportedBook,
   namespacePrefix = 'ReadwiseDebug',
+  pageNameMode: 'flat' | 'namespace' = 'flat',
 ) => {
   const normalizedBook = normalizeBookExport(book)
-  const pageName = buildDebugPageName(book.user_book_id, namespacePrefix)
+  const pageName = buildDebugPageName(
+    book.title,
+    book.user_book_id,
+    namespacePrefix,
+    pageNameMode,
+  )
   const startedAt = new Date()
   const renderRuntime = {
     format: 'org' as const,
@@ -123,7 +134,7 @@ export const syncRenderedDebugPage = async (
     buildPageRenderContext(normalizedBook, renderRuntime),
     createDebugHighlightUuid,
   )
-  const content = processBlockContent(renderedPage.emitResult.outputText)
+  const content = renderedPage.emitResult.outputText
   const createdPage = await createPageWithRenderedContent(pageName, content)
   if (!createdPage) return
 

@@ -57,6 +57,8 @@ const emitHighlightMainText = (
       ? `${highlight.tags.map((tag) => `  ,  [[${tag}]]`).join('')} `
       : ''
 
+  const noteSection = highlight.note ? ['', `* *Note*: ${highlight.note}`] : []
+
   return [
     `** ${highlight.text}${locationSuffix}`,
     ':PROPERTIES:',
@@ -64,15 +66,13 @@ const emitHighlightMainText = (
     `:tags: [[ReadwiseHighlights]]${tagSuffix}`,
     `:id: ${highlight.uuid}`,
     ':END:',
+    ...noteSection,
   ].join('\n')
 }
 
 const emitHighlightBlocks = (page: SemanticPage): EmittedBlock[] =>
   page.highlights.map((highlight) => ({
     text: emitHighlightMainText(highlight),
-    children: highlight.note
-      ? [{ text: `*Note*: ${highlight.note}` }]
-      : undefined,
   }))
 
 export const emitOrgPage = (page: SemanticPage): EmitResult => {
@@ -86,9 +86,7 @@ export const emitOrgPage = (page: SemanticPage): EmitResult => {
     metadataText,
     syncHeaderText,
     ...highlightBlocks.map((block) =>
-      [block.text, ...(block.children?.map((child) => child.text) ?? [])].join(
-        '\n',
-      ),
+      [block.text, ...(block.children?.map((child) => child.text) ?? [])].join('\n'),
     ),
   ].filter((part): part is string => typeof part === 'string' && part.length > 0)
 

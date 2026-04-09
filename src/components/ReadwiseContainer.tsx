@@ -26,6 +26,11 @@ import type {
 export const ReadwiseContainer = () => {
   const debugSyncMaxBooksLimit = 5
   const debugNamespaceRoot = 'ReadwiseDebug'
+  const isDebugPageTitle = (pageTitle: string) =>
+    pageTitle === debugNamespaceRoot ||
+    pageTitle.startsWith(`${debugNamespaceRoot}/`) ||
+    pageTitle.startsWith(`${debugNamespaceRoot}___`) ||
+    pageTitle.startsWith(`${debugNamespaceRoot}-`)
   const cancelledRef = useRef(false)
   const [propsReady, setPropsReady] = useState(
     () => !!logseq.settings?.propsConfigured,
@@ -65,20 +70,18 @@ export const ReadwiseContainer = () => {
     setStatusMessage(`Deleting ${debugNamespaceRoot} pages...`)
 
     try {
-      const pagesFromNamespace =
-        (await logseq.Editor.getPagesFromNamespace(debugNamespaceRoot)) ?? []
-      const rootPage = await logseq.Editor.getPage(debugNamespaceRoot)
+      const pages = (await logseq.Editor.getAllPages()) ?? []
 
       const pageNames = new Set<string>()
 
-      for (const page of pagesFromNamespace) {
+      for (const page of pages) {
         const pageName =
-          (typeof page.originalName === 'string' && page.originalName) ||
           (typeof page.name === 'string' && page.name) ||
+          (typeof page.originalName === 'string' && page.originalName) ||
           (typeof page.title === 'string' && page.title) ||
           ''
 
-        if (pageName.startsWith(`${debugNamespaceRoot}/`)) {
+        if (isDebugPageTitle(pageName)) {
           pageNames.add(pageName)
         }
       }
@@ -87,18 +90,11 @@ export const ReadwiseContainer = () => {
         await logseq.Editor.deletePage(pageName)
       }
 
-      if (rootPage) {
-        await logseq.Editor.deletePage(debugNamespaceRoot)
-      }
-
       setStatus('completed')
-      setStatusMessage(
-        `Deleted ${pageNames.size}${rootPage ? ' + namespace root' : ''} debug page(s).`,
-      )
+      setStatusMessage(`Deleted ${pageNames.size} debug page(s).`)
       console.info('[Readwise Sync] cleared debug pages', {
         namespacePrefix: debugNamespaceRoot,
         deletedPages: pageNames.size,
-        deletedRootPage: !!rootPage,
       })
     } catch (err: unknown) {
       console.error('[Readwise Sync] failed to clear debug pages', err)
@@ -293,7 +289,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleDebugSyncFromScratch = async () => {
-    const debugNamespacePrefix = `${debugNamespaceRoot}/${format(
+    const debugNamespacePrefix = `${debugNamespaceRoot}-${format(
       new Date(),
       'yyyyMMdd-HHmmss',
     )}`

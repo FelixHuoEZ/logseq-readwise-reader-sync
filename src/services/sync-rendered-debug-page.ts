@@ -40,6 +40,11 @@ const ensureDebugPage = async (
   }
 }
 
+const delay = async (ms: number) =>
+  new Promise((resolve) => {
+    window.setTimeout(resolve, ms)
+  })
+
 const toBatchChildren = (
   children: Array<{ text: string; children?: Array<{ text: string }> }> | undefined,
 ): IBatchBlock[] | undefined => {
@@ -60,18 +65,19 @@ const buildRenderedBatchBlocks = (
     blocks.push({ content: renderedPage.emitResult.metadataText })
   }
 
-  if (renderedPage.emitResult.syncHeaderText) {
-    blocks.push({ content: `* ${renderedPage.emitResult.syncHeaderText}` })
-  }
+  const highlightChildren = renderedPage.emitResult.highlightBlocks.map((block) => ({
+    content: block.text,
+    children: toBatchChildren(block.children),
+  }))
 
-  renderedPage.emitResult.highlightBlocks.forEach((block, index) => {
-    const semanticHighlight = renderedPage.semanticPage.highlights[index]
+  if (renderedPage.emitResult.syncHeaderText) {
     blocks.push({
-      content: block.text,
-      properties: semanticHighlight ? { id: semanticHighlight.uuid } : undefined,
-      children: toBatchChildren(block.children),
+      content: renderedPage.emitResult.syncHeaderText,
+      children: highlightChildren.length > 0 ? highlightChildren : undefined,
     })
-  })
+  } else {
+    blocks.push(...highlightChildren)
+  }
 
   return blocks
 }
@@ -102,35 +108,6 @@ const removeAllTopLevelBlocks = async (pageUuid: string): Promise<number> => {
   return existingBlocks.length
 }
 
-const insertFirstPageBlock = async (
-  page: PageEntity,
-  block: IBatchBlock,
-) => {
-  const primaryTarget = page.uuid
-  const firstBlock = await logseq.Editor.insertBlock(
-    primaryTarget,
-    block.content,
-    {
-      before: false,
-      properties: block.properties ?? {},
-      isPageBlock: true,
-    } as never,
-  )
-
-  if (firstBlock) return firstBlock
-
-  const fallbackTarget = page.originalName ?? page.name
-  return logseq.Editor.insertBlock(
-    fallbackTarget,
-    block.content,
-    {
-      before: false,
-      properties: block.properties ?? {},
-      isPageBlock: true,
-    } as never,
-  )
-}
-
 const applyRenderedBlocksToDebugPage = async (
   page: PageEntity,
   batchBlocks: IBatchBlock[],
@@ -138,23 +115,55 @@ const applyRenderedBlocksToDebugPage = async (
   if (batchBlocks.length === 0) return
 
   const removedBlocks = await removeAllTopLevelBlocks(page.uuid)
+  await delay(500)
+
+  const pageBlocksTree = await logseq.Editor.getPageBlocksTree(page.name)
   const [firstBatchBlock, ...restBatchBlocks] = batchBlocks
   if (!firstBatchBlock) return
 
-  const firstBlock = await insertFirstPageBlock(page, firstBatchBlock)
-  if (!firstBlock) {
-    throw new Error(`Failed to insert first debug block for page "${page.name}"`)
+  let rootBlockUuid: string | null = null
+
+  if (pageBlocksTree !== null && pageBlocksTree.length === 0) {
+    const firstBlock = await logseq.Editor.insertBlock(
+      page.uuid,
+      firstBatchBlock.content,
+      {
+        before: false,
+        isPageBlock: true,
+        properties: firstBatchBlock.properties ?? {},
+      } as never,
+    )
+
+    if (!firstBlock) {
+      throw new Error(`Failed to insert first debug block for page "${page.name}"`)
+    }
+
+    rootBlockUuid = firstBlock.uuid
+  } else if (pageBlocksTree !== null && pageBlocksTree.length === 1) {
+    const implicitFirst = pageBlocksTree[0]
+    if (!implicitFirst) {
+      throw new Error(`Failed to resolve implicit first debug block for page "${page.name}"`)
+    }
+
+    await logseq.Editor.updateBlock(
+      implicitFirst.uuid,
+      `${implicitFirst.content}\n${firstBatchBlock.content}`,
+      {
+        properties: firstBatchBlock.properties ?? {},
+      },
+    )
+
+    rootBlockUuid = implicitFirst.uuid
+  } else {
+    throw new Error(
+      `Unexpected debug page state for "${page.name}": ${pageBlocksTree?.length ?? 'null'} top-level blocks`,
+    )
   }
 
-  if (firstBatchBlock.children && firstBatchBlock.children.length > 0) {
-    await logseq.Editor.insertBatchBlock(firstBlock.uuid, firstBatchBlock.children, {
-      keepUUID: true,
-    })
-  }
-
-  if (restBatchBlocks.length > 0) {
-    await logseq.Editor.insertBatchBlock(firstBlock.uuid, restBatchBlocks, {
-      sibling: true,
+  if (rootBlockUuid && restBatchBlocks.length > 0) {
+    await logseq.Editor.insertBatchBlock(rootBlockUuid, restBatchBlocks, {
+      sibling: false,
+      before: true,
       keepUUID: true,
     })
   }
@@ -163,6 +172,7 @@ const applyRenderedBlocksToDebugPage = async (
     pageName: page.originalName ?? page.name,
     removedBlocks,
     insertedBlocks: batchBlocks.length,
+    postCreateTreeLength: pageBlocksTree?.length ?? null,
   })
 }
 

@@ -58,7 +58,7 @@ const emitHighlightMainText = (
       : ''
 
   return [
-    `${highlight.text}${locationSuffix}`,
+    `** ${highlight.text}${locationSuffix}`,
     ':PROPERTIES:',
     `:created: [[${highlight.createdDate}]]`,
     `:tags: [[ReadwiseHighlights]]${tagSuffix}`,
@@ -78,6 +78,8 @@ const emitHighlightBlocks = (page: SemanticPage): EmittedBlock[] =>
 export const emitOrgPage = (page: SemanticPage): EmitResult => {
   const metadataText = emitMetadataText(page)
   const syncHeaderText = page.syncHeader.text
+    ? `* ${page.syncHeader.text}`
+    : ''
   const highlightBlocks = emitHighlightBlocks(page)
 
   const outputParts = [

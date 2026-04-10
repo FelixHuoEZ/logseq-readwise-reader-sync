@@ -11,6 +11,7 @@ import {
 } from '../graph'
 import {
   backupFormalTestPages,
+  clearManagedPagesBySessionNamespaceRoot,
   clearFormalTestPages,
   loadActiveFormalTestSessionManifestV1,
   restoreLatestFormalTestPageBackup,
@@ -255,6 +256,7 @@ export const ReadwiseContainer = () => {
       )
 
       const sessionId = format(new Date(), 'yyyyMMdd-HHmmss')
+      const formalTestNamespacePrefix = `${formalNamespaceRoot}/${sessionId}`
       const backupStoragePrefix = `formal-page-backups/${sessionId}`
       await saveFormalTestSessionManifestV1({
         schemaVersion: 1,
@@ -262,7 +264,7 @@ export const ReadwiseContainer = () => {
         createdAt: new Date().toISOString(),
         graphName: (await logseq.App.getCurrentGraph())?.name ?? null,
         graphPath: (await logseq.App.getCurrentGraph())?.path ?? null,
-        namespacePrefix: formalNamespaceRoot,
+        namespacePrefix: formalTestNamespacePrefix,
         updatedAfter,
         maxBooks,
         books: books.map((book) => ({
@@ -291,11 +293,12 @@ export const ReadwiseContainer = () => {
       setStatus('completed')
       setStatusMessage(
         result.touchedPages > 0
-          ? `Backed up and removed ${result.touchedPages} formal test page(s) to ${result.backupDirectory}. Formal test session is now active.`
+          ? `Backed up and removed ${result.touchedPages} formal test page(s) to ${result.backupDirectory}. Formal test session is now active in ${formalTestNamespacePrefix}.`
           : 'No formal test pages were backed up.',
       )
       console.info('[Readwise Sync] backed up formal test pages', {
         sessionId,
+        formalTestNamespacePrefix,
         targetedBooks: result.targetedBooks,
         matchedPages: result.matchedPages,
         backedUpPages: result.touchedPages,
@@ -421,6 +424,62 @@ export const ReadwiseContainer = () => {
     }
   }
 
+  const handleClearSessionTestPages = async () => {
+    setErrors([])
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage('Resolving active session test pages to delete...')
+
+    try {
+      const activeFormalTestSession = await loadActiveFormalTestSessionManifestV1()
+
+      setStatus('syncing')
+      setCurrent(0)
+      setTotal(activeFormalTestSession?.books.length ?? 0)
+      setStatusMessage(
+        `Deleting session test page(s) under ${formalNamespaceRoot}/<run-id>/...`,
+      )
+
+      const result = await clearManagedPagesBySessionNamespaceRoot(
+        formalNamespaceRoot,
+      )
+      await refreshActiveFormalTestSessionCount()
+      setCurrent(activeFormalTestSession?.books.length ?? 0)
+
+      if (result.skippedPages.length > 0) {
+        setErrors(
+          result.skippedPages.map((pageTitle) => ({
+            book: pageTitle,
+            message: 'Delete failed for this session test page.',
+          })),
+        )
+      }
+
+      setStatus('completed')
+      setStatusMessage(
+        result.touchedPages > 0
+          ? `Deleted ${result.touchedPages} session test page(s) under ${formalNamespaceRoot}/<run-id>/.`
+          : 'No session test pages were deleted.',
+      )
+      console.info('[Readwise Sync] cleared session test pages', {
+        sessionId: activeFormalTestSession?.sessionId ?? null,
+        targetedBooks: result.targetedBooks,
+        matchedPages: result.matchedPages,
+        deletedPages: result.touchedPages,
+        skippedPages: result.skippedPages,
+        namespaceRoot: formalNamespaceRoot,
+      })
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to clear session test pages', err)
+      setStatus('error')
+      setStatusMessage(
+        `Clear failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
   const handleClearDebugPages = async () => {
     setErrors([])
     setCurrent(0)
@@ -527,6 +586,7 @@ export const ReadwiseContainer = () => {
         ? Math.floor(maxBooksOverride)
         : null
     const effectiveNamespacePrefix =
+      activeFormalTestSession?.namespacePrefix ??
       namespacePrefix ??
       (renderedDebugPages ? debugNamespaceRoot : formalNamespaceRoot)
     const formalTestBookIds = activeFormalTestSession?.books.map(
@@ -748,10 +808,9 @@ export const ReadwiseContainer = () => {
   const isBusy = status === 'fetching' || status === 'syncing'
   const configuredSyncMaxBooks =
     resolveConfiguredSyncMaxBooks() ?? debugSyncMaxBooksLimit
-  const limitedSyncLabel =
-    activeFormalTestSessionCount != null
-      ? `Start Sync (Session test: ${activeFormalTestSessionCount})`
-      : `Start Sync (${configuredSyncMaxBooks})`
+  const sessionTestSyncCount =
+    activeFormalTestSessionCount ?? configuredSyncMaxBooks
+  const sessionTestSyncLabel = `Start Sync (session test: ${sessionTestSyncCount})`
   const handleClose = () => {
     if (!isBusy) {
       resetUiState()
@@ -830,39 +889,60 @@ export const ReadwiseContainer = () => {
             </button>
           )}
           {propsReady && status === 'idle' && (
-            <button className="rw-btn rw-btn-primary" onClick={handleLimitedSync}>
-              {limitedSyncLabel}
-            </button>
-          )}
-          {propsReady && status === 'idle' && (
-            <button className="rw-btn" onClick={handleSync}>
-              Start Sync
-            </button>
-          )}
-          {propsReady && status === 'idle' && (
-            <button className="rw-btn" onClick={handleDebugSyncFromScratch}>
-              Start Debug Sync (5)
-            </button>
-          )}
-          {propsReady && status === 'idle' && (
-            <button className="rw-btn" onClick={handleBackupFormalTestPages}>
-              Backup Test Pages
-            </button>
-          )}
-          {propsReady && status === 'idle' && (
-            <button className="rw-btn" onClick={handleRestoreTestPages}>
-              Restore Test Pages
-            </button>
-          )}
-          {showAdvancedFormalTestActions && propsReady && status === 'idle' && (
-            <button className="rw-btn" onClick={handleClearFormalTestPages}>
-              Clear Formal Test Pages
-            </button>
-          )}
-          {propsReady && status === 'idle' && (
-            <button className="rw-btn" onClick={handleClearDebugPages}>
-              Clear Debug Pages
-            </button>
+            <div className="rw-action-groups">
+              <div className="rw-action-group">
+                <div className="rw-action-group-label">
+                  Formal Sync
+                </div>
+                <div className="rw-action-row">
+                  <button className="rw-btn rw-btn-primary" onClick={handleSync}>
+                    Start Sync
+                  </button>
+                  <button className="rw-btn" onClick={handleClose}>
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              <div className="rw-action-group">
+                <div className="rw-action-group-label">
+                  Real UUID Test
+                </div>
+                <div className="rw-action-row">
+                  <button className="rw-btn" onClick={handleLimitedSync}>
+                    {sessionTestSyncLabel}
+                  </button>
+                  <button className="rw-btn" onClick={handleBackupFormalTestPages}>
+                    Backup Test Pages
+                  </button>
+                  <button className="rw-btn" onClick={handleRestoreTestPages}>
+                    Restore Test Pages
+                  </button>
+                  <button className="rw-btn" onClick={handleClearSessionTestPages}>
+                    Clear Session Test Pages
+                  </button>
+                  {showAdvancedFormalTestActions && (
+                    <button className="rw-btn" onClick={handleClearFormalTestPages}>
+                      Clear Formal Test Pages
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="rw-action-group">
+                <div className="rw-action-group-label">
+                  Fake UUID Test
+                </div>
+                <div className="rw-action-row">
+                  <button className="rw-btn" onClick={handleDebugSyncFromScratch}>
+                    Start Debug Sync (5)
+                  </button>
+                  <button className="rw-btn" onClick={handleClearDebugPages}>
+                    Clear Debug Pages
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
           {isBusy && (
             <button className="rw-btn" onClick={handleCancel}>
@@ -879,9 +959,11 @@ export const ReadwiseContainer = () => {
               Retry
             </button>
           )}
-          <button className="rw-btn" onClick={handleClose}>
-            Close
-          </button>
+          {status !== 'idle' && (
+            <button className="rw-btn" onClick={handleClose}>
+              Close
+            </button>
+          )}
         </div>
       </div>
     </div>

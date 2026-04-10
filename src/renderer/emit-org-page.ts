@@ -57,16 +57,21 @@ const emitHighlightMainText = (
       ? `${highlight.tags.map((tag) => `  ,  [[${tag}]]`).join('')} `
       : ''
 
-  const noteSection = highlight.note ? ['', `* *Note*: ${highlight.note}`] : []
+  const [firstLine = '', ...restLines] = highlight.text.split('\n')
+  const restText = restLines.join('\n')
+  const noteSection = highlight.note ? [`* *Note*: ${highlight.note}`] : []
+  const trailingSections = [restText, ...noteSection].filter(
+    (section): section is string => section.length > 0,
+  )
 
   return [
-    `** ${highlight.text}${locationSuffix}`,
+    `** ${firstLine}${locationSuffix}`,
     ':PROPERTIES:',
     `:created: [[${highlight.createdDate}]]`,
     `:tags: [[ReadwiseHighlights]]${tagSuffix}`,
     `:id: ${highlight.uuid}`,
     ':END:',
-    ...noteSection,
+    ...trailingSections.flatMap((section) => ['', section]),
   ].join('\n')
 }
 
@@ -81,14 +86,16 @@ export const emitOrgPage = (page: SemanticPage): EmitResult => {
     ? `* ${page.syncHeader.text}`
     : ''
   const highlightBlocks = emitHighlightBlocks(page)
+  const highlightTexts = highlightBlocks.map((block) =>
+    [block.text, ...(block.children?.map((child) => child.text) ?? [])].join('\n'),
+  )
+  const contentText = [syncHeaderText, ...highlightTexts]
+    .filter((part): part is string => typeof part === 'string' && part.length > 0)
+    .join('\n')
 
-  const outputParts = [
-    metadataText,
-    syncHeaderText,
-    ...highlightBlocks.map((block) =>
-      [block.text, ...(block.children?.map((child) => child.text) ?? [])].join('\n'),
-    ),
-  ].filter((part): part is string => typeof part === 'string' && part.length > 0)
+  const outputParts = [metadataText, contentText].filter(
+    (part): part is string => typeof part === 'string' && part.length > 0,
+  )
 
   return {
     format: 'org',

@@ -63,6 +63,12 @@ const collectPageAliases = (page: PageEntity | null): string[] => {
   ])
 }
 
+const findPageByExpectedName = (
+  expectedPageName: string,
+  pages: PageEntity[],
+): PageEntity | null =>
+  pages.find((page) => collectPageAliases(page).includes(expectedPageName)) ?? null
+
 const resolvePageFilePath = async (
   pageName: string,
   expectedFormat: 'org' | 'markdown' | null,
@@ -95,6 +101,9 @@ const deletePageByAliases = async (aliases: string[]): Promise<boolean> => {
 
   return false
 }
+
+const uniqueStrings = (values: string[]) =>
+  values.filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
 
 const buildBackupStoragePrefix = () =>
   `formal-page-backups/${format(new Date(), 'yyyyMMdd-HHmmss')}`
@@ -186,10 +195,13 @@ export const backupFormalTestPages = async (
   const skippedPages: string[] = []
   let matchedPages = 0
   let backedUpPages = 0
+  const allPages = (await logseq.Editor.getAllPages()) ?? []
 
   for (const book of books) {
     const pageName = buildFormalManagedPageName(book.title, namespacePrefix)
-    const page = await logseq.Editor.getPage(pageName)
+    const page =
+      (await logseq.Editor.getPage(pageName)) ??
+      findPageByExpectedName(pageName, allPages)
     const aliases = collectPageAliases(page)
 
     if (!page || aliases.length === 0) continue
@@ -241,10 +253,13 @@ export const clearFormalTestPages = async (
   const skippedPages: string[] = []
   let matchedPages = 0
   let deletedPages = 0
+  const allPages = (await logseq.Editor.getAllPages()) ?? []
 
   for (const book of books) {
     const pageName = buildFormalManagedPageName(book.title, namespacePrefix)
-    const page = await logseq.Editor.getPage(pageName)
+    const page =
+      (await logseq.Editor.getPage(pageName)) ??
+      findPageByExpectedName(pageName, allPages)
     const aliases = collectPageAliases(page)
 
     if (!page || aliases.length === 0) continue
@@ -263,6 +278,107 @@ export const clearFormalTestPages = async (
   return {
     targetedBooks: books.length,
     matchedPages,
+    touchedPages: deletedPages,
+    backupDirectory: null,
+    skippedPages,
+  }
+}
+
+export const clearManagedPagesByNamespacePrefix = async (
+  namespacePrefix: string,
+): Promise<FormalTestPageActionResult> => {
+  const pages = (await logseq.Editor.getAllPages()) ?? []
+  const skippedPages: string[] = []
+  const matchedPageNames = new Set<string>()
+  const deleteTargets: string[] = []
+
+  for (const page of pages) {
+    const aliases = collectPageAliases(page)
+    const isMatch = aliases.some(
+      (alias) => alias === namespacePrefix || alias.startsWith(`${namespacePrefix}/`),
+    )
+
+    if (!isMatch) continue
+
+    for (const alias of aliases) {
+      if (alias === namespacePrefix || alias.startsWith(`${namespacePrefix}/`)) {
+        matchedPageNames.add(alias)
+      }
+    }
+
+    deleteTargets.push(...aliases)
+  }
+
+  const uniqueDeleteTargets = uniqueStrings(deleteTargets)
+  let deletedPages = 0
+
+  for (const pageAlias of uniqueDeleteTargets) {
+    try {
+      await logseq.Editor.deletePage(pageAlias)
+      deletedPages += 1
+    } catch {
+      // Continue trying other aliases; one of them is usually accepted.
+    }
+  }
+
+  if (deletedPages === 0 && matchedPageNames.size > 0) {
+    skippedPages.push(...Array.from(matchedPageNames))
+  }
+
+  return {
+    targetedBooks: 0,
+    matchedPages: matchedPageNames.size,
+    touchedPages: deletedPages,
+    backupDirectory: null,
+    skippedPages,
+  }
+}
+
+export const clearManagedPagesBySessionNamespaceRoot = async (
+  namespaceRoot: string,
+): Promise<FormalTestPageActionResult> => {
+  const pages = (await logseq.Editor.getAllPages()) ?? []
+  const skippedPages: string[] = []
+  const matchedPageNames = new Set<string>()
+  const deleteTargets: string[] = []
+  const sessionNamespacePattern = new RegExp(
+    `^${namespaceRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/\\d{8}-\\d{6}(?:/|$)`,
+  )
+
+  for (const page of pages) {
+    const aliases = collectPageAliases(page)
+    const isMatch = aliases.some((alias) => sessionNamespacePattern.test(alias))
+
+    if (!isMatch) continue
+
+    for (const alias of aliases) {
+      if (sessionNamespacePattern.test(alias)) {
+        matchedPageNames.add(alias)
+      }
+    }
+
+    deleteTargets.push(...aliases)
+  }
+
+  const uniqueDeleteTargets = uniqueStrings(deleteTargets)
+  let deletedPages = 0
+
+  for (const pageAlias of uniqueDeleteTargets) {
+    try {
+      await logseq.Editor.deletePage(pageAlias)
+      deletedPages += 1
+    } catch {
+      // Continue trying other aliases; one of them is usually accepted.
+    }
+  }
+
+  if (deletedPages === 0 && matchedPageNames.size > 0) {
+    skippedPages.push(...Array.from(matchedPageNames))
+  }
+
+  return {
+    targetedBooks: 0,
+    matchedPages: matchedPageNames.size,
     touchedPages: deletedPages,
     backupDirectory: null,
     skippedPages,

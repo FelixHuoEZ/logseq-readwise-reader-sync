@@ -4,19 +4,7 @@ import { format } from 'date-fns'
 import { normalizeBookExport } from '../normalizer'
 import { buildPageRenderContext, renderPage } from '../renderer'
 import type { ExportedBook } from '../types'
-
-const buildDebugPageName = (
-  bookTitle: string,
-  userBookId: number,
-  namespacePrefix: string,
-  mode: 'flat' | 'namespace' = 'flat',
-): string =>
-  mode === 'namespace'
-    ? `${namespacePrefix}/${bookTitle
-        .replaceAll('\\', '＼')
-        .replaceAll('/', '／')
-        .trim()}`
-    : `${namespacePrefix}-book-${userBookId}`
+import { buildDebugManagedPageName } from './readwise-page-names'
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
@@ -116,7 +104,7 @@ export const syncRenderedDebugPage = async (
   pageNameMode: 'flat' | 'namespace' = 'flat',
 ) => {
   const normalizedBook = normalizeBookExport(book)
-  const pageName = buildDebugPageName(
+  const pageName = buildDebugManagedPageName(
     book.title,
     book.user_book_id,
     namespacePrefix,

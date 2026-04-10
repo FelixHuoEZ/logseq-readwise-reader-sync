@@ -51,6 +51,8 @@ export interface ExportedBook {
   highlights: ExportedHighlight[]
 }
 
+export type ExportedBookIdentity = Pick<ExportedBook, 'user_book_id' | 'title'>
+
 export interface ReadwisePageProp {
   key: string
   schema: {

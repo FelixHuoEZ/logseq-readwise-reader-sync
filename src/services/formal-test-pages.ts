@@ -1,0 +1,349 @@
+import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
+import { format } from 'date-fns'
+
+import type { ExportedBookIdentity } from '../types'
+import {
+  buildFormalManagedPageName,
+  buildManagedPageFileStem,
+} from './readwise-page-names'
+import { upsertSingleRootPageContentV1 } from './single-root-page-content'
+
+interface FormalTestPageActionResult {
+  targetedBooks: number
+  matchedPages: number
+  touchedPages: number
+  backupDirectory: string | null
+  skippedPages: string[]
+}
+
+export interface FormalTestSessionManifestV1 {
+  schemaVersion: 1
+  sessionId: string
+  createdAt: string
+  graphName: string | null
+  graphPath: string | null
+  namespacePrefix: string
+  updatedAfter: string | null
+  maxBooks: number | null
+  books: Array<{
+    userBookId: number
+    title: string
+  }>
+  backupStoragePrefix: string
+}
+
+interface StoredFormalPageBackupV1 {
+  schemaVersion: 1
+  capturedAt: string
+  graphName: string | null
+  graphPath: string | null
+  pageName: string
+  pageAliases: string[]
+  relativeFilePath: string | null
+  captureMode: 'raw_file' | 'page_tree'
+  rawContent?: string
+  pageTree?: BlockEntity[] | null
+}
+
+const ACTIVE_FORMAL_TEST_SESSION_KEY = 'formal-test-sessions/active.json'
+
+const buildFormalTestSessionKey = (sessionId: string) =>
+  `formal-test-sessions/${sessionId}.json`
+
+const uniqueValues = (values: string[]): string[] =>
+  values.filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
+
+const collectPageAliases = (page: PageEntity | null): string[] => {
+  if (!page) return []
+
+  return uniqueValues([
+    typeof page.originalName === 'string' ? page.originalName : '',
+    typeof page.name === 'string' ? page.name : '',
+    typeof page.title === 'string' ? page.title : '',
+  ])
+}
+
+const resolvePageFilePath = async (
+  pageName: string,
+  expectedFormat: 'org' | 'markdown' | null,
+): Promise<string | null> => {
+  const assets = await logseq.Assets.listFilesOfCurrentGraph(['org', 'md'])
+  const expectedStem = `pages/${buildManagedPageFileStem(pageName)}`
+  const preferredExtensions =
+    expectedFormat === 'markdown' ? ['md', 'org'] : ['org', 'md']
+
+  for (const extension of preferredExtensions) {
+    const exact = assets.find((asset) => asset.path === `${expectedStem}.${extension}`)
+    if (exact) {
+      return exact.path
+    }
+  }
+
+  const fallback = assets.find((asset) => asset.path.startsWith(`${expectedStem}.`))
+  return fallback?.path ?? null
+}
+
+const deletePageByAliases = async (aliases: string[]): Promise<boolean> => {
+  for (const alias of aliases) {
+    try {
+      await logseq.Editor.deletePage(alias)
+      return true
+    } catch {
+      // Keep trying aliases until one is accepted by the current runtime.
+    }
+  }
+
+  return false
+}
+
+const buildBackupStoragePrefix = () =>
+  `formal-page-backups/${format(new Date(), 'yyyyMMdd-HHmmss')}`
+
+const buildBackupStorageKey = (prefix: string, pageName: string): string =>
+  `${prefix}/${buildManagedPageFileStem(pageName)}.json`
+
+export const saveFormalTestSessionManifestV1 = async (
+  manifest: FormalTestSessionManifestV1,
+) => {
+  const payload = JSON.stringify(manifest, null, 2)
+  await logseq.FileStorage.setItem(
+    buildFormalTestSessionKey(manifest.sessionId),
+    payload,
+  )
+  await logseq.FileStorage.setItem(ACTIVE_FORMAL_TEST_SESSION_KEY, payload)
+}
+
+export const loadActiveFormalTestSessionManifestV1 =
+  async (): Promise<FormalTestSessionManifestV1 | null> => {
+    const raw = await logseq.FileStorage.getItem(ACTIVE_FORMAL_TEST_SESSION_KEY)
+    if (typeof raw !== 'string') return null
+
+    const manifest = JSON.parse(raw) as FormalTestSessionManifestV1
+    if (manifest.schemaVersion !== 1) return null
+
+    const graph = await logseq.App.getCurrentGraph()
+    if (manifest.graphPath && graph?.path && manifest.graphPath !== graph.path) {
+      return null
+    }
+
+    return manifest
+  }
+
+export const clearActiveFormalTestSessionManifestV1 = async () => {
+  const exists = await logseq.FileStorage.hasItem(ACTIVE_FORMAL_TEST_SESSION_KEY)
+  if (exists) {
+    await logseq.FileStorage.removeItem(ACTIVE_FORMAL_TEST_SESSION_KEY)
+  }
+}
+
+const captureFormalPageBackup = async (
+  pageName: string,
+  pageAliases: string[],
+  relativeFilePath: string | null,
+): Promise<StoredFormalPageBackupV1> => {
+  const graph = await logseq.App.getCurrentGraph()
+  const rawContent =
+    relativeFilePath == null
+      ? null
+      : await logseq.DB.getFileContent(relativeFilePath).catch(() => null)
+
+  if (typeof rawContent === 'string') {
+    return {
+      schemaVersion: 1,
+      capturedAt: new Date().toISOString(),
+      graphName: graph?.name ?? null,
+      graphPath: graph?.path ?? null,
+      pageName,
+      pageAliases,
+      relativeFilePath,
+      captureMode: 'raw_file',
+      rawContent,
+    }
+  }
+
+  const pageTree = await logseq.Editor.getPageBlocksTree(pageName)
+  return {
+    schemaVersion: 1,
+    capturedAt: new Date().toISOString(),
+    graphName: graph?.name ?? null,
+    graphPath: graph?.path ?? null,
+    pageName,
+    pageAliases,
+    relativeFilePath,
+    captureMode: 'page_tree',
+    pageTree,
+  }
+}
+
+export const backupFormalTestPages = async (
+  books: ExportedBookIdentity[],
+  namespacePrefix = 'ReadwiseHighlights',
+  options: {
+    storagePrefix?: string
+  } = {},
+): Promise<FormalTestPageActionResult> => {
+  const storagePrefix = options.storagePrefix ?? buildBackupStoragePrefix()
+  const skippedPages: string[] = []
+  let matchedPages = 0
+  let backedUpPages = 0
+
+  for (const book of books) {
+    const pageName = buildFormalManagedPageName(book.title, namespacePrefix)
+    const page = await logseq.Editor.getPage(pageName)
+    const aliases = collectPageAliases(page)
+
+    if (!page || aliases.length === 0) continue
+
+    matchedPages += 1
+
+    const relativeFilePath = await resolvePageFilePath(pageName, page.format ?? null)
+    const backupPayload = await captureFormalPageBackup(
+      pageName,
+      aliases,
+      relativeFilePath,
+    )
+    const backupKey = buildBackupStorageKey(storagePrefix, pageName)
+
+    await logseq.FileStorage.setItem(
+      backupKey,
+      JSON.stringify(backupPayload, null, 2),
+    )
+
+    const deleted = await deletePageByAliases(aliases)
+    if (!deleted) {
+      skippedPages.push(pageName)
+      console.warn(
+        '[Readwise Sync] stored formal test page backup but failed to delete page',
+        {
+          pageName,
+          backupKey,
+        },
+      )
+      continue
+    }
+
+    backedUpPages += 1
+  }
+
+  return {
+    targetedBooks: books.length,
+    matchedPages,
+    touchedPages: backedUpPages,
+    backupDirectory: `plugin-storage://${storagePrefix}`,
+    skippedPages,
+  }
+}
+
+export const clearFormalTestPages = async (
+  books: ExportedBookIdentity[],
+  namespacePrefix = 'ReadwiseHighlights',
+): Promise<FormalTestPageActionResult> => {
+  const skippedPages: string[] = []
+  let matchedPages = 0
+  let deletedPages = 0
+
+  for (const book of books) {
+    const pageName = buildFormalManagedPageName(book.title, namespacePrefix)
+    const page = await logseq.Editor.getPage(pageName)
+    const aliases = collectPageAliases(page)
+
+    if (!page || aliases.length === 0) continue
+
+    matchedPages += 1
+    const deleted = await deletePageByAliases(aliases)
+
+    if (!deleted) {
+      skippedPages.push(pageName)
+      continue
+    }
+
+    deletedPages += 1
+  }
+
+  return {
+    targetedBooks: books.length,
+    matchedPages,
+    touchedPages: deletedPages,
+    backupDirectory: null,
+    skippedPages,
+  }
+}
+
+const flattenBlockTreeToText = (blocks: BlockEntity[] | null | undefined): string => {
+  if (!Array.isArray(blocks) || blocks.length === 0) return ''
+
+  const parts: string[] = []
+
+  const visit = (block: BlockEntity) => {
+    if (typeof block.content === 'string' && block.content.length > 0) {
+      parts.push(block.content)
+    }
+
+    for (const child of block.children ?? []) {
+      if (Array.isArray(child)) continue
+      visit(child)
+    }
+  }
+
+  for (const block of blocks) {
+    visit(block)
+  }
+
+  return parts.join('\n\n')
+}
+
+export const restoreLatestFormalTestPageBackup = async (): Promise<FormalTestPageActionResult> => {
+  const activeSession = await loadActiveFormalTestSessionManifestV1()
+
+  if (!activeSession) {
+    return {
+      targetedBooks: 0,
+      matchedPages: 0,
+      touchedPages: 0,
+      backupDirectory: null,
+      skippedPages: [],
+    }
+  }
+
+  const latestTimestamp =
+    activeSession.backupStoragePrefix.split('/').at(-1) ?? activeSession.sessionId
+  const allKeys = await logseq.FileStorage.allKeys()
+  const latestKeys = allKeys.filter((key) =>
+    key.startsWith(`${activeSession.backupStoragePrefix}/`),
+  )
+
+  let matchedPages = 0
+  let restoredPages = 0
+  const skippedPages: string[] = []
+
+  for (const key of latestKeys) {
+    const rawBackup = await logseq.FileStorage.getItem(key)
+    if (typeof rawBackup !== 'string') continue
+
+    const parsed = JSON.parse(rawBackup) as StoredFormalPageBackupV1
+    matchedPages += 1
+
+    const restoreContent =
+      parsed.captureMode === 'raw_file'
+        ? parsed.rawContent ?? ''
+        : flattenBlockTreeToText(parsed.pageTree)
+
+    if (restoreContent.length === 0) {
+      skippedPages.push(parsed.pageName)
+      continue
+    }
+
+    await upsertSingleRootPageContentV1(parsed.pageName, restoreContent)
+    restoredPages += 1
+  }
+
+  await clearActiveFormalTestSessionManifestV1()
+
+  return {
+    targetedBooks: latestKeys.length,
+    matchedPages,
+    touchedPages: restoredPages,
+    backupDirectory: `plugin-storage://formal-page-backups/${latestTimestamp}`,
+    skippedPages,
+  }
+}

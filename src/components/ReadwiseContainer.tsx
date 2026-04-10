@@ -10,14 +10,19 @@ import {
   saveGraphCheckpointStateV1,
 } from '../graph'
 import {
-  buildBookIdToPageMap,
+  backupFormalTestPages,
+  clearFormalTestPages,
+  loadActiveFormalTestSessionManifestV1,
+  restoreLatestFormalTestPageBackup,
+  saveFormalTestSessionManifestV1,
   setupProps,
-  syncBook,
   syncRenderedDebugPage,
+  syncRenderedPage,
 } from '../services'
 import { deriveNextUpdatedAfterV1 } from '../sync'
 import type {
   ExportedBook,
+  ExportedBookIdentity,
   ExportParams,
   ExportResponse,
   SyncStatus,
@@ -26,6 +31,8 @@ import type {
 export const ReadwiseContainer = () => {
   const debugSyncMaxBooksLimit = 5
   const debugNamespaceRoot = 'ReadwiseDebug'
+  const formalNamespaceRoot = 'ReadwiseHighlights'
+  const showAdvancedFormalTestActions = false
   const isDebugPageTitle = (pageTitle: string) =>
     pageTitle === debugNamespaceRoot ||
     pageTitle.startsWith(`${debugNamespaceRoot}/`) ||
@@ -41,6 +48,16 @@ export const ReadwiseContainer = () => {
   const [currentBook, setCurrentBook] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
   const [errors, setErrors] = useState<{ book: string; message: string }[]>([])
+
+  const resetUiState = () => {
+    cancelledRef.current = false
+    setStatus('idle')
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatusMessage('')
+    setErrors([])
+  }
 
   const handleSetupProps = async () => {
     const result = await setupProps()
@@ -59,6 +76,336 @@ export const ReadwiseContainer = () => {
     setStatus('idle')
     setStatusMessage('Sync cancelled.')
     setCurrentBook('')
+  }
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, ms)
+    })
+
+  const exportHighlightsWithRetry = async (
+    client: ReturnType<typeof createReadwiseClient>,
+    params: ExportParams,
+    context: 'formal-test-books' | 'sync',
+  ) => {
+    let lastError: unknown = null
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await client.exportHighlights(params)
+      } catch (error) {
+        lastError = error
+        const message = error instanceof Error ? error.message : String(error)
+        const isRetriable =
+          error instanceof TypeError ||
+          /Failed to fetch|NetworkError|ERR_CONNECTION_CLOSED/i.test(message)
+
+        if (!isRetriable || attempt === 2) {
+          throw error
+        }
+
+        console.warn('[Readwise Sync] transient export fetch failed; retrying', {
+          context,
+          attempt: attempt + 1,
+          params,
+          message,
+        })
+        setStatusMessage(
+          `Readwise request failed (${message}). Retrying ${attempt + 1}/2...`,
+        )
+        await sleep(1000 * (attempt + 1))
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError))
+  }
+
+  const resolveConfiguredSyncMaxBooks = () => {
+    const rawDebugSyncMaxBooks = Number(logseq.settings?.debugSyncMaxBooks ?? 20)
+    return Number.isFinite(rawDebugSyncMaxBooks) && rawDebugSyncMaxBooks > 0
+      ? Math.floor(rawDebugSyncMaxBooks)
+      : null
+  }
+
+  const loadFormalTestBooks = async () => {
+    const token = logseq.settings?.apiToken as string
+    if (!token) {
+      throw new Error('No API token configured. Set it in plugin settings.')
+    }
+
+    const activeFormalTestSession = await loadActiveFormalTestSessionManifestV1()
+    if (activeFormalTestSession && activeFormalTestSession.books.length > 0) {
+      const frozenBooks: ExportedBookIdentity[] = activeFormalTestSession.books.map(
+        (book) => ({
+          user_book_id: book.userBookId,
+          title: book.title,
+        }),
+      )
+
+      setTotal(frozenBooks.length)
+      setStatusMessage(
+        `Using active formal test session (${frozenBooks.length} frozen book(s)).`,
+      )
+      console.info('[Readwise Sync] using active formal test session for formal page selection', {
+        sessionId: activeFormalTestSession.sessionId,
+        namespacePrefix: formalNamespaceRoot,
+        updatedAfter: activeFormalTestSession.updatedAfter,
+        maxBooks: activeFormalTestSession.maxBooks,
+        frozenBooks: frozenBooks.length,
+      })
+
+      return {
+        books: frozenBooks,
+        checkpointBeforeRun: await loadGraphCheckpointStateV1(),
+        updatedAfter: activeFormalTestSession.updatedAfter,
+        maxBooks: activeFormalTestSession.maxBooks,
+      }
+    }
+
+    const checkpointBeforeRun = await loadGraphCheckpointStateV1()
+    const updatedAfter = checkpointBeforeRun?.updatedAfter ?? undefined
+    const maxBooks = resolveConfiguredSyncMaxBooks()
+    const client = createReadwiseClient(token)
+    const books: ExportedBookIdentity[] = []
+    let cursor: string | null = null
+
+    console.info('[Readwise Sync] loading formal test books', {
+      namespacePrefix: formalNamespaceRoot,
+      updatedAfter: updatedAfter ?? null,
+      maxBooks,
+    })
+
+    do {
+      const params: ExportParams = {}
+      if (updatedAfter) params.updatedAfter = updatedAfter
+      if (cursor) params.pageCursor = cursor
+
+      const page: ExportResponse = await exportHighlightsWithRetry(
+        client,
+        params,
+        'formal-test-books',
+      )
+      books.push(
+        ...page.results.map((book) => ({
+          user_book_id: book.user_book_id,
+          title: book.title,
+        })),
+      )
+
+      if (maxBooks != null && books.length > maxBooks) {
+        books.length = maxBooks
+      }
+
+      setTotal(books.length)
+      setStatusMessage(
+        maxBooks != null
+          ? `Fetched ${books.length} / ${maxBooks} formal test book(s) so far...`
+          : `Fetched ${books.length} formal test book(s) so far...`,
+      )
+
+      if (maxBooks != null && books.length >= maxBooks) {
+        cursor = null
+        break
+      }
+
+      cursor = page.nextPageCursor
+    } while (cursor)
+
+    return {
+      books,
+      checkpointBeforeRun,
+      updatedAfter: updatedAfter ?? null,
+      maxBooks,
+    }
+  }
+
+  const handleBackupFormalTestPages = async () => {
+    setErrors([])
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage('Resolving formal test pages to back up...')
+
+    try {
+      const { books, updatedAfter, maxBooks } = await loadFormalTestBooks()
+
+      if (books.length === 0) {
+        setStatus('completed')
+        setStatusMessage('No formal test pages matched the current sync window.')
+        return
+      }
+
+      setStatus('syncing')
+      setCurrent(0)
+      setTotal(books.length)
+      setStatusMessage(
+        `Backing up ${books.length} formal test page(s) to plugin storage, then deleting originals...`,
+      )
+
+      const sessionId = format(new Date(), 'yyyyMMdd-HHmmss')
+      const backupStoragePrefix = `formal-page-backups/${sessionId}`
+      await saveFormalTestSessionManifestV1({
+        schemaVersion: 1,
+        sessionId,
+        createdAt: new Date().toISOString(),
+        graphName: (await logseq.App.getCurrentGraph())?.name ?? null,
+        graphPath: (await logseq.App.getCurrentGraph())?.path ?? null,
+        namespacePrefix: formalNamespaceRoot,
+        updatedAfter,
+        maxBooks,
+        books: books.map((book) => ({
+          userBookId: book.user_book_id,
+          title: book.title,
+        })),
+        backupStoragePrefix,
+      })
+
+      const result = await backupFormalTestPages(books, formalNamespaceRoot, {
+        storagePrefix: backupStoragePrefix,
+      })
+      setCurrent(books.length)
+
+      if (result.skippedPages.length > 0) {
+        setErrors(
+          result.skippedPages.map((pageTitle) => ({
+            book: pageTitle,
+            message:
+              'Skipped because the source file path could not be resolved or page deletion failed.',
+          })),
+        )
+      }
+
+      setStatus('completed')
+      setStatusMessage(
+        result.touchedPages > 0
+          ? `Backed up and removed ${result.touchedPages} formal test page(s) to ${result.backupDirectory}. Formal test session is now active.`
+          : 'No formal test pages were backed up.',
+      )
+      console.info('[Readwise Sync] backed up formal test pages', {
+        sessionId,
+        targetedBooks: result.targetedBooks,
+        matchedPages: result.matchedPages,
+        backedUpPages: result.touchedPages,
+        skippedPages: result.skippedPages,
+        backupDirectory: result.backupDirectory,
+        namespacePrefix: formalNamespaceRoot,
+        updatedAfter,
+        maxBooks,
+      })
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to back up formal test pages', err)
+      setStatus('error')
+      setStatusMessage(
+        `Backup failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  const handleClearFormalTestPages = async () => {
+    setErrors([])
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage('Resolving formal test pages to delete...')
+
+    try {
+      const { books, updatedAfter, maxBooks } = await loadFormalTestBooks()
+
+      if (books.length === 0) {
+        setStatus('completed')
+        setStatusMessage('No formal test pages matched the current sync window.')
+        return
+      }
+
+      setStatus('syncing')
+      setCurrent(0)
+      setTotal(books.length)
+      setStatusMessage(`Deleting ${books.length} formal test page(s)...`)
+
+      const result = await clearFormalTestPages(books, formalNamespaceRoot)
+      setCurrent(books.length)
+
+      if (result.skippedPages.length > 0) {
+        setErrors(
+          result.skippedPages.map((pageTitle) => ({
+            book: pageTitle,
+            message: 'Delete failed for this formal test page.',
+          })),
+        )
+      }
+
+      setStatus('completed')
+      setStatusMessage(
+        result.touchedPages > 0
+          ? `Deleted ${result.touchedPages} formal test page(s).`
+          : 'No formal test pages were deleted.',
+      )
+      console.info('[Readwise Sync] cleared formal test pages', {
+        targetedBooks: result.targetedBooks,
+        matchedPages: result.matchedPages,
+        deletedPages: result.touchedPages,
+        skippedPages: result.skippedPages,
+        namespacePrefix: formalNamespaceRoot,
+        updatedAfter,
+        maxBooks,
+      })
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to clear formal test pages', err)
+      setStatus('error')
+      setStatusMessage(
+        `Clear failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  const handleRestoreTestPages = async () => {
+    setErrors([])
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage('Restoring the latest formal test page backup...')
+
+    try {
+      const result = await restoreLatestFormalTestPageBackup()
+
+      if (result.targetedBooks === 0) {
+        setStatus('completed')
+        setStatusMessage('No formal test page backup was found.')
+        return
+      }
+
+      if (result.skippedPages.length > 0) {
+        setErrors(
+          result.skippedPages.map((pageTitle) => ({
+            book: pageTitle,
+            message: 'Restore skipped because backup content was empty.',
+          })),
+        )
+      }
+
+      setStatus('completed')
+      setStatusMessage(
+        result.touchedPages > 0
+          ? `Restored ${result.touchedPages} formal test page(s) from ${result.backupDirectory}.`
+          : 'No formal test pages were restored.',
+      )
+      console.info('[Readwise Sync] restored formal test pages', {
+        targetedBackups: result.targetedBooks,
+        matchedPages: result.matchedPages,
+        restoredPages: result.touchedPages,
+        skippedPages: result.skippedPages,
+        backupDirectory: result.backupDirectory,
+      })
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to restore formal test pages', err)
+      setStatus('error')
+      setStatusMessage(
+        `Restore failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
   }
 
   const handleClearDebugPages = async () => {
@@ -156,6 +503,9 @@ export const ReadwiseContainer = () => {
     const allBooks: ExportedBook[] = []
     let cursor: string | null = null
     const checkpointBeforeRun = await loadGraphCheckpointStateV1()
+    const activeFormalTestSession = renderedDebugPages
+      ? null
+      : await loadActiveFormalTestSessionManifestV1()
     const updatedAfter = ignoreCheckpoint
       ? undefined
       : checkpointBeforeRun?.updatedAfter ?? undefined
@@ -168,31 +518,48 @@ export const ReadwiseContainer = () => {
       typeof maxBooksOverride === 'number' && maxBooksOverride > 0
         ? Math.floor(maxBooksOverride)
         : configuredDebugSyncMaxBooks
+    const effectiveNamespacePrefix =
+      namespacePrefix ??
+      (renderedDebugPages ? debugNamespaceRoot : formalNamespaceRoot)
+    const formalTestBookIds = activeFormalTestSession?.books.map(
+      (book) => book.userBookId,
+    ) ?? null
     console.info('[Readwise Sync] starting sync')
     console.info('[Readwise Sync] checkpointBeforeRun', checkpointBeforeRun)
     console.info('[Readwise Sync] updatedAfter', updatedAfter ?? null)
     console.info('[Readwise Sync] debugSyncMaxBooks', debugSyncMaxBooks)
     console.info('[Readwise Sync] ignoreCheckpoint', ignoreCheckpoint)
-    console.info('[Readwise Sync] namespacePrefix', namespacePrefix)
+    console.info('[Readwise Sync] namespacePrefix', effectiveNamespacePrefix)
     console.info('[Readwise Sync] renderedDebugPages', renderedDebugPages)
     console.info('[Readwise Sync] pageNameMode', pageNameMode)
+    console.info('[Readwise Sync] formalTestSessionId', activeFormalTestSession?.sessionId ?? null)
 
     try {
       do {
         if (cancelledRef.current) return
 
         const params: ExportParams = {}
-        if (updatedAfter) params.updatedAfter = updatedAfter
+        if (formalTestBookIds && formalTestBookIds.length > 0) {
+          params.ids = formalTestBookIds
+        } else if (updatedAfter) {
+          params.updatedAfter = updatedAfter
+        }
         if (cursor) params.pageCursor = cursor
 
-        const page: ExportResponse = await client.exportHighlights(params)
+        const page: ExportResponse = await exportHighlightsWithRetry(
+          client,
+          params,
+          'sync',
+        )
         allBooks.push(...page.results)
         if (debugSyncMaxBooks != null && allBooks.length > debugSyncMaxBooks) {
           allBooks.length = debugSyncMaxBooks
         }
         setTotal(allBooks.length)
         setStatusMessage(
-          debugSyncMaxBooks != null
+          activeFormalTestSession
+            ? `Fetched ${allBooks.length} / ${formalTestBookIds?.length ?? allBooks.length} formal test book(s) so far...`
+            : debugSyncMaxBooks != null
             ? `Fetched ${allBooks.length} / ${debugSyncMaxBooks} debug book(s) so far...`
             : `Fetched ${allBooks.length} book(s) so far...`,
         )
@@ -209,6 +576,10 @@ export const ReadwiseContainer = () => {
           cursor = null
           break
         }
+        if (formalTestBookIds && formalTestBookIds.length > 0) {
+          cursor = null
+          break
+        }
         cursor = page.nextPageCursor
       } while (cursor)
 
@@ -222,16 +593,14 @@ export const ReadwiseContainer = () => {
       setStatus('syncing')
       setTotal(allBooks.length)
       setStatusMessage(
-        debugSyncMaxBooks != null
+        activeFormalTestSession
+          ? `Formal test session mode: processing ${allBooks.length} frozen book(s) in ${effectiveNamespacePrefix}; checkpoint will not advance.`
+          : debugSyncMaxBooks != null
           ? ignoreCheckpoint
-            ? `Debug sync mode: processing ${allBooks.length} book(s) from scratch into ${namespacePrefix ?? 'default'}; checkpoint will not advance.`
+            ? `Debug sync mode: processing ${allBooks.length} book(s) from scratch into ${effectiveNamespacePrefix}; checkpoint will not advance.`
             : `Debug sync mode: processing ${allBooks.length} book(s); checkpoint will not advance.`
           : `Syncing ${allBooks.length} book(s)...`,
       )
-
-      const bookIdToPage = renderedDebugPages
-        ? null
-        : await buildBookIdToPageMap({ namespacePrefix })
 
       for (let i = 0; i < allBooks.length; i++) {
         if (cancelledRef.current) return
@@ -244,11 +613,11 @@ export const ReadwiseContainer = () => {
           if (renderedDebugPages) {
             await syncRenderedDebugPage(
               book,
-              namespacePrefix ?? 'ReadwiseDebug',
+              effectiveNamespacePrefix,
               pageNameMode,
             )
           } else {
-            await syncBook(book, bookIdToPage!, { namespacePrefix })
+            await syncRenderedPage(book, effectiveNamespacePrefix)
           }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err)
@@ -261,8 +630,9 @@ export const ReadwiseContainer = () => {
         checkpointBeforeRun?.updatedAfter ?? null,
       )
 
-      if (debugSyncMaxBooks != null || ignoreCheckpoint) {
+      if (activeFormalTestSession || debugSyncMaxBooks != null || ignoreCheckpoint) {
         console.info('[Readwise Sync] skipping checkpoint save in debug mode', {
+          formalTestSessionId: activeFormalTestSession?.sessionId ?? null,
           debugSyncMaxBooks,
           nextUpdatedAfter,
           ignoreCheckpoint,
@@ -290,16 +660,19 @@ export const ReadwiseContainer = () => {
 
       setStatus('completed')
       setStatusMessage(
-        debugSyncMaxBooks != null || ignoreCheckpoint
-          ? `Debug sync complete. ${allBooks.length} book(s) processed${namespacePrefix ? ` in ${namespacePrefix}` : ''}. Checkpoint was not advanced.`
+        activeFormalTestSession
+          ? `Formal test session complete. ${allBooks.length} frozen book(s) processed in ${effectiveNamespacePrefix}. Checkpoint was not advanced.`
+          : debugSyncMaxBooks != null || ignoreCheckpoint
+            ? `Debug sync complete. ${allBooks.length} book(s) processed${effectiveNamespacePrefix ? ` in ${effectiveNamespacePrefix}` : ''}. Checkpoint was not advanced.`
           : `Sync complete. ${allBooks.length} book(s) processed.`,
       )
       console.info('[Readwise Sync] sync completed', {
         processedBooks: allBooks.length,
+        formalTestSessionId: activeFormalTestSession?.sessionId ?? null,
         nextUpdatedAfter,
         debugSyncMaxBooks,
         ignoreCheckpoint,
-        namespacePrefix,
+        namespacePrefix: effectiveNamespacePrefix,
       })
     } catch (err: unknown) {
       console.error('[Readwise Sync] sync failed', err)
@@ -344,12 +717,19 @@ export const ReadwiseContainer = () => {
 
   const progressPct = total > 0 ? Math.round((current / total) * 100) : 0
   const isBusy = status === 'fetching' || status === 'syncing'
+  const handleClose = () => {
+    if (!isBusy) {
+      resetUiState()
+    }
+
+    logseq.hideMainUI()
+  }
 
   return (
     <div
       className="rw-overlay"
       onClick={(e) => {
-        if (e.target === e.currentTarget) logseq.hideMainUI()
+        if (e.target === e.currentTarget) handleClose()
       }}
     >
       <div className="rw-card">
@@ -425,6 +805,21 @@ export const ReadwiseContainer = () => {
             </button>
           )}
           {propsReady && status === 'idle' && (
+            <button className="rw-btn" onClick={handleBackupFormalTestPages}>
+              Backup Test Pages
+            </button>
+          )}
+          {propsReady && status === 'idle' && (
+            <button className="rw-btn" onClick={handleRestoreTestPages}>
+              Restore Test Pages
+            </button>
+          )}
+          {showAdvancedFormalTestActions && propsReady && status === 'idle' && (
+            <button className="rw-btn" onClick={handleClearFormalTestPages}>
+              Clear Formal Test Pages
+            </button>
+          )}
+          {propsReady && status === 'idle' && (
             <button className="rw-btn" onClick={handleClearDebugPages}>
               Clear Debug Pages
             </button>
@@ -444,7 +839,7 @@ export const ReadwiseContainer = () => {
               Retry
             </button>
           )}
-          <button className="rw-btn" onClick={() => logseq.hideMainUI()}>
+          <button className="rw-btn" onClick={handleClose}>
             Close
           </button>
         </div>

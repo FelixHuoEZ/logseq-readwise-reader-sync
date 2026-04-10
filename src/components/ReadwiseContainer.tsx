@@ -1,6 +1,6 @@
 import './ReadwiseContainer.css'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { format } from 'date-fns'
 
 import { createReadwiseClient } from '../api'
@@ -48,6 +48,17 @@ export const ReadwiseContainer = () => {
   const [currentBook, setCurrentBook] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
   const [errors, setErrors] = useState<{ book: string; message: string }[]>([])
+  const [activeFormalTestSessionCount, setActiveFormalTestSessionCount] =
+    useState<number | null>(null)
+
+  const refreshActiveFormalTestSessionCount = async () => {
+    const activeFormalTestSession = await loadActiveFormalTestSessionManifestV1()
+    setActiveFormalTestSessionCount(activeFormalTestSession?.books.length ?? null)
+  }
+
+  useEffect(() => {
+    void refreshActiveFormalTestSessionCount()
+  }, [])
 
   const resetUiState = () => {
     cancelledRef.current = false
@@ -264,6 +275,7 @@ export const ReadwiseContainer = () => {
       const result = await backupFormalTestPages(books, formalNamespaceRoot, {
         storagePrefix: backupStoragePrefix,
       })
+      await refreshActiveFormalTestSessionCount()
       setCurrent(books.length)
 
       if (result.skippedPages.length > 0) {
@@ -370,6 +382,7 @@ export const ReadwiseContainer = () => {
 
     try {
       const result = await restoreLatestFormalTestPageBackup()
+      await refreshActiveFormalTestSessionCount()
 
       if (result.targetedBooks === 0) {
         setStatus('completed')
@@ -509,15 +522,10 @@ export const ReadwiseContainer = () => {
     const updatedAfter = ignoreCheckpoint
       ? undefined
       : checkpointBeforeRun?.updatedAfter ?? undefined
-    const rawDebugSyncMaxBooks = Number(logseq.settings?.debugSyncMaxBooks ?? 20)
-    const configuredDebugSyncMaxBooks =
-      Number.isFinite(rawDebugSyncMaxBooks) && rawDebugSyncMaxBooks > 0
-        ? Math.floor(rawDebugSyncMaxBooks)
-        : null
-    const debugSyncMaxBooks =
+    const syncLimitMaxBooks =
       typeof maxBooksOverride === 'number' && maxBooksOverride > 0
         ? Math.floor(maxBooksOverride)
-        : configuredDebugSyncMaxBooks
+        : null
     const effectiveNamespacePrefix =
       namespacePrefix ??
       (renderedDebugPages ? debugNamespaceRoot : formalNamespaceRoot)
@@ -527,7 +535,7 @@ export const ReadwiseContainer = () => {
     console.info('[Readwise Sync] starting sync')
     console.info('[Readwise Sync] checkpointBeforeRun', checkpointBeforeRun)
     console.info('[Readwise Sync] updatedAfter', updatedAfter ?? null)
-    console.info('[Readwise Sync] debugSyncMaxBooks', debugSyncMaxBooks)
+    console.info('[Readwise Sync] syncLimitMaxBooks', syncLimitMaxBooks)
     console.info('[Readwise Sync] ignoreCheckpoint', ignoreCheckpoint)
     console.info('[Readwise Sync] namespacePrefix', effectiveNamespacePrefix)
     console.info('[Readwise Sync] renderedDebugPages', renderedDebugPages)
@@ -552,26 +560,30 @@ export const ReadwiseContainer = () => {
           'sync',
         )
         allBooks.push(...page.results)
-        if (debugSyncMaxBooks != null && allBooks.length > debugSyncMaxBooks) {
-          allBooks.length = debugSyncMaxBooks
+        if (syncLimitMaxBooks != null && allBooks.length > syncLimitMaxBooks) {
+          allBooks.length = syncLimitMaxBooks
         }
         setTotal(allBooks.length)
         setStatusMessage(
           activeFormalTestSession
             ? `Fetched ${allBooks.length} / ${formalTestBookIds?.length ?? allBooks.length} formal test book(s) so far...`
-            : debugSyncMaxBooks != null
-            ? `Fetched ${allBooks.length} / ${debugSyncMaxBooks} debug book(s) so far...`
+            : renderedDebugPages
+              ? syncLimitMaxBooks != null
+                ? `Fetched ${allBooks.length} / ${syncLimitMaxBooks} debug book(s) so far...`
+                : `Fetched ${allBooks.length} debug book(s) so far...`
+            : syncLimitMaxBooks != null
+              ? `Fetched ${allBooks.length} / ${syncLimitMaxBooks} test book(s) so far...`
             : `Fetched ${allBooks.length} book(s) so far...`,
         )
         console.info('[Readwise Sync] export page', {
           pageResultCount: page.results.length,
           totalFetched: allBooks.length,
           nextPageCursor: page.nextPageCursor,
-          debugSyncMaxBooks,
+          syncLimitMaxBooks,
         })
-        if (debugSyncMaxBooks != null && allBooks.length >= debugSyncMaxBooks) {
-          console.info('[Readwise Sync] debug limit reached', {
-            debugSyncMaxBooks,
+        if (syncLimitMaxBooks != null && allBooks.length >= syncLimitMaxBooks) {
+          console.info('[Readwise Sync] sync limit reached', {
+            syncLimitMaxBooks,
           })
           cursor = null
           break
@@ -595,10 +607,12 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         activeFormalTestSession
           ? `Formal test session mode: processing ${allBooks.length} frozen book(s) in ${effectiveNamespacePrefix}; checkpoint will not advance.`
-          : debugSyncMaxBooks != null
-          ? ignoreCheckpoint
-            ? `Debug sync mode: processing ${allBooks.length} book(s) from scratch into ${effectiveNamespacePrefix}; checkpoint will not advance.`
-            : `Debug sync mode: processing ${allBooks.length} book(s); checkpoint will not advance.`
+          : renderedDebugPages
+            ? ignoreCheckpoint
+              ? `Debug sync mode: processing ${allBooks.length} book(s) from scratch into ${effectiveNamespacePrefix}; checkpoint will not advance.`
+              : `Debug sync mode: processing ${allBooks.length} book(s); checkpoint will not advance.`
+          : syncLimitMaxBooks != null
+            ? `Limited sync mode: processing ${allBooks.length} test book(s) in ${effectiveNamespacePrefix}; checkpoint will not advance.`
           : `Syncing ${allBooks.length} book(s)...`,
       )
 
@@ -630,10 +644,14 @@ export const ReadwiseContainer = () => {
         checkpointBeforeRun?.updatedAfter ?? null,
       )
 
-      if (activeFormalTestSession || debugSyncMaxBooks != null || ignoreCheckpoint) {
+      if (
+        activeFormalTestSession ||
+        syncLimitMaxBooks != null ||
+        ignoreCheckpoint
+      ) {
         console.info('[Readwise Sync] skipping checkpoint save in debug mode', {
           formalTestSessionId: activeFormalTestSession?.sessionId ?? null,
-          debugSyncMaxBooks,
+          syncLimitMaxBooks,
           nextUpdatedAfter,
           ignoreCheckpoint,
         })
@@ -662,15 +680,17 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         activeFormalTestSession
           ? `Formal test session complete. ${allBooks.length} frozen book(s) processed in ${effectiveNamespacePrefix}. Checkpoint was not advanced.`
-          : debugSyncMaxBooks != null || ignoreCheckpoint
+          : renderedDebugPages || ignoreCheckpoint
             ? `Debug sync complete. ${allBooks.length} book(s) processed${effectiveNamespacePrefix ? ` in ${effectiveNamespacePrefix}` : ''}. Checkpoint was not advanced.`
+          : syncLimitMaxBooks != null
+            ? `Limited sync complete. ${allBooks.length} test book(s) processed in ${effectiveNamespacePrefix}. Checkpoint was not advanced.`
           : `Sync complete. ${allBooks.length} book(s) processed.`,
       )
       console.info('[Readwise Sync] sync completed', {
         processedBooks: allBooks.length,
         formalTestSessionId: activeFormalTestSession?.sessionId ?? null,
         nextUpdatedAfter,
-        debugSyncMaxBooks,
+        syncLimitMaxBooks,
         ignoreCheckpoint,
         namespacePrefix: effectiveNamespacePrefix,
       })
@@ -685,6 +705,15 @@ export const ReadwiseContainer = () => {
 
   const handleSync = async () => {
     await runSync()
+  }
+
+  const handleLimitedSync = async () => {
+    const configuredSyncMaxBooks =
+      resolveConfiguredSyncMaxBooks() ?? debugSyncMaxBooksLimit
+
+    await runSync({
+      maxBooksOverride: configuredSyncMaxBooks,
+    })
   }
 
   const handleDebugSyncFromScratch = async () => {
@@ -717,6 +746,12 @@ export const ReadwiseContainer = () => {
 
   const progressPct = total > 0 ? Math.round((current / total) * 100) : 0
   const isBusy = status === 'fetching' || status === 'syncing'
+  const configuredSyncMaxBooks =
+    resolveConfiguredSyncMaxBooks() ?? debugSyncMaxBooksLimit
+  const limitedSyncLabel =
+    activeFormalTestSessionCount != null
+      ? `Start Sync (Session test: ${activeFormalTestSessionCount})`
+      : `Start Sync (${configuredSyncMaxBooks})`
   const handleClose = () => {
     if (!isBusy) {
       resetUiState()
@@ -795,7 +830,12 @@ export const ReadwiseContainer = () => {
             </button>
           )}
           {propsReady && status === 'idle' && (
-            <button className="rw-btn rw-btn-primary" onClick={handleSync}>
+            <button className="rw-btn rw-btn-primary" onClick={handleLimitedSync}>
+              {limitedSyncLabel}
+            </button>
+          )}
+          {propsReady && status === 'idle' && (
+            <button className="rw-btn" onClick={handleSync}>
               Start Sync
             </button>
           )}

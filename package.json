@@ -1,6 +1,6 @@
 {
   "name": "logseq-readwise-plugin",
-  "version": "0.1.0",
+  "version": "6.0.0",
   "author": "FelixHuoEZ (fork of hkgnp and benjypng)",
   "description": "Reader v3-based Logseq Readwise sync fork with managed pages and formal sync diagnostics.",
   "license": "MIT",

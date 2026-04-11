@@ -18,7 +18,7 @@ const main = async () => {
   logseq.App.registerUIItem('toolbar', {
     key: 'readwise-reader-sync',
     template:
-      '<a class="button" data-on-click="syncHighlights" title="Open Readwise Sync" aria-label="Open Readwise Sync"><i class="ti ti-refresh"></i></a>',
+      '<a class="button" data-on-click="syncHighlights" title="Open Readwise Sync" aria-label="Open Readwise Sync"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:1.1em;font:700 16px/1 Georgia, serif;color:currentColor;">R</span></a>',
   })
 
   logseq.provideModel({

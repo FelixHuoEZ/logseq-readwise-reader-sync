@@ -6,10 +6,56 @@ import { buildPageRenderContext, renderPage } from '../renderer'
 import type { ExportedBook } from '../types'
 import { buildDebugManagedPageName } from './readwise-page-names'
 
+const logRenderedContentDiagnostics = (pageName: string, content: string) => {
+  const lines = content.split('\n')
+  const endNoteIndex = lines.indexOf('#+END_NOTE')
+  const transitionLines =
+    endNoteIndex >= 0 ? lines.slice(endNoteIndex, endNoteIndex + 4) : []
+  const hasBlankLineAfterEndNote =
+    endNoteIndex >= 0 && lines[endNoteIndex + 1] === ''
+  const firstHighlightLine =
+    endNoteIndex >= 0
+      ? lines.slice(endNoteIndex + 1).find((line) => line.startsWith('* '))
+      : null
+
+  console.info('[Readwise Debug Sync] rendered content diagnostics', {
+    pageName,
+    previewHead: lines.slice(0, 18),
+    transitionLines,
+    transitionText: transitionLines.join('\\n'),
+    hasBlankLineAfterEndNote,
+    firstHighlightLine,
+  })
+}
+
 const delay = async (ms: number) =>
   new Promise((resolve) => {
     window.setTimeout(resolve, ms)
   })
+
+const stabilizeInsertedRootBlock = async (
+  page: PageEntity,
+  pageName: string,
+  content: string,
+) => {
+  await delay(300)
+
+  const refreshedTree = await logseq.Editor.getPageBlocksTree(page.name)
+  const refreshedRoot = refreshedTree?.[0]
+
+  if (!refreshedRoot) {
+    throw new Error(`Failed to resolve inserted debug root block for "${pageName}"`)
+  }
+
+  await logseq.Editor.updateBlock(refreshedRoot.uuid, content)
+  await delay(300)
+
+  console.info('[Readwise Debug Sync] stabilized inserted root block', {
+    pageName,
+    rootBlockUuid: refreshedRoot.uuid,
+    topLevelBlockCountAfterInsert: refreshedTree?.length ?? null,
+  })
+}
 
 const createDebugHighlightUuid = (): string => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -70,6 +116,7 @@ const createPageWithRenderedContent = async (
       throw new Error(`Failed to insert first debug block for page "${page.name}"`)
     }
 
+    await stabilizeInsertedRootBlock(page, pageName, content)
     return page
   }
 
@@ -123,6 +170,7 @@ export const syncRenderedDebugPage = async (
     createDebugHighlightUuid,
   )
   const content = renderedPage.emitResult.outputText
+  logRenderedContentDiagnostics(pageName, content)
   const createdPage = await createPageWithRenderedContent(pageName, content)
   if (!createdPage) return
 

@@ -1,5 +1,6 @@
 export * from './append-highlights'
 export * from './formal-test-pages'
+export * from './page-file-diff'
 export * from './readwise-page-names'
 export * from './setup-properties'
 export * from './single-root-page-content'

@@ -14,6 +14,35 @@ const emitPropertyLine = (
 
 const wrapWikiLink = (value: string) => `[[${value}]]`
 
+const normalizeBoundaryBlankLines = (value: string) => {
+  const lines = value.split('\n')
+  const normalizeLine = (line: string) =>
+    line
+      .replaceAll('\u200B', '')
+      .replaceAll('\u200C', '')
+      .replaceAll('\u200D', '')
+      .replaceAll('\uFEFF', '')
+      .trim()
+
+  let firstContentLine = 0
+  while (
+    firstContentLine < lines.length &&
+    normalizeLine(lines[firstContentLine] ?? '').length === 0
+  ) {
+    firstContentLine += 1
+  }
+
+  let lastContentLine = lines.length - 1
+  while (
+    lastContentLine >= firstContentLine &&
+    normalizeLine(lines[lastContentLine] ?? '').length === 0
+  ) {
+    lastContentLine -= 1
+  }
+
+  return lines.slice(firstContentLine, lastContentLine + 1).join('\n')
+}
+
 const emitMetadataText = (page: SemanticPage) => {
   const author = getMetadataValue(page, 'AUTHOR')
   const category = getMetadataValue(page, 'CATEGORIES')
@@ -52,13 +81,11 @@ const emitHighlightMainText = (
         ? ` (${highlight.locationLabel})`
         : ''
 
-  const tagSuffix =
-    highlight.tags.length > 0
-      ? `${highlight.tags.map((tag) => `  ,  [[${tag}]]`).join('')} `
-      : ''
+  const emittedTags = ['[[ReadwiseHighlights]]', ...highlight.tags.map((tag) => `[[${tag}]]`)]
+    .join('  ,  ')
 
   const [firstLine = '', ...restLines] = highlight.text.split('\n')
-  const restText = restLines.join('\n')
+  const restText = normalizeBoundaryBlankLines(restLines.join('\n'))
   const noteSection = highlight.note ? [`* *Note*: ${highlight.note}`] : []
   const trailingSections = [restText, ...noteSection].filter(
     (section): section is string => section.length > 0,
@@ -68,7 +95,7 @@ const emitHighlightMainText = (
     `** ${firstLine}${locationSuffix}`,
     ':PROPERTIES:',
     `:created: [[${highlight.createdDate}]]`,
-    `:tags: [[ReadwiseHighlights]]${tagSuffix}`,
+    `:tags: ${emittedTags}`,
     `:id: ${highlight.uuid}`,
     ':END:',
     ...trailingSections.flatMap((section) => ['', section]),

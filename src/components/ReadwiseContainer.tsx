@@ -11,9 +11,13 @@ import {
 } from '../graph'
 import {
   backupFormalTestPages,
+  captureCurrentPageFileSnapshotV1,
   clearManagedPagesBySessionNamespaceRoot,
   clearFormalTestPages,
+  type CurrentPageDiffResult,
+  diffCurrentPageFileSnapshotV1,
   loadActiveFormalTestSessionManifestV1,
+  rotateActiveFormalTestSessionNamespaceV1,
   restoreLatestFormalTestPageBackup,
   saveFormalTestSessionManifestV1,
   setupProps,
@@ -49,6 +53,8 @@ export const ReadwiseContainer = () => {
   const [currentBook, setCurrentBook] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
   const [errors, setErrors] = useState<{ book: string; message: string }[]>([])
+  const [pageDiffResult, setPageDiffResult] =
+    useState<CurrentPageDiffResult | null>(null)
   const [activeFormalTestSessionCount, setActiveFormalTestSessionCount] =
     useState<number | null>(null)
 
@@ -69,7 +75,123 @@ export const ReadwiseContainer = () => {
     setCurrentBook('')
     setStatusMessage('')
     setErrors([])
+    setPageDiffResult(null)
   }
+
+  const copyText = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setStatusMessage(`${label} copied to clipboard.`)
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to copy text', err)
+      setStatusMessage(
+        `Copy failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  const uniqueStrings = (values: string[]) =>
+    values.filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
+
+  const resolveCurrentPageNameForExternalDiff = async () => {
+    const currentPage = await logseq.Editor.getCurrentPage()
+    if (!currentPage) {
+      throw new Error('No current page is open.')
+    }
+
+    const pageName = uniqueStrings([
+      typeof currentPage.originalName === 'string' ? currentPage.originalName : '',
+      typeof currentPage.title === 'string' ? currentPage.title : '',
+      typeof currentPage.name === 'string' ? currentPage.name : '',
+    ])[0]
+
+    if (!pageName) {
+      throw new Error('Failed to resolve the current page name.')
+    }
+
+    return pageName
+  }
+
+  const resolvePluginRepoRootForExternalDiff = () => {
+    try {
+      const pathname = decodeURIComponent(new URL(window.location.href).pathname)
+      if (pathname.endsWith('/dist/index.html')) {
+        return pathname.slice(0, -'/dist/index.html'.length)
+      }
+      if (pathname.endsWith('/index.html')) {
+        return pathname.slice(0, -'/index.html'.length)
+      }
+    } catch {
+      // Fall through and let the copied command omit the cwd prefix.
+    }
+
+    return null
+  }
+
+  const buildExternalRawSnapshotCommand = async (mode: 'capture' | 'diff') => {
+    const pageName = await resolveCurrentPageNameForExternalDiff()
+    const graph = await logseq.App.getCurrentGraph()
+    const graphPath = graph?.path
+    const repoRoot = resolvePluginRepoRootForExternalDiff()
+    const command = [
+      'npm run diag:page-snapshot --',
+      mode,
+      '--page-name',
+      JSON.stringify(pageName),
+      ...(graphPath ? ['--graph-path', JSON.stringify(graphPath)] : []),
+    ].join(' ')
+
+    return repoRoot ? `cd ${JSON.stringify(repoRoot)} && ${command}` : command
+  }
+
+  const handleCopyExternalRawSnapshotCommand = async (mode: 'capture' | 'diff') => {
+    try {
+      const command = await buildExternalRawSnapshotCommand(mode)
+      await copyText(
+        command,
+        mode === 'capture' ? 'Raw capture command' : 'Raw diff command',
+      )
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to build external raw snapshot command', err)
+      setStatusMessage(
+        `Command build failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  const handleCopyExternalRawSnapshotWorkflow = async () => {
+    try {
+      const captureCommand = await buildExternalRawSnapshotCommand('capture')
+      const diffCommand = await buildExternalRawSnapshotCommand('diff')
+      await copyText(
+        [captureCommand, '# do copy/embed in Logseq', diffCommand].join('\n'),
+        'Raw snapshot workflow',
+      )
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to build external raw snapshot workflow', err)
+      setStatusMessage(
+        `Workflow build failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  const buildPageDiffBundle = (result: CurrentPageDiffResult) =>
+    [
+      `${result.pageName} @ line ${result.firstDiffLine ?? '?'}`,
+      `Source: ${result.source}${result.relativeFilePath ? ` (${result.relativeFilePath})` : ''}`,
+      '',
+      'Before Excerpt:',
+      result.beforeExcerpt,
+      '',
+      'After Excerpt:',
+      result.afterExcerpt,
+      '',
+      'Before Full Page:',
+      result.beforeFullText,
+      '',
+      'After Full Page:',
+      result.afterFullText,
+    ].join('\n')
 
   const handleSetupProps = async () => {
     const result = await setupProps()
@@ -233,6 +355,7 @@ export const ReadwiseContainer = () => {
 
   const handleBackupFormalTestPages = async () => {
     setErrors([])
+    setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -319,6 +442,7 @@ export const ReadwiseContainer = () => {
 
   const handleClearFormalTestPages = async () => {
     setErrors([])
+    setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -377,6 +501,7 @@ export const ReadwiseContainer = () => {
 
   const handleRestoreTestPages = async () => {
     setErrors([])
+    setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -426,6 +551,7 @@ export const ReadwiseContainer = () => {
 
   const handleClearSessionTestPages = async () => {
     setErrors([])
+    setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -445,6 +571,9 @@ export const ReadwiseContainer = () => {
       const result = await clearManagedPagesBySessionNamespaceRoot(
         formalNamespaceRoot,
       )
+      const rotatedFormalTestSession = activeFormalTestSession
+        ? await rotateActiveFormalTestSessionNamespaceV1()
+        : null
       await refreshActiveFormalTestSessionCount()
       setCurrent(activeFormalTestSession?.books.length ?? 0)
 
@@ -460,11 +589,15 @@ export const ReadwiseContainer = () => {
       setStatus('completed')
       setStatusMessage(
         result.touchedPages > 0
-          ? `Deleted ${result.touchedPages} session test page(s) under ${formalNamespaceRoot}/<run-id>/.`
-          : 'No session test pages were deleted.',
+          ? `Deleted ${result.touchedPages} session test page(s) under ${formalNamespaceRoot}/<run-id>/.${rotatedFormalTestSession ? ` Next session test run will use ${rotatedFormalTestSession.namespacePrefix}.` : ''}`
+          : rotatedFormalTestSession
+            ? `No session test pages were deleted. Next session test run will use ${rotatedFormalTestSession.namespacePrefix}.`
+            : 'No session test pages were deleted.',
       )
       console.info('[Readwise Sync] cleared session test pages', {
         sessionId: activeFormalTestSession?.sessionId ?? null,
+        nextSessionId: rotatedFormalTestSession?.sessionId ?? null,
+        nextNamespacePrefix: rotatedFormalTestSession?.namespacePrefix ?? null,
         targetedBooks: result.targetedBooks,
         matchedPages: result.matchedPages,
         deletedPages: result.touchedPages,
@@ -482,6 +615,7 @@ export const ReadwiseContainer = () => {
 
   const handleClearDebugPages = async () => {
     setErrors([])
+    setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -543,6 +677,62 @@ export const ReadwiseContainer = () => {
     }
   }
 
+  const handleCaptureCurrentPageSnapshot = async () => {
+    setErrors([])
+    setPageDiffResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage('Capturing current page file snapshot...')
+
+    try {
+      const result = await captureCurrentPageFileSnapshotV1()
+      setStatus('completed')
+      setStatusMessage(
+        `Captured snapshot for ${result.pageName} via ${result.source} (${result.lineCount} lines).`,
+      )
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to capture current page snapshot', err)
+      setStatus('error')
+      setStatusMessage(
+        `Snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  const handleDiffCurrentPageSnapshot = async () => {
+    setErrors([])
+    setPageDiffResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage('Diffing current page file against the saved snapshot...')
+
+    try {
+      const result = await diffCurrentPageFileSnapshotV1()
+
+      if (!result.changed) {
+        setStatus('completed')
+        setStatusMessage(
+          `No page ${result.source} changes detected for ${result.pageName}.`,
+        )
+        return
+      }
+
+      setPageDiffResult(result)
+      setStatus('completed')
+      setStatusMessage(result.summary)
+    } catch (err: unknown) {
+      console.error('[Readwise Sync] failed to diff current page snapshot', err)
+      setStatus('error')
+      setStatusMessage(
+        `Diff failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
   const runSync = async ({
     ignoreCheckpoint = false,
     namespacePrefix = null,
@@ -565,6 +755,7 @@ export const ReadwiseContainer = () => {
 
     cancelledRef.current = false
     setErrors([])
+    setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -877,6 +1068,96 @@ export const ReadwiseContainer = () => {
               ))}
             </div>
           )}
+
+          {pageDiffResult && (
+            <div className="rw-diff-panel">
+              <div className="rw-diff-header">
+                <div className="rw-diff-header-text">
+                  <strong>
+                    {pageDiffResult.pageName} @ line {pageDiffResult.firstDiffLine ?? '?'}
+                  </strong>
+                  <span className="rw-diff-meta">
+                    {pageDiffResult.source}
+                    {pageDiffResult.relativeFilePath
+                      ? ` · ${pageDiffResult.relativeFilePath}`
+                      : ''}
+                  </span>
+                </div>
+                <button
+                  className="rw-btn rw-btn-small"
+                  onClick={() =>
+                    void copyText(buildPageDiffBundle(pageDiffResult), 'Full diff bundle')
+                  }
+                >
+                  Copy All
+                </button>
+              </div>
+
+              <div className="rw-diff-section">
+                <div className="rw-diff-section-header">
+                  <span>Before Excerpt</span>
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() =>
+                      void copyText(pageDiffResult.beforeExcerpt, 'Before excerpt')
+                    }
+                  >
+                    Copy
+                  </button>
+                </div>
+                <pre className="rw-diff-content">{pageDiffResult.beforeExcerpt}</pre>
+              </div>
+
+              <div className="rw-diff-section">
+                <div className="rw-diff-section-header">
+                  <span>After Excerpt</span>
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() =>
+                      void copyText(pageDiffResult.afterExcerpt, 'After excerpt')
+                    }
+                  >
+                    Copy
+                  </button>
+                </div>
+                <pre className="rw-diff-content">{pageDiffResult.afterExcerpt}</pre>
+              </div>
+
+              <div className="rw-diff-section">
+                <div className="rw-diff-section-header">
+                  <span>Before Full Page</span>
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() =>
+                      void copyText(pageDiffResult.beforeFullText, 'Before full page')
+                    }
+                  >
+                    Copy
+                  </button>
+                </div>
+                <pre className="rw-diff-content rw-diff-content-full">
+                  {pageDiffResult.beforeFullText}
+                </pre>
+              </div>
+
+              <div className="rw-diff-section">
+                <div className="rw-diff-section-header">
+                  <span>After Full Page</span>
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() =>
+                      void copyText(pageDiffResult.afterFullText, 'After full page')
+                    }
+                  >
+                    Copy
+                  </button>
+                </div>
+                <pre className="rw-diff-content rw-diff-content-full">
+                  {pageDiffResult.afterFullText}
+                </pre>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="rw-actions">
@@ -940,6 +1221,50 @@ export const ReadwiseContainer = () => {
                   <button className="rw-btn" onClick={handleClearDebugPages}>
                     Clear Debug Pages
                   </button>
+                </div>
+              </div>
+
+              <div className="rw-action-group">
+                <div className="rw-action-group-label">
+                  Page File Diff
+                </div>
+                <div className="rw-action-row">
+                  <button className="rw-btn" onClick={handleCaptureCurrentPageSnapshot}>
+                    Capture Page Snapshot
+                  </button>
+                  <button className="rw-btn" onClick={handleDiffCurrentPageSnapshot}>
+                    Diff Page Snapshot
+                  </button>
+                </div>
+              </div>
+
+              <div className="rw-action-group">
+                <div className="rw-action-group-label">
+                  Raw File Diff
+                </div>
+                <div className="rw-action-row">
+                  <button
+                    className="rw-btn"
+                    onClick={() => void handleCopyExternalRawSnapshotCommand('capture')}
+                  >
+                    Copy Raw Capture Cmd
+                  </button>
+                  <button
+                    className="rw-btn"
+                    onClick={() => void handleCopyExternalRawSnapshotCommand('diff')}
+                  >
+                    Copy Raw Diff Cmd
+                  </button>
+                  <button
+                    className="rw-btn"
+                    onClick={() => void handleCopyExternalRawSnapshotWorkflow()}
+                  >
+                    Copy Raw Workflow
+                  </button>
+                </div>
+                <div className="rw-action-note">
+                  These buttons copy terminal commands. The Logseq plugin runtime
+                  cannot execute the raw file script directly.
                 </div>
               </div>
             </div>

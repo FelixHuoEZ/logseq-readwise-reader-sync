@@ -7,6 +7,28 @@ import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import { buildFormalManagedPageName } from './readwise-page-names'
 import { createManagedPageV1, writeSingleRootPageContentV1 } from './single-root-page-content'
 
+const logRenderedContentDiagnostics = (pageName: string, content: string) => {
+  const lines = content.split('\n')
+  const endNoteIndex = lines.indexOf('#+END_NOTE')
+  const transitionLines =
+    endNoteIndex >= 0 ? lines.slice(endNoteIndex, endNoteIndex + 4) : []
+  const hasBlankLineAfterEndNote =
+    endNoteIndex >= 0 && lines[endNoteIndex + 1] === ''
+  const firstHighlightLine =
+    endNoteIndex >= 0
+      ? lines.slice(endNoteIndex + 1).find((line) => line.startsWith('* '))
+      : null
+
+  console.info('[Readwise Sync] rendered content diagnostics', {
+    pageName,
+    previewHead: lines.slice(0, 18),
+    transitionLines,
+    transitionText: transitionLines.join('\\n'),
+    hasBlankLineAfterEndNote,
+    firstHighlightLine,
+  })
+}
+
 export const syncRenderedPage = async (
   book: ExportedBook,
   namespacePrefix = 'ReadwiseHighlights',
@@ -35,6 +57,7 @@ export const syncRenderedPage = async (
     computeCompatibleHighlightUuid,
   )
   const content = renderedPage.emitResult.outputText
+  logRenderedContentDiagnostics(pageName, content)
   const page = existingPage ?? (await createManagedPageV1(pageName))
   const result = await writeSingleRootPageContentV1(page, pageName, content)
 

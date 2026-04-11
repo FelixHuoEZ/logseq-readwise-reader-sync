@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "diag:page-snapshot": "node scripts/raw-page-snapshot.mjs",
     "prepare": "husky",
     "lint:precommit": "echo \"Running biome\" && biome check . --write && echo \"Running tsc\" && tsc --noEmit"
   },

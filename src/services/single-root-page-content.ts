@@ -12,6 +12,30 @@ const removeDirectChildren = async (block: BlockEntity) => {
   }
 }
 
+const stabilizeInsertedRootBlock = async (
+  page: PageEntity,
+  pageName: string,
+  content: string,
+) => {
+  await delay(300)
+
+  const refreshedTree = await logseq.Editor.getPageBlocksTree(page.name)
+  const refreshedRoot = refreshedTree?.[0]
+
+  if (!refreshedRoot) {
+    throw new Error(`Failed to resolve inserted root block for "${pageName}"`)
+  }
+
+  await logseq.Editor.updateBlock(refreshedRoot.uuid, content)
+  await delay(300)
+
+  console.info('[Readwise Sync] stabilized inserted root block', {
+    pageName,
+    rootBlockUuid: refreshedRoot.uuid,
+    topLevelBlockCountAfterInsert: refreshedTree?.length ?? null,
+  })
+}
+
 export const createManagedPageV1 = async (
   pageName: string,
 ): Promise<PageEntity> => {
@@ -64,6 +88,8 @@ export const writeSingleRootPageContentV1 = async (
       pageName,
       branch: 'insert-first-block',
     })
+
+    await stabilizeInsertedRootBlock(page, pageName, content)
     return 'created'
   }
 

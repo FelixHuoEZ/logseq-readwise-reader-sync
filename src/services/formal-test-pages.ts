@@ -145,6 +145,29 @@ export const clearActiveFormalTestSessionManifestV1 = async () => {
   }
 }
 
+export const rotateActiveFormalTestSessionNamespaceV1 =
+  async (): Promise<FormalTestSessionManifestV1 | null> => {
+    const activeSession = await loadActiveFormalTestSessionManifestV1()
+    if (!activeSession) return null
+
+    const namespaceRoot = activeSession.namespacePrefix.split('/')[0] || 'ReadwiseHighlights'
+    const nextSessionIdCandidate = format(new Date(), 'yyyyMMdd-HHmmss')
+    const nextSessionId =
+      nextSessionIdCandidate === activeSession.sessionId
+        ? format(new Date(Date.now() + 1000), 'yyyyMMdd-HHmmss')
+        : nextSessionIdCandidate
+
+    const nextManifest: FormalTestSessionManifestV1 = {
+      ...activeSession,
+      sessionId: nextSessionId,
+      createdAt: new Date().toISOString(),
+      namespacePrefix: `${namespaceRoot}/${nextSessionId}`,
+    }
+
+    await saveFormalTestSessionManifestV1(nextManifest)
+    return nextManifest
+  }
+
 const captureFormalPageBackup = async (
   pageName: string,
   pageAliases: string[],

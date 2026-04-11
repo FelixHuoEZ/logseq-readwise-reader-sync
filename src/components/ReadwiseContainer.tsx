@@ -59,6 +59,14 @@ import {
   logReadwiseInfo,
   logReadwiseWarn,
 } from '../logging'
+import {
+  buildRunIssuesBundle,
+  diagnoseRunIssue,
+  formatRunIssueCategoryLabel,
+  type RunIssue,
+  type RunIssueBundleContext,
+  summarizeRunIssueCategories,
+} from './run-issues'
 
 type ReaderSyncEtaPhase = 'fetch-highlights' | 'fetch-documents' | 'write-pages'
 type ReaderSyncMode = ReaderPreviewLoadMode
@@ -112,7 +120,9 @@ export const ReadwiseContainer = () => {
   const [total, setTotal] = useState(0)
   const [currentBook, setCurrentBook] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
-  const [errors, setErrors] = useState<{ book: string; message: string }[]>([])
+  const [errors, setErrors] = useState<RunIssue[]>([])
+  const [runIssueContext, setRunIssueContext] =
+    useState<RunIssueBundleContext | null>(null)
   const [pageDiffResult, setPageDiffResult] =
     useState<CurrentPageDiffResult | null>(null)
   const [etaTick, setEtaTick] = useState(0)
@@ -165,6 +175,7 @@ export const ReadwiseContainer = () => {
     setCurrentBook('')
     setStatusMessage('')
     setErrors([])
+    setRunIssueContext(null)
     setPageDiffResult(null)
   }
 
@@ -465,6 +476,60 @@ export const ReadwiseContainer = () => {
       result.afterFullText,
     ].join('\n')
 
+  const buildLiveRunIssueContext = (): RunIssueBundleContext => ({
+    modeLabel: runIssueContext?.modeLabel ?? 'Readwise sync',
+    namespacePrefix: runIssueContext?.namespacePrefix ?? null,
+    logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+    statusMessage,
+    startedAt: runIssueContext?.startedAt ?? null,
+    completedAt: runIssueContext?.completedAt ?? null,
+    targetDocuments:
+      runIssueContext?.targetDocuments ??
+      resolveConfiguredReaderFullScanTargetDocuments(),
+    debugHighlightPageLimit:
+      runIssueContext?.debugHighlightPageLimit ??
+      resolveConfiguredReaderDebugHighlightPageLimit() ??
+      0,
+    processedItems: runIssueContext?.processedItems ?? current,
+    issuesCount: errors.length,
+    stats: runIssueContext?.stats,
+  })
+
+  const clearRunIssues = () => {
+    setErrors([])
+    setRunIssueContext(null)
+  }
+
+  const replaceRunIssues = (issues: RunIssue[]) => {
+    setErrors(issues.map((issue) => diagnoseRunIssue(issue)))
+  }
+
+  const appendRunIssue = (issue: RunIssue) => {
+    const diagnosedIssue = diagnoseRunIssue(issue)
+
+    setErrors((previous) => {
+      const alreadyPresent = previous.some(
+        (existingIssue) =>
+          existingIssue.book === diagnosedIssue.book &&
+          existingIssue.message === diagnosedIssue.message,
+      )
+
+      return alreadyPresent ? previous : [...previous, diagnosedIssue]
+    })
+  }
+
+  const handleCopyRunIssueBundle = async () => {
+    if (errors.length === 0) return
+
+    await copyText(
+      buildRunIssuesBundle({
+        issues: errors,
+        context: buildLiveRunIssueContext(),
+      }),
+      'Run issue bundle',
+    )
+  }
+
   const handleSetupProps = async () => {
     const result = await setupProps()
     if (!result.success) return
@@ -761,7 +826,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleBackupFormalTestPages = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
@@ -829,7 +894,7 @@ export const ReadwiseContainer = () => {
       setCurrent(books.length)
 
       if (result.skippedPages.length > 0) {
-        setErrors(
+        replaceRunIssues(
           result.skippedPages.map((pageTitle) => ({
             book: pageTitle,
             message:
@@ -866,7 +931,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleClearFormalTestPages = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
@@ -908,7 +973,7 @@ export const ReadwiseContainer = () => {
       })
 
       if (result.skippedPages.length > 0) {
-        setErrors(
+        replaceRunIssues(
           result.skippedPages.map((pageTitle) => ({
             book: pageTitle,
             message: 'Delete failed for this formal test page.',
@@ -941,7 +1006,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleRestoreTestPages = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
@@ -985,7 +1050,7 @@ export const ReadwiseContainer = () => {
       }
 
       if (result.skippedPages.length > 0 || result.failedPages.length > 0) {
-        setErrors([
+        replaceRunIssues([
           ...result.skippedPages.map((pageTitle) => ({
             book: pageTitle,
             message: 'Restore skipped because backup content was empty.',
@@ -1023,7 +1088,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleClearSessionTestPages = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
@@ -1075,7 +1140,7 @@ export const ReadwiseContainer = () => {
       setTotal(result.matchedPages)
 
       if (result.skippedPages.length > 0) {
-        setErrors(
+        replaceRunIssues(
           result.skippedPages.map((pageTitle) => ({
             book: pageTitle,
             message: 'Delete failed for this session test page.',
@@ -1111,7 +1176,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleClearDebugPages = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
@@ -1165,7 +1230,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleCaptureCurrentPageSnapshot = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
@@ -1189,7 +1254,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleDiffCurrentPageSnapshot = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
@@ -1242,17 +1307,18 @@ export const ReadwiseContainer = () => {
 
     cancelledRef.current = false
     retryActionRef.current = null
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
     setStatus('fetching')
+    const startedAt = new Date().toISOString()
     setStatusMessage('Fetching highlights from Readwise...')
 
     const client = createReadwiseClient(token)
     const allBooks: ExportedBook[] = []
-    const syncErrorsForRun: Array<{ book: string; message: string }> = []
+    const syncErrorsForRun: RunIssue[] = []
     let cursor: string | null = null
     const checkpointBeforeRun = await loadGraphCheckpointStateV1()
     const activeFormalTestSession = renderedDebugPages
@@ -1278,6 +1344,22 @@ export const ReadwiseContainer = () => {
         : activeFormalTestSession || syncLimitMaxBooks != null
           ? sessionTestLogPrefix
           : formalSyncLogPrefix
+    setRunIssueContext({
+      modeLabel: renderedDebugPages
+        ? 'Debug sync'
+        : activeFormalTestSession || syncLimitMaxBooks != null
+          ? 'Session test sync'
+          : 'Legacy sync',
+      namespacePrefix: effectiveNamespacePrefix,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: syncLimitMaxBooks,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
     logReadwiseInfo(syncLogPrefix, 'starting sync')
     logReadwiseDebug(syncLogPrefix, 'checkpointBeforeRun', checkpointBeforeRun)
     logReadwiseDebug(syncLogPrefix, 'updatedAfter', updatedAfter ?? null)
@@ -1391,8 +1473,9 @@ export const ReadwiseContainer = () => {
           }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err)
-          syncErrorsForRun.push({ book: book.title, message: msg })
-          setErrors((prev) => [...prev, { book: book.title, message: msg }])
+          const issue = { book: book.title, message: msg }
+          syncErrorsForRun.push(issue)
+          appendRunIssue(issue)
         }
       }
 
@@ -1446,6 +1529,16 @@ export const ReadwiseContainer = () => {
       }
 
       setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: allBooks.length,
+              issuesCount: syncErrorsForRun.length,
+            },
+      )
       setStatusMessage(
         activeFormalTestSession
           ? `Formal test session complete. ${allBooks.length} frozen book(s) processed in ${effectiveNamespacePrefix}. Checkpoint was not advanced.`
@@ -1469,6 +1562,16 @@ export const ReadwiseContainer = () => {
     } catch (err: unknown) {
       logReadwiseError(syncLogPrefix, 'sync failed', err)
       setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: allBooks.length,
+              issuesCount: syncErrorsForRun.length,
+            },
+      )
       setStatusMessage(
         `Sync failed: ${describeUnknownError(err)}`,
       )
@@ -1492,7 +1595,7 @@ export const ReadwiseContainer = () => {
           })),
         },
       )
-      setErrors(
+      replaceRunIssues(
         conflicts.flatMap((conflict) =>
           conflict.pages.slice(0, 3).map((page) => ({
             book: page.pageTitle,
@@ -1500,6 +1603,19 @@ export const ReadwiseContainer = () => {
           })),
         ),
       )
+      setRunIssueContext({
+        modeLabel: 'Incremental sync',
+        namespacePrefix: formalNamespaceRoot,
+        logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+        statusMessage: '',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        targetDocuments: null,
+        debugHighlightPageLimit:
+          resolveConfiguredReaderDebugHighlightPageLimit(),
+        processedItems: 0,
+        issuesCount: conflicts.length,
+      })
       setStatus('error')
       setCurrent(0)
       setTotal(0)
@@ -1524,7 +1640,7 @@ export const ReadwiseContainer = () => {
     if (conflicts != null) {
       setShowMaintenanceTools(true)
       const summary = formatManagedPageConflictSummary(conflicts)
-      setErrors(
+      replaceRunIssues(
         conflicts.flatMap((conflict) =>
           conflict.pages.slice(0, 3).map((page) => ({
             book: page.pageTitle,
@@ -1532,6 +1648,18 @@ export const ReadwiseContainer = () => {
           })),
         ),
       )
+      setRunIssueContext({
+        modeLabel: 'Cached rebuild',
+        namespacePrefix: formalNamespaceRoot,
+        logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+        statusMessage: '',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        targetDocuments: resolveConfiguredReaderFullScanTargetDocuments(),
+        debugHighlightPageLimit: null,
+        processedItems: 0,
+        issuesCount: conflicts.length,
+      })
       setStatus('error')
       setCurrent(0)
       setTotal(0)
@@ -1556,7 +1684,7 @@ export const ReadwiseContainer = () => {
     if (conflicts != null) {
       setShowMaintenanceTools(true)
       const summary = formatManagedPageConflictSummary(conflicts)
-      setErrors(
+      replaceRunIssues(
         conflicts.flatMap((conflict) =>
           conflict.pages.slice(0, 3).map((page) => ({
             book: page.pageTitle,
@@ -1564,6 +1692,19 @@ export const ReadwiseContainer = () => {
           })),
         ),
       )
+      setRunIssueContext({
+        modeLabel: 'Full refresh',
+        namespacePrefix: formalNamespaceRoot,
+        logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+        statusMessage: '',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        targetDocuments: resolveConfiguredReaderFullScanTargetDocuments(),
+        debugHighlightPageLimit:
+          resolveConfiguredReaderDebugHighlightPageLimit(),
+        processedItems: 0,
+        issuesCount: conflicts.length,
+      })
       setStatus('error')
       setCurrent(0)
       setTotal(0)
@@ -1584,35 +1725,95 @@ export const ReadwiseContainer = () => {
   }
 
   const handleAuditManagedIds = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
     setStatus('fetching')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Managed page audit',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
     setStatusMessage(`Auditing managed pages under ${formalNamespaceRoot}...`)
 
     try {
       const auditResult = await auditManagedReaderPagesV1([formalNamespaceRoot])
-      const auditIssues = [
+      const auditIssues: RunIssue[] = [
         ...auditResult.duplicateReaderIds.map((duplicateGroup) => ({
           book: `rw-reader-id ${duplicateGroup.readerDocumentId}`,
           message: `Multiple managed pages share rw-reader-id=${duplicateGroup.readerDocumentId}: ${duplicateGroup.pages.map((page) => page.pageTitle).join(', ')}`,
+          category: 'duplicate-reader-id' as const,
+          summary:
+            'More than one formal managed page currently points at the same Reader document id.',
+          suggestedAction:
+            'Inspect the listed pages, keep the canonical page, then rename, archive, or delete the extras.',
+          debugFacts: [
+            `namespaceRoots=${auditResult.namespaceRoots.join(', ')}`,
+            `duplicatePages=${duplicateGroup.pages.map((page) => page.pageTitle).join(', ')}`,
+          ],
+          readerDocumentId: duplicateGroup.readerDocumentId,
+          namespacePrefix: formalNamespaceRoot,
         })),
         ...auditResult.missingReaderIdPages.map((page) => ({
           book: page.pageTitle,
           message: `Managed page is missing rw-reader-id: ${page.pageTitle}`,
+          summary:
+            'This managed page does not currently expose rw-reader-id, so future retargeting and conflict resolution become less reliable.',
+          suggestedAction:
+            'Open the page, confirm whether it should remain managed, and re-sync or repair its properties if needed.',
+          debugFacts: [
+            `pageUuid=${page.pageUuid}`,
+            `aliases=${page.aliases.join(', ')}`,
+            `namespaceRoots=${auditResult.namespaceRoots.join(', ')}`,
+          ],
+          namespacePrefix: formalNamespaceRoot,
+          pageName: page.pageTitle,
         })),
         ...auditResult.overlongFileNamePages.map((page) => ({
           book: page.pageTitle,
           message: page.diagnosticMessage,
+          category: 'path-too-long' as const,
+          summary:
+            'This managed page title currently exceeds the filesystem file-name limit once Logseq maps it to pages/*.org.',
+          suggestedAction:
+            'Use a shorter stored page key or switch to an alias-based title fallback before this page needs to be recreated.',
+          debugFacts: [
+            `pageUuid=${page.pageUuid}`,
+            `fileStem=${page.fileStem}`,
+            `aliases=${page.aliases.join(', ')}`,
+          ],
+          namespacePrefix: formalNamespaceRoot,
+          pageName: page.pageTitle,
         })),
       ]
 
-      setErrors(auditIssues)
+      replaceRunIssues(auditIssues)
       setCurrent(auditResult.scannedPages)
       setTotal(auditResult.scannedPages)
       setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: auditResult.scannedPages,
+              issuesCount: auditIssues.length,
+              stats: {
+                pagesProcessed: auditResult.scannedPages,
+              },
+            },
+      )
       setStatusMessage(
         auditIssues.length > 0
           ? `Managed page audit found ${auditIssues.length} issue(s) across ${auditResult.scannedPages} page(s).`
@@ -1621,6 +1822,15 @@ export const ReadwiseContainer = () => {
     } catch (err: unknown) {
       logReadwiseError(formalSyncLogPrefix, 'managed page audit failed', err)
       setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              issuesCount: errors.length,
+            },
+      )
       setStatusMessage(
         `Managed page audit failed: ${describeUnknownError(err)}`,
       )
@@ -1647,12 +1857,25 @@ export const ReadwiseContainer = () => {
       label: statusPrefix,
       run: () => runCurrentPageReaderAction({ action, statusPrefix }),
     }
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(1)
     setCurrentBook('')
     setStatus('fetching')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: statusPrefix,
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: 1,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
     setStatusMessage(`${statusPrefix}: resolving the current managed page...`)
 
     try {
@@ -1738,6 +1961,16 @@ export const ReadwiseContainer = () => {
       setCurrent(1)
       updateReaderSyncEta('write-pages', 'page writes', 1, 1)
       setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: 1,
+              issuesCount: 0,
+            },
+      )
       setStatusMessage(
         pageSyncResult.pageRenamed
           ? `${statusPrefix}: rebuilt ${pageSyncResult.pageName} and renamed it from ${pageSyncResult.previousPageName}.`
@@ -1746,6 +1979,16 @@ export const ReadwiseContainer = () => {
     } catch (err: unknown) {
       logReadwiseError(formalSyncLogPrefix, 'current page Reader action failed', err)
       setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: current,
+              issuesCount: errors.length,
+            },
+      )
       setStatusMessage(`${statusPrefix} failed: ${describeUnknownError(err)}`)
     }
   }
@@ -1865,12 +2108,25 @@ export const ReadwiseContainer = () => {
           mode,
         }),
     }
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(mode === 'cached-full-rebuild' ? 1 : debugHighlightPageLimit ?? 0)
     setCurrentBook('')
     setStatus('fetching')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: statusPrefix,
+      namespacePrefix,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments,
+      debugHighlightPageLimit,
+      processedItems: 0,
+      issuesCount: 0,
+    })
     setStatusMessage(
       mode === 'incremental-window'
         ? `${statusPrefix}: scanning Reader highlights ${buildReaderSyncUpdatedAfterSummary(
@@ -1882,7 +2138,7 @@ export const ReadwiseContainer = () => {
     )
 
     const client = createReadwiseClient(token)
-    const syncErrorsForRun: Array<{ book: string; message: string }> = []
+    const syncErrorsForRun: RunIssue[] = []
     const runStartedAt = runStartedAtMs ?? Date.now()
     let loadStats: ReaderPreviewLoadStats = {
       highlightPagesScanned: 0,
@@ -2098,6 +2354,25 @@ export const ReadwiseContainer = () => {
         }
 
         setStatus('completed')
+        setRunIssueContext((previous) =>
+          previous == null
+            ? previous
+            : {
+                ...previous,
+                completedAt: new Date().toISOString(),
+                processedItems: 0,
+                issuesCount: 0,
+                stats: {
+                  highlightPagesScanned: loadStats.highlightPagesScanned,
+                  highlightsScanned: loadStats.highlightsScanned,
+                  parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+                  pagesTargeted: loadStats.pagesTargeted,
+                  pagesProcessed: 0,
+                  fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+                  fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+                },
+              },
+        )
         setStatusMessage(
           mode === 'incremental-window'
             ? `${statusPrefix}: no changed Reader pages were available.`
@@ -2162,8 +2437,9 @@ export const ReadwiseContainer = () => {
             formattedError: message,
             error: err,
           })
-          syncErrorsForRun.push({ book: pageTitle, message })
-          setErrors((prev) => [...prev, { book: pageTitle, message }])
+          const issue = { book: pageTitle, message }
+          syncErrorsForRun.push(issue)
+          appendRunIssue(issue)
         }
         loadStats.pagesProcessed += 1
         setCurrent(index + 1)
@@ -2262,6 +2538,30 @@ export const ReadwiseContainer = () => {
           ? ' Local highlight snapshot was left unchanged because this run did not exhaust the full Reader highlight library.'
           : ''
       setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: loadStats.pagesProcessed,
+              issuesCount: syncErrorsForRun.length,
+              stats: {
+                highlightPagesScanned: loadStats.highlightPagesScanned,
+                highlightsScanned: loadStats.highlightsScanned,
+                parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+                pagesTargeted: loadStats.pagesTargeted,
+                pagesProcessed: loadStats.pagesProcessed,
+                createdCount,
+                updatedCount,
+                unchangedCount,
+                renamedCount,
+                fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+                fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+                writePagesDurationMs,
+              },
+            },
+      )
       setStatusMessage(
         syncErrorsForRun.length > 0
           ? `${statusPrefix}: completed with ${syncErrorsForRun.length} error(s).`
@@ -2377,6 +2677,30 @@ export const ReadwiseContainer = () => {
       }
       logReadwiseError(logPrefix, 'sync failed', err)
       setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: loadStats.pagesProcessed,
+              issuesCount: syncErrorsForRun.length,
+              stats: {
+                highlightPagesScanned: loadStats.highlightPagesScanned,
+                highlightsScanned: loadStats.highlightsScanned,
+                parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+                pagesTargeted: loadStats.pagesTargeted,
+                pagesProcessed: loadStats.pagesProcessed,
+                createdCount,
+                updatedCount,
+                unchangedCount,
+                renamedCount,
+                fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+                fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+                writePagesDurationMs,
+              },
+            },
+      )
       setStatusMessage(
         isReaderPreviewLoadResumeError(err)
           ? `${statusPrefix} failed: ${describeUnknownError(err)}. Retry will resume ${describeReaderResumeTarget(err.resumeState)}.`
@@ -2433,7 +2757,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleClearReaderPreviewPages = async () => {
-    setErrors([])
+    clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(0)
@@ -2470,7 +2794,7 @@ export const ReadwiseContainer = () => {
       })
 
       if (result.skippedPages.length > 0) {
-        setErrors(
+        replaceRunIssues(
           result.skippedPages.map((pageTitle) => ({
             book: pageTitle,
             message: 'Delete failed for this Reader preview page.',
@@ -2516,6 +2840,8 @@ export const ReadwiseContainer = () => {
   const sessionTestSyncCount =
     activeFormalTestSessionCount ?? configuredSyncMaxBooks
   const sessionTestSyncLabel = `Incremental Sync (session test: ${sessionTestSyncCount})`
+  const issueCategorySummary =
+    errors.length > 0 ? summarizeRunIssueCategories(errors) : ''
   const statusLabel =
     status === 'completed' && errors.length > 0
       ? 'warning'
@@ -2716,16 +3042,44 @@ export const ReadwiseContainer = () => {
           {errors.length > 0 && (
             <div className="rw-feedback-block">
               <div className="rw-section-header">
-                <div className="rw-section-title">Run issues</div>
-                <div className="rw-section-meta">{errors.length} item(s)</div>
+                <div>
+                  <div className="rw-section-title">Run issues</div>
+                  <div className="rw-section-meta">
+                    {errors.length} item(s)
+                    {issueCategorySummary ? ` · ${issueCategorySummary}` : ''}
+                  </div>
+                </div>
+                <button
+                  className="rw-btn rw-btn-small"
+                  onClick={() => void handleCopyRunIssueBundle()}
+                >
+                  Copy Issue Bundle
+                </button>
               </div>
               <div className="rw-errors">
-                {errors.map((err, i) => (
+                {errors.map((err, i) => {
+                  const diagnosedIssue = diagnoseRunIssue(err)
+
+                  return (
                   <div key={i} className="rw-error-item">
-                    <strong>{err.book}</strong>
-                    {err.message}
+                    <strong>{diagnosedIssue.book}</strong>
+                    <div className="rw-error-label">
+                      {formatRunIssueCategoryLabel(diagnosedIssue.category)}
+                    </div>
+                    <div className="rw-error-summary">
+                      {diagnosedIssue.summary}
+                    </div>
+                    <div className="rw-error-message">
+                      {diagnosedIssue.message}
+                    </div>
+                    {diagnosedIssue.suggestedAction && (
+                      <div className="rw-error-action">
+                        Next: {diagnosedIssue.suggestedAction}
+                      </div>
+                    )}
                   </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )}

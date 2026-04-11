@@ -16,7 +16,7 @@ const main = async () => {
   root.render(<ReadwiseContainer />)
 
   logseq.App.registerUIItem('toolbar', {
-    key: 'felixhuoez-logseq-readwise-sync',
+    key: 'readwise-reader-sync',
     template:
       '<a class="button" data-on-click="syncHighlights" title="Open Readwise Sync" aria-label="Open Readwise Sync"><i class="ti ti-refresh"></i></a>',
   })

@@ -1,13 +1,13 @@
 {
-  "name": "logseq-readwise-sync-fork",
-  "version": "0.1.0",
+  "name": "logseq-readwise-reader-sync",
+  "version": "0.1.1",
   "author": "FelixHuoEZ",
   "description": "Unofficial Reader v3 sync for Logseq.",
   "license": "MIT",
   "logseq": {
     "id": "felixhuoez-logseq-readwise-sync",
     "title": "Readwise Reader Sync",
-    "icon": "./icon.png",
+    "icon": "./icon-v2.png",
     "main": "dist/index.html"
   },
   "scripts": {
@@ -29,7 +29,7 @@
         "@semantic-release/github",
         {
           "assets": [
-            "logseq-readwise-sync-fork.zip"
+            "logseq-readwise-reader-sync.zip"
           ]
         }
       ]

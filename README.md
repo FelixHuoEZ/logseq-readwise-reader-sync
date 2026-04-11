@@ -27,11 +27,11 @@ Formal sync currently scans the Reader highlight library before grouping by pare
 
 ## Install From Release
 
-1. Download the latest `logseq-readwise-sync-fork.zip` from [Releases](https://github.com/FelixHuoEZ/logseq-readwise-reader-sync/releases).
-2. Extract the archive. It should produce a `logseq-readwise-sync-fork/` folder.
+1. Download the latest `logseq-readwise-reader-sync.zip` from [Releases](https://github.com/FelixHuoEZ/logseq-readwise-reader-sync/releases).
+2. Extract the archive. It should produce a `logseq-readwise-reader-sync/` folder.
 3. In Logseq, open `Plugins`.
 4. Choose `Load unpacked plugin`.
-5. Select the extracted `logseq-readwise-sync-fork/` folder.
+5. Select the extracted `logseq-readwise-reader-sync/` folder.
 
 ## Configure
 
@@ -96,7 +96,7 @@ To build a release-ready archive locally:
 npm run package:plugin
 ```
 
-This command creates `logseq-readwise-sync-fork.zip` in the repository root.
+This command creates `logseq-readwise-reader-sync.zip` in the repository root.
 
 ## Author
 

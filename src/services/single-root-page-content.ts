@@ -5,6 +5,8 @@ const delay = async (ms: number) =>
     window.setTimeout(resolve, ms)
   })
 
+const INSERTED_ROOT_POST_UPDATE_DELAY_MS = 500
+
 const removeDirectChildren = async (block: BlockEntity) => {
   for (const child of block.children ?? []) {
     const childUuid = Array.isArray(child) ? child[1] : child.uuid
@@ -17,6 +19,8 @@ const stabilizeInsertedRootBlock = async (
   pageName: string,
   content: string,
 ) => {
+  // Best-effort rewrite only. Raw file diffs still show Logseq may later insert
+  // one blank line after `#+END_NOTE` during its own canonical serialization.
   await delay(300)
 
   const refreshedTree = await logseq.Editor.getPageBlocksTree(page.name)
@@ -27,12 +31,14 @@ const stabilizeInsertedRootBlock = async (
   }
 
   await logseq.Editor.updateBlock(refreshedRoot.uuid, content)
-  await delay(300)
+  await delay(INSERTED_ROOT_POST_UPDATE_DELAY_MS)
 
   console.info('[Readwise Sync] stabilized inserted root block', {
     pageName,
     rootBlockUuid: refreshedRoot.uuid,
     topLevelBlockCountAfterInsert: refreshedTree?.length ?? null,
+    postUpdateDelayMs: INSERTED_ROOT_POST_UPDATE_DELAY_MS,
+    strategy: 'best-effort-post-insert-update',
   })
 }
 

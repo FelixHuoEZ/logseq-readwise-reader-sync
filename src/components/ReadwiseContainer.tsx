@@ -78,6 +78,12 @@ interface ReaderSyncEtaSnapshot {
   observedAt: number
 }
 
+interface ManagedPageRepairCandidate {
+  pageName: string
+  readerDocumentId: string
+  signatures: string[]
+}
+
 export const ReadwiseContainer = () => {
   const defaultReaderFullScanTargetDocuments = 20
   const defaultReaderFullScanDebugHighlightPageLimit = 0
@@ -323,8 +329,140 @@ export const ReadwiseContainer = () => {
     right: { created_at: string },
   ) => left.created_at.localeCompare(right.created_at)
 
+  const collectPageAliases = (page: PageEntity): string[] =>
+    uniqueStrings([
+      typeof page.originalName === 'string' ? page.originalName : '',
+      typeof page.title === 'string' ? page.title : '',
+      typeof page.name === 'string' ? page.name : '',
+    ])
+
+  const resolvePreferredPageName = (page: PageEntity): string | null =>
+    collectPageAliases(page)[0] ?? null
+
   const isManagedFormalPageName = (pageName: string) =>
     pageName === formalNamespaceRoot || pageName.startsWith(`${formalNamespaceRoot}/`)
+
+  const extractReaderDocumentIdFromPage = (page: PageEntity): string | null =>
+    extractStringValue(
+      readPropertyValue(
+        page.properties as Record<string, unknown> | undefined,
+        'rw-reader-id',
+      ),
+    )
+
+  const loadReaderDocumentIdFromPage = async (
+    page: PageEntity,
+  ): Promise<string | null> => {
+    const directValue = extractReaderDocumentIdFromPage(page)
+    if (directValue) return directValue
+    if (!page.uuid) return null
+
+    try {
+      return extractStringValue(
+        await logseq.Editor.getBlockProperty(page.uuid, 'rw-reader-id'),
+      )
+    } catch {
+      return null
+    }
+  }
+
+  const detectLegacyManagedPageRepairSignatures = (rootContent: string) => {
+    const signatures: string[] = []
+    const propertiesBlocks = (rootContent.match(/^:PROPERTIES:$/gm) ?? []).length
+    const noteBlocks = (rootContent.match(/^#\+BEGIN_NOTE$/gm) ?? []).length
+    const syncHeaders = (
+      rootContent.match(/^\* Highlights (?:first synced|refreshed) by \[\[Readwise\]\]/gm) ??
+      []
+    ).length
+
+    if (propertiesBlocks > 1) {
+      signatures.push('duplicate properties block')
+    }
+
+    if (noteBlocks > 1) {
+      signatures.push('duplicate note block')
+    }
+
+    if (syncHeaders > 1) {
+      signatures.push('duplicate sync header')
+    }
+
+    return signatures
+  }
+
+  const scanManagedPagesForRepairCandidates = async (options?: {
+    onProgress?: (progress: {
+      total: number
+      completed: number
+      pageName: string
+    }) => void
+  }): Promise<{
+    scannedPages: number
+    candidates: ManagedPageRepairCandidate[]
+    issues: RunIssue[]
+  }> => {
+    const allPages = (await logseq.Editor.getAllPages()) ?? []
+    const managedPages = allPages.filter((page) =>
+      collectPageAliases(page as PageEntity).some((alias) =>
+        isManagedFormalPageName(alias),
+      ),
+    ) as PageEntity[]
+    const candidates: ManagedPageRepairCandidate[] = []
+    const issues: RunIssue[] = []
+
+    for (let index = 0; index < managedPages.length; index += 1) {
+      const page = managedPages[index]!
+      const pageName =
+        resolvePreferredPageName(page) ??
+        page.originalName ??
+        page.name ??
+        page.title ??
+        ''
+
+      options?.onProgress?.({
+        total: managedPages.length,
+        completed: index + 1,
+        pageName,
+      })
+
+      const pageBlocksTree = await logseq.Editor.getPageBlocksTree(page.name)
+      const rootContent = pageBlocksTree?.[0]?.content ?? ''
+      const signatures = detectLegacyManagedPageRepairSignatures(rootContent)
+
+      if (signatures.length === 0) {
+        continue
+      }
+
+      const readerDocumentId = await loadReaderDocumentIdFromPage(page)
+
+      if (!readerDocumentId) {
+        issues.push({
+          book: pageName || 'Managed page',
+          message: `Repair skipped because rw-reader-id is missing for ${pageName}.`,
+          summary:
+            'This page matches the legacy corruption signature, but the plugin cannot map it back to a Reader document.',
+          suggestedAction:
+            'Repair rw-reader-id first, or run Full Refresh after restoring the page identity.',
+          debugFacts: [`detectedSignatures=${signatures.join(', ')}`],
+          namespacePrefix: formalNamespaceRoot,
+          pageName: pageName || null,
+        })
+        continue
+      }
+
+      candidates.push({
+        pageName,
+        readerDocumentId,
+        signatures,
+      })
+    }
+
+    return {
+      scannedPages: managedPages.length,
+      candidates,
+      issues,
+    }
+  }
 
   const resolveCurrentManagedReaderPage = async (): Promise<{
     page: PageEntity
@@ -350,11 +488,8 @@ export const ReadwiseContainer = () => {
       throw new Error(`Current page is not a managed ${formalNamespaceRoot} page.`)
     }
 
-    const readerDocumentId = extractStringValue(
-      readPropertyValue(
-        currentPage.properties as Record<string, unknown> | undefined,
-        'rw-reader-id',
-      ),
+    const readerDocumentId = extractReaderDocumentIdFromPage(
+      currentPage as PageEntity,
     )
 
     if (!readerDocumentId) {
@@ -1837,6 +1972,261 @@ export const ReadwiseContainer = () => {
     }
   }
 
+  const handleRepairManagedPages = async () => {
+    const token = logseq.settings?.apiToken as string
+    if (!token) {
+      setStatus('error')
+      setStatusMessage('No API token configured. Set it in plugin settings.')
+      return
+    }
+
+    clearRunIssues()
+    setPageDiffResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Repair managed pages',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    beginReaderSyncEtaPhase('fetch-highlights', 'repair scan')
+    setStatusMessage(
+      `Scanning managed pages under ${formalNamespaceRoot} for legacy corruption signatures...`,
+    )
+
+    try {
+      const graphContext = await loadCurrentGraphContextV1()
+      const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
+      const client = createReadwiseClient(token)
+      const scanResult = await scanManagedPagesForRepairCandidates({
+        onProgress: ({ total, completed, pageName }) => {
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageName)
+          updateReaderSyncEta('fetch-highlights', 'repair scan', completed, total)
+          setStatusMessage(
+            `Scanning ${completed} / ${total} managed page(s) for repair candidates...`,
+          )
+        },
+      })
+
+      const repairIssues: RunIssue[] = [...scanResult.issues]
+      replaceRunIssues(repairIssues)
+
+      if (scanResult.candidates.length === 0) {
+        setStatus('completed')
+        setRunIssueContext((previous) =>
+          previous == null
+            ? previous
+            : {
+                ...previous,
+                completedAt: new Date().toISOString(),
+                processedItems: scanResult.scannedPages,
+                issuesCount: repairIssues.length,
+                stats: {
+                  pagesProcessed: scanResult.scannedPages,
+                },
+              },
+        )
+        setStatusMessage(
+          repairIssues.length > 0
+            ? `Repair scan found ${repairIssues.length} issue(s), but no managed pages could be repaired automatically.`
+            : `Repair scan found no managed pages that need this legacy fix.`,
+        )
+        return
+      }
+
+      const candidateIds = uniqueStrings(
+        scanResult.candidates.map((candidate) => candidate.readerDocumentId),
+      )
+      const highlightsByParent =
+        await previewCache.loadGroupedHighlightsByParent(candidateIds)
+      const cachedParentDocuments = await previewCache.getCachedParentDocuments(
+        candidateIds,
+      )
+
+      setStatus('syncing')
+      setCurrent(0)
+      setTotal(scanResult.candidates.length)
+      setCurrentBook('')
+      beginReaderSyncEtaPhase('write-pages', 'page repairs')
+      setStatusMessage(
+        `Repairing ${scanResult.candidates.length} managed page(s) from the cached highlight snapshot...`,
+      )
+
+      let repairedCount = 0
+
+      for (let index = 0; index < scanResult.candidates.length; index += 1) {
+        const candidate = scanResult.candidates[index]!
+        setCurrentBook(candidate.pageName)
+
+        const highlights = [
+          ...(highlightsByParent.get(candidate.readerDocumentId) ?? []),
+        ].sort(sortReaderDocumentsByCreatedAtAscending)
+
+        if (highlights.length === 0) {
+          const issue: RunIssue = {
+            book: candidate.pageName,
+            message: `Repair skipped because no cached highlights were found for rw-reader-id=${candidate.readerDocumentId}.`,
+            summary:
+              'Automatic repair needs the cached highlight snapshot for this page.',
+            suggestedAction:
+              'Run Full Refresh first, then rerun Repair Managed Pages.',
+            debugFacts: [
+              `detectedSignatures=${candidate.signatures.join(', ')}`,
+            ],
+            readerDocumentId: candidate.readerDocumentId,
+            namespacePrefix: formalNamespaceRoot,
+            pageName: candidate.pageName,
+          }
+          repairIssues.push(issue)
+          appendRunIssue(issue)
+          setCurrent(index + 1)
+          updateReaderSyncEta(
+            'write-pages',
+            'page repairs',
+            index + 1,
+            scanResult.candidates.length,
+          )
+          continue
+        }
+
+        let document =
+          cachedParentDocuments.get(candidate.readerDocumentId) ?? null
+
+        if (!document) {
+          document = await loadReaderParentDocumentByIdWithRetry(
+            client,
+            candidate.readerDocumentId,
+            formalSyncLogPrefix,
+          )
+
+          if (document) {
+            await previewCache.putParentDocuments([document])
+          }
+        }
+
+        if (!document) {
+          const issue: RunIssue = {
+            book: candidate.pageName,
+            message: `Repair skipped because Reader did not return parent metadata for rw-reader-id=${candidate.readerDocumentId}.`,
+            summary:
+              'Automatic repair could not rebuild this page without its parent Reader document.',
+            suggestedAction:
+              'Run Full Refresh or inspect the Reader document state, then retry repair.',
+            debugFacts: [
+              `detectedSignatures=${candidate.signatures.join(', ')}`,
+            ],
+            readerDocumentId: candidate.readerDocumentId,
+            namespacePrefix: formalNamespaceRoot,
+            pageName: candidate.pageName,
+          }
+          repairIssues.push(issue)
+          appendRunIssue(issue)
+          setCurrent(index + 1)
+          updateReaderSyncEta(
+            'write-pages',
+            'page repairs',
+            index + 1,
+            scanResult.candidates.length,
+          )
+          continue
+        }
+
+        try {
+          await syncRenderedReaderPreviewPage(
+            {
+              document,
+              highlights,
+              highlightCoverage: 'cached-full-rebuild',
+            },
+            formalNamespaceRoot,
+            formalSyncLogPrefix,
+            {
+              pageResolveMode: 'reader_id_then_title',
+              identityNamespaceRoot: formalNamespaceRoot,
+            },
+          )
+          repairedCount += 1
+        } catch (err: unknown) {
+          const issue: RunIssue = {
+            book: candidate.pageName,
+            message: describeUnknownError(err),
+            summary:
+              'Automatic repair attempted to rewrite this managed page but the write failed.',
+            suggestedAction:
+              'Copy the issue bundle and inspect the failing page before retrying repair.',
+            debugFacts: [
+              `detectedSignatures=${candidate.signatures.join(', ')}`,
+            ],
+            readerDocumentId: candidate.readerDocumentId,
+            namespacePrefix: formalNamespaceRoot,
+            pageName: candidate.pageName,
+          }
+          repairIssues.push(issue)
+          appendRunIssue(issue)
+        }
+
+        setCurrent(index + 1)
+        updateReaderSyncEta(
+          'write-pages',
+          'page repairs',
+          index + 1,
+          scanResult.candidates.length,
+        )
+        setStatusMessage(
+          `Repairing ${scanResult.candidates.length} managed page(s)... ${index + 1} / ${scanResult.candidates.length}.`,
+        )
+      }
+
+      setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: scanResult.scannedPages,
+              issuesCount: repairIssues.length,
+              stats: {
+                pagesTargeted: scanResult.candidates.length,
+                pagesProcessed: repairedCount,
+              },
+            },
+      )
+      setStatusMessage(
+        repairIssues.length > 0
+          ? `Repaired ${repairedCount} managed page(s); ${repairIssues.length} issue(s) still need attention.`
+          : `Repaired ${repairedCount} managed page(s) that matched the legacy duplication signature.`,
+      )
+    } catch (err: unknown) {
+      logReadwiseError(formalSyncLogPrefix, 'managed page repair failed', err)
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              issuesCount: errors.length,
+            },
+      )
+      setStatusMessage(
+        `Repair managed pages failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
   const runCurrentPageReaderAction = async ({
     action,
     statusPrefix,
@@ -3259,6 +3649,9 @@ export const ReadwiseContainer = () => {
                       <button className="rw-btn" onClick={handleAuditManagedIds}>
                         Audit Managed IDs
                       </button>
+                      <button className="rw-btn" onClick={handleRepairManagedPages}>
+                        Repair Managed Pages
+                      </button>
                       <button className="rw-btn" onClick={handleBackupFormalTestPages}>
                         Backup Test Pages
                       </button>
@@ -3331,6 +3724,12 @@ export const ReadwiseContainer = () => {
                       Audit Managed IDs checks duplicate `rw-reader-id`
                       bindings, missing `rw-reader-id`, and managed page names
                       that would exceed Logseq file-name limits on recreate.
+                    </div>
+                    <div className="rw-action-note">
+                      Repair Managed Pages scans `ReadwiseHighlights/*` for the
+                      legacy duplicated metadata/note/header signature, then
+                      rewrites only the matched pages from the cached highlight
+                      snapshot.
                     </div>
                   </div>
                 </>

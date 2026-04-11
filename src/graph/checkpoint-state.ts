@@ -2,6 +2,7 @@ import type { PageEntity } from '@logseq/libs/dist/LSPlugin'
 import { logReadwiseWarn } from '../logging'
 
 export type GraphCheckpointSourceV1 = 'full_sync' | 'incremental_sync'
+export type GraphReaderSyncSourceV1 = 'full_reconcile' | 'incremental_sync'
 
 export interface GraphCheckpointStateV1 {
   schemaVersion: 1
@@ -10,9 +11,16 @@ export interface GraphCheckpointStateV1 {
   source: GraphCheckpointSourceV1
 }
 
+export interface GraphReaderSyncStateV1 {
+  schemaVersion: 1
+  updatedAfter: string | null
+  committedAt: string
+  source: GraphReaderSyncSourceV1
+}
+
 export interface GraphLastFormalSyncSummaryV1 {
   schemaVersion: 1
-  runKind: 'reader_full_scan'
+  runKind: 'reader_full_scan' | 'reader_incremental' | 'reader_cached_rebuild'
   status: 'success' | 'partial_error' | 'failed'
   completedAt: string
   highlightPagesScanned: number
@@ -62,6 +70,13 @@ const LAST_FORMAL_SYNC_PROPERTY_KEYS = {
   fetchDocumentsDurationMs: 'rw-last-formal-sync-fetch-documents-duration-ms',
   writePagesDurationMs: 'rw-last-formal-sync-write-pages-duration-ms',
   failureSummary: 'rw-last-formal-sync-failure-summary',
+} as const
+
+const READER_SYNC_PROPERTY_KEYS = {
+  schemaVersion: 'rw-reader-sync-schema',
+  updatedAfter: 'rw-reader-sync-updated-after',
+  committedAt: 'rw-reader-sync-committed-at',
+  source: 'rw-reader-sync-source',
 } as const
 
 const LAST_FORMAL_SYNC_SUMMARY_BLOCK_UUID =
@@ -139,6 +154,20 @@ const parseCheckpointSource = (
   return null
 }
 
+const parseReaderSyncSource = (
+  page: PageEntity,
+): GraphReaderSyncSourceV1 | null => {
+  const rawValue = extractStringValue(
+    readPropertyValue(page.properties, READER_SYNC_PROPERTY_KEYS.source),
+  )
+
+  if (rawValue === 'full_reconcile' || rawValue === 'incremental_sync') {
+    return rawValue
+  }
+
+  return null
+}
+
 const parseCheckpointPage = (
   page: PageEntity | null,
 ): GraphCheckpointStateV1 | null => {
@@ -159,6 +188,34 @@ const parseCheckpointPage = (
     updatedAfter:
       extractStringValue(
         readPropertyValue(page.properties, CHECKPOINT_PROPERTY_KEYS.updatedAfter),
+      ) ?? null,
+    committedAt,
+    source,
+  }
+}
+
+const parseReaderSyncPage = (
+  page: PageEntity | null,
+): GraphReaderSyncStateV1 | null => {
+  if (!page) return null
+
+  const schemaVersion = extractNumberValue(
+    readPropertyValue(page.properties, READER_SYNC_PROPERTY_KEYS.schemaVersion),
+  )
+  const committedAt = extractStringValue(
+    readPropertyValue(page.properties, READER_SYNC_PROPERTY_KEYS.committedAt),
+  )
+  const source = parseReaderSyncSource(page)
+
+  if (schemaVersion !== 1 || committedAt == null || source == null) {
+    return null
+  }
+
+  return {
+    schemaVersion: 1,
+    updatedAfter:
+      extractStringValue(
+        readPropertyValue(page.properties, READER_SYNC_PROPERTY_KEYS.updatedAfter),
       ) ?? null,
     committedAt,
     source,
@@ -266,10 +323,25 @@ export const loadGraphCheckpointStateV1 =
       await logseq.Editor.getPage(GRAPH_LEGACY_CHECKPOINT_PAGE_NAME_V1),
     )
 
+export const loadGraphReaderSyncStateV1 =
+  async (): Promise<GraphReaderSyncStateV1 | null> =>
+    parseReaderSyncPage(
+      await logseq.Editor.getPage(GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1),
+    )
+
 export const pickPreferredCheckpointStateV1 = (
   currentState: GraphCheckpointStateV1 | null,
   nextState: GraphCheckpointStateV1,
 ): GraphCheckpointStateV1 =>
+  currentState == null ||
+  compareUpdatedAfter(nextState.updatedAfter, currentState.updatedAfter) >= 0
+    ? nextState
+    : currentState
+
+export const pickPreferredReaderSyncStateV1 = (
+  currentState: GraphReaderSyncStateV1 | null,
+  nextState: GraphReaderSyncStateV1,
+): GraphReaderSyncStateV1 =>
   currentState == null ||
   compareUpdatedAfter(nextState.updatedAfter, currentState.updatedAfter) >= 0
     ? nextState
@@ -300,6 +372,39 @@ export const saveGraphCheckpointStateV1 = async (
   await logseq.Editor.upsertBlockProperty(
     page.uuid,
     CHECKPOINT_PROPERTY_KEYS.source,
+    preferredState.source,
+  )
+
+  return preferredState
+}
+
+export const saveGraphReaderSyncStateV1 = async (
+  nextState: GraphReaderSyncStateV1,
+): Promise<GraphReaderSyncStateV1> => {
+  await migrateLegacyCheckpointOffFormalSyncStatePageV1()
+
+  const currentState = await loadGraphReaderSyncStateV1()
+  const preferredState = pickPreferredReaderSyncStateV1(currentState, nextState)
+  const page = await ensureFormalSyncStatePage()
+
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    READER_SYNC_PROPERTY_KEYS.schemaVersion,
+    preferredState.schemaVersion,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    READER_SYNC_PROPERTY_KEYS.updatedAfter,
+    preferredState.updatedAfter ?? '',
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    READER_SYNC_PROPERTY_KEYS.committedAt,
+    preferredState.committedAt,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    READER_SYNC_PROPERTY_KEYS.source,
     preferredState.source,
   )
 
@@ -343,7 +448,9 @@ export const loadGraphLastFormalSyncSummaryV1 =
 
     if (
       schemaVersion !== 1 ||
-      runKind !== 'reader_full_scan' ||
+      (runKind !== 'reader_full_scan' &&
+        runKind !== 'reader_incremental' &&
+        runKind !== 'reader_cached_rebuild') ||
       (status !== 'success' && status !== 'partial_error' && status !== 'failed') ||
       completedAt == null
     ) {
@@ -355,7 +462,7 @@ export const loadGraphLastFormalSyncSummaryV1 =
 
     return {
       schemaVersion: 1,
-      runKind: 'reader_full_scan',
+      runKind,
       status,
       completedAt,
       highlightPagesScanned: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightPagesScanned),

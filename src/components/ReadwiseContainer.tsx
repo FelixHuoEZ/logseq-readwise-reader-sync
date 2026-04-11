@@ -1865,7 +1865,7 @@ export const ReadwiseContainer = () => {
         <div className="rw-header">
           <div className="rw-header-copy">
             <div className="rw-kicker">Reader v3 formal sync</div>
-            <h2>Readwise Sync Fork</h2>
+            <h2>Readwise Reader Sync</h2>
             <div className="rw-header-subtitle">{formalSyncScopeLabel}</div>
           </div>
           <div className="rw-header-meta">

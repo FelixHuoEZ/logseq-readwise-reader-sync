@@ -2,11 +2,11 @@
   "name": "logseq-readwise-sync-fork",
   "version": "0.1.0",
   "author": "FelixHuoEZ (fork of hkgnp and benjypng)",
-  "description": "Reader v3-based Logseq Readwise sync fork with managed pages and formal sync diagnostics.",
+  "description": "Unofficial Reader v3-based Logseq Readwise sync plugin with managed pages and formal sync diagnostics.",
   "license": "MIT",
   "logseq": {
     "id": "felixhuoez-logseq-readwise-sync",
-    "title": "Readwise Sync Fork",
+    "title": "Readwise Reader Sync (Unofficial)",
     "icon": "./icon.png",
     "main": "dist/index.html"
   },

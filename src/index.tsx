@@ -8,7 +8,7 @@ import { settingsSchema } from './settings'
 import { runSyncPlanPreviewV1 } from './sync'
 
 const main = async () => {
-  logseq.UI.showMsg('Readwise Sync Fork loaded')
+  logseq.UI.showMsg('Readwise Reader Sync loaded')
 
   const el = document.getElementById('app')
   if (!el) return

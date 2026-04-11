@@ -3,6 +3,8 @@ misc
 
 # Logs
 logs
+.release/
+logseq-readwise-plugin.zip
 *.log
 npm-debug.log*
 yarn-debug.log*

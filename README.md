@@ -1,157 +1,108 @@
-[:gift_heart: Sponsor this project on Github](https://github.com/sponsors/hkgnp) or [:coffee: Get me a coffee](https://www.buymeacoffee.com/hkgnp.dev) if you like this plugin!
+# Logseq Readwise Plugin Fork
 
-> README below is outdated since the major change on 14/2/2022. Pending a rewrite.
+Logseq plugin fork for syncing Readwise highlights into managed Logseq pages.
 
-# Overview
+This fork prioritizes stability, observability, and local control over parity with the old unofficial plugin or the official black-box export flow.
 
-This is a simple Readwise plugin to:
+## Current Status
 
-1. Pull in all your highlights from Readwise
-2. For subsequent pulls, it only pulls in those not in the graph
+- Formal sync uses Reader v3 highlight scans.
+- The plugin groups highlights by `parent_id` and rewrites managed pages under `ReadwiseHighlights/<title>`.
+- Managed page identity is `rw-reader-id`, not page title alone.
+- The plugin records the latest formal sync summary in `Readwise Sync State`.
+- Legacy checkpoint state, if needed, lives in `Readwise Legacy Sync State`.
 
-There is now a [FAQ](https://github.com/hkgnp/logseq-readwise-plugin#detailed-instructions) that you may find helpful to read before you use this plugin.
+## Features
 
-# Samples
+- Reader v3 formal sync with explicit progress, ETA, and structured logging
+- Managed page identity tracking through `rw-reader-id`
+- Automatic page retargeting when a managed page title changes
+- Hidden maintenance tools for debug, preview, and recovery flows
+- Formal sync summary page with counts and phase timings
+- Log level control through plugin settings
 
-### Sample of a book highlight
+## Known Tradeoff
 
-![](/screenshots/sample-highlights.png)
+Formal sync currently scans the Reader highlight library before grouping by parent document. Large libraries can take minutes to fetch. For debug runs, reduce the target document count and add a temporary highlight page cap in plugin settings.
 
-### Sample of a tweet highlight
+## Install From Release
 
-![](/screenshots/sample-tweet.png)
+1. Download the latest `logseq-readwise-plugin.zip` from [Releases](https://github.com/FelixHuoEZ/logseq-readwise-plugin-fork/releases).
+2. Extract the archive. It should produce a `logseq-readwise-plugin/` folder.
+3. In Logseq, open `Plugins`.
+4. Choose `Load unpacked plugin`.
+5. Select the extracted `logseq-readwise-plugin/` folder.
 
-### Sample of a tweet thread
+## Configure
 
-![](/screenshots/sample-tweetthread.png)
+1. Open plugin settings.
+2. Paste your Readwise access token from [readwise.io/access_token](https://readwise.io/access_token).
+3. Leave the Debug section at defaults for normal use:
+   - `Log Level = warn`
+   - `Reader Full Scan Target Documents = 20`
+   - `Reader Full Scan Debug Highlight Page Limit = 0`
 
-# Random Highlights
+## Use
 
-![](/screenshots/demo.gif)
+1. Open the plugin panel.
+2. Click `Start Sync`.
+3. Wait for the plugin to:
+   - scan Reader highlights
+   - group them by parent document
+   - fetch the target parent documents
+   - rewrite managed pages
 
-![](/screenshots/inline-random.gif)
+After each formal sync:
 
-# Book View
+- `Readwise Sync State` shows the latest formal sync summary.
+- `ReadwiseHighlights/<title>` pages are updated in place.
+- Page identity continues to follow `rw-reader-id`.
 
-If you would like to view all your imported books as cards, you can use the Book Renderer function. Simply go to any block and trigger it by typing `/Book Renderer`.
+## Managed Page Model
 
-![](/screenshots/renderer.gif)
+- Formal pages live in `ReadwiseHighlights/<title>`.
+- The plugin first resolves a page by `rw-reader-id`.
+- If no page matches by `rw-reader-id`, it falls back to the managed title.
+- If the managed title changed, the plugin renames the matched managed page to the current tracked title.
 
-# Disclaimer
+## Debug And Recovery
 
-If you have multiple sources (e.g. books, tweets, instapaper) and thousands of highlights, the initial pull can take a while. You will have a progress bar to keep track on what's happening, and can terminate the pull process at any time.
+The panel hides maintenance tools during normal use. They appear when formal sync detects conflicting managed pages, or when you explicitly expose them during debugging.
 
-Each source will have its own page in Logseq. If there has been an error, just remove the necessary pages and refresh your graph. Assuming that you do not have any filenames containing `(Readwise)`, you can use the following command in MacOS to remove all the pages added by the plugin. Be sure to refresh your graph in Logseq before attempting any new synchronisation.
+Debug settings affect different phases:
 
-`find . -name "*(Readwise)*" -delete`
+- `Reader Full Scan Target Documents`
+  - limits how many managed pages formal sync rewrites
+  - mainly reduces parent-document fetch and page-write time
+- `Reader Full Scan Debug Highlight Page Limit`
+  - limits how many Reader highlight pages formal sync scans
+  - mainly reduces highlight-scan time
+  - roughly `100` highlights per page
 
-New highlights are found by comparing the date of the highlight against the date of the latest highlight in your last synchronisation. When using the plugin for the first time, the initial date is set to `1970-01-01T00:00:00Z`.
+Use the highlight page limit only for short debug runs. Set it back to `0` for real formal sync.
 
-# Usage
+## Development
 
-### Migrating from manual loading to marketplace
+```bash
+npm install
+npm run build
+```
 
-**BEFORE YOU INSTALL FROM THE MARKETPLACE**, please follow the instructions below to avoid synchronising duplicate highlights:
+To build a release-ready archive locally:
 
-1. Go to the settings folder of the manually loaded plugin (Windows: `C:\Users\Peter\.logseq\settings` or MacOS: `~/.logseq/settings).
-2. Open the file `logseq-readwise-plugin.json` and copy the contents of the file somewhere.
-3. Uninstall the manually loaded plugin.
-4. Install the plugin from the marketplace.
-5. Click on the settings icon in the plugins page and click `Open settings`.
-   ![](/screenshots/settings.png).
-6. Copy the contents in Step 2 and paste it in the file that opens up. Save and close the file.
-7. Restart Logseq.
-8. You can start to use the plugin after!
+```bash
+npm run package:plugin
+```
 
-### First time (from the marketplace - preferred)
+This command creates `logseq-readwise-plugin.zip` in the repository root.
 
-1. Go to your [Readwise Access Token](https://readwise.io/access_token) page and obtain a new token. Keep this token somewhere safe.
-2. Download the logseq-readwise-plugin from the Logseq marketplace.
-3. Click on the icon (📖) in the plugins bar.
-4. If you are using the plugin for the first time, do remember to click the button `Click here if you are using this plugin for the first time`.
-5. Key in the token that you obtained in (1) and click `Save Token`.
-6. Review the number of sources and highlights that you have.
-7. Click button to sync highlights.
+## Credits
 
-![](/screenshots/sync.png)
+This fork builds on work from:
 
-### Subsequent times
+- [hkgnp](https://github.com/hkgnp)
+- [benjypng](https://github.com/benjypng)
 
-1. Click refresh to retrieve the recent number of changes.
-2. Click button to sync highlights.
+## License
 
-# Detailed Instructions
-
-## How do I reset the export of my whole library, e.g. to start afresh?
-
-As this plugin is still new, you may encounter situations where you want to reset your export. Firstly, thank you so much for trying this plugin out and reporting the bugs that I've missed! Secondly, you can reset by one of 2 approaches:
-
-**Please backup your graph before attempting any of the below**
-
-1. Using a script to find all files ending with `(Readwise)` and deleting them. Naturally, this \*\*assumes that you do not have any other pages whose name includes `(Readwise)` if not they will be deleted as well. After deleting the files, please restart Logseq and refresh your graph. A MacOS script example would be:
-
-`find . -name "*(Readwise)*" -delete`
-
-2. Using File Explorer (Windows) or Finder (MacOS) to find these files and delete them manually. Files created by this plugin have `(Readwise)` added to the end of their filenames.
-
-## What happens when I take new highlights? Do they sync automatically with Logseq?
-
-Not really. When you open Logseq and click on the plugin button (📖), you will see the new number of sources that you took highlights from since your last sync. If you would like to sync those sources, you can proceed to click on the `Sync New Sources` button.
-
-## What is a source?
-
-A source is basically a book, a twitter account, etc that contains highlights.
-
-## Why are new pages being created?
-
-If the new highlight(s) is from a new source, a new page in Logseq will be created. If it is from an _existing_ source, the highlight(s) will be appended to the top of your current highlights list, right under the `Readwise Highlights` block.
-
-Certain services such as Amazon Kindle, Instapaper do not provide automatic synchronisation with Readwise. In these cases, you can either wait for it to appear as a new source in the plugin, or proceed to your Readwise dashboard to manually sync them, and then initiate the sync from the plugin button (📖).
-
-## How do I trigger a new sync from Logseq?
-
-By default, the plugin will automatically sync when you open the Logseq app and look for new highlights. You can then click the `Sync New Sources` button to initiate the sync.
-
-Without clicking `Sync New Sources` button, the plugin will not automatically create pages or pull highlights in for you.
-
-## What happens when I update highlights in Readwise? Will those changes automatically sync with Logseq (or vice versa)?
-
-Unfortunately not. It will be technically challenging to look for that specific highlight within a page, and make changes to it without the possibility to accidentally removing edits made by the user.
-
-## Can I rename the page in Logseq?
-
-Unfortunately not as well. The plugin uses the original name given to the source to find and add subsequent highlights. If you rename it, when there are new highlights, a new page will be created for the source (with the old name). Hence, you should only rename when you do not expect any more highlights from that source, e.g. a book that you know you will not make any more highlights for it.
-
-## Can I edit the page that the plugin created for a source?
-
-Yes and no. As long as you **do not** change any of the below, you may edit the page, e.g. add in your own thoughts as child blocks under the highlights.
-
-- Rename the block `[[Readwise Highlights]]`.
-- Convert the block `[[Readwise Highlights]]` to a child block.
-
-The above is because `[[Readwise Highlights]]` is used when syncing new highlights to that source. If you have done any of the above, a new block called `[[Readwise Highlights]]` will be created and the highlights added under it. You will then need to clean it up after.
-
-## Where does the Location link in each Kindle highlight take me?
-
-If you have the Kindle app installed on your desktop, you will be brought directly to the highlight in the Kindle app when you click on the link.
-
-## What do I do if I have other Feature Requests to suggest or bugs to report?
-
-Feel free to look for me on Discord, or just opening an issue in this repository.
-
-Thanks for trying out the plugin!
-
-_Adapted from [Readwise's help article for Obsidian](https://help.readwise.io/article/125-how-does-the-readwise-to-obsidian-export-integration-work)_
-
-# Future
-
-- [x] Change style of popup.
-- [x] Fix issue of pulling new highlights removing old blocks from existing pages.
-- [x] Fix source of non-Kindle highlights.
-- [x] Account for cases that have more than 1000 cases.
-- [ ] Refactor code.
-- [ ] Will be incorporating the possibility of only pulling highlights for specific sources.
-
-# Credits
-
-Big thanks to [@MattHulse](https://github.com/MattHulse) for helping to contributing to the code (duplicate source with same name, but has no highlights)!
+[MIT](./LICENSE.md)

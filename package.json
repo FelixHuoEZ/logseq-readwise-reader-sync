@@ -1,17 +1,19 @@
 {
   "name": "logseq-readwise-plugin",
-  "author": "benjypng",
-  "description": "Unofficial Readwise plugin to pull in all your highlights from Readwise.",
+  "version": "0.1.0",
+  "author": "FelixHuoEZ (fork of hkgnp and benjypng)",
+  "description": "Reader v3-based Logseq Readwise sync fork with managed pages and formal sync diagnostics.",
   "license": "MIT",
   "logseq": {
     "id": "logseq-readwise-plugin",
-    "title": "logseq-readwise-plugin",
+    "title": "Readwise Sync",
     "icon": "./icon.png",
     "main": "dist/index.html"
   },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "package:plugin": "npm run build && node scripts/package-plugin.mjs",
     "diag:page-snapshot": "node scripts/raw-page-snapshot.mjs",
     "diag:reader-highlights": "node scripts/reader-highlight-dump.mjs",
     "diag:reader-v3-feasibility": "node scripts/reader-v3-feasibility.mjs",

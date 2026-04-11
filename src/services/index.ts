@@ -1,4 +1,5 @@
 export * from './append-highlights'
+export * from './audit-managed-reader-pages'
 export * from './formal-test-pages'
 export * from './page-file-diff'
 export * from './readwise-page-names'

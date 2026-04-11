@@ -25,10 +25,11 @@ import {
 } from '../graph'
 import { createGraphReaderSyncCacheV1 } from '../cache'
 import {
+  auditManagedReaderPagesV1,
   backupFormalTestPages,
-    captureCurrentPageFileSnapshotV1,
-    clearManagedPagesByNamespacePrefix,
-    clearManagedPagesBySessionNamespaceRoot,
+  captureCurrentPageFileSnapshotV1,
+  clearManagedPagesByNamespacePrefix,
+  clearManagedPagesBySessionNamespaceRoot,
   clearFormalTestPages,
   type CurrentPageDiffResult,
   diffCurrentPageFileSnapshotV1,
@@ -1582,6 +1583,50 @@ export const ReadwiseContainer = () => {
     })
   }
 
+  const handleAuditManagedIds = async () => {
+    setErrors([])
+    setPageDiffResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage(`Auditing managed pages under ${formalNamespaceRoot}...`)
+
+    try {
+      const auditResult = await auditManagedReaderPagesV1([formalNamespaceRoot])
+      const auditIssues = [
+        ...auditResult.duplicateReaderIds.map((duplicateGroup) => ({
+          book: `rw-reader-id ${duplicateGroup.readerDocumentId}`,
+          message: `Multiple managed pages share rw-reader-id=${duplicateGroup.readerDocumentId}: ${duplicateGroup.pages.map((page) => page.pageTitle).join(', ')}`,
+        })),
+        ...auditResult.missingReaderIdPages.map((page) => ({
+          book: page.pageTitle,
+          message: `Managed page is missing rw-reader-id: ${page.pageTitle}`,
+        })),
+        ...auditResult.overlongFileNamePages.map((page) => ({
+          book: page.pageTitle,
+          message: page.diagnosticMessage,
+        })),
+      ]
+
+      setErrors(auditIssues)
+      setCurrent(auditResult.scannedPages)
+      setTotal(auditResult.scannedPages)
+      setStatus('completed')
+      setStatusMessage(
+        auditIssues.length > 0
+          ? `Managed page audit found ${auditIssues.length} issue(s) across ${auditResult.scannedPages} page(s).`
+          : `Managed page audit found no issues across ${auditResult.scannedPages} page(s).`,
+      )
+    } catch (err: unknown) {
+      logReadwiseError(formalSyncLogPrefix, 'managed page audit failed', err)
+      setStatus('error')
+      setStatusMessage(
+        `Managed page audit failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
   const runCurrentPageReaderAction = async ({
     action,
     statusPrefix,
@@ -2857,6 +2902,9 @@ export const ReadwiseContainer = () => {
                       <button className="rw-btn" onClick={handleLimitedSync}>
                         {sessionTestSyncLabel}
                       </button>
+                      <button className="rw-btn" onClick={handleAuditManagedIds}>
+                        Audit Managed IDs
+                      </button>
                       <button className="rw-btn" onClick={handleBackupFormalTestPages}>
                         Backup Test Pages
                       </button>
@@ -2865,9 +2913,6 @@ export const ReadwiseContainer = () => {
                       </button>
                       <button className="rw-btn" onClick={handleClearSessionTestPages}>
                         Clear Session Test Pages
-                      </button>
-                      <button className="rw-btn" onClick={handleCachedFullRebuild}>
-                        Cached Rebuild (All Pages)
                       </button>
                       {showAdvancedFormalTestActions && (
                         <button className="rw-btn" onClick={handleClearFormalTestPages}>
@@ -2927,6 +2972,11 @@ export const ReadwiseContainer = () => {
                       These tools stay hidden during normal use. They are
                       exposed automatically when formal sync detects conflicting
                       managed pages that must be cleared first.
+                    </div>
+                    <div className="rw-action-note">
+                      Audit Managed IDs checks duplicate `rw-reader-id`
+                      bindings, missing `rw-reader-id`, and managed page names
+                      that would exceed Logseq file-name limits on recreate.
                     </div>
                   </div>
                 </>

@@ -1,5 +1,6 @@
 import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
 import { logReadwiseDebug } from '../logging'
+import { assertManagedPageFileNameWithinLimits } from './readwise-page-names'
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
@@ -48,6 +49,8 @@ export const createManagedPageV1 = async (
   pageName: string,
   logPrefix = '[Readwise Sync]',
 ): Promise<PageEntity> => {
+  assertManagedPageFileNameWithinLimits(pageName, 'org')
+
   const created = await logseq.Editor.createPage(
     pageName,
     {},

@@ -117,8 +117,23 @@ export const resolveManagedReaderPageV1 = async ({
     titleMatchReaderId.length > 0 &&
     titleMatchReaderId !== readerDocumentId
   ) {
+    const existingReaderIdPages = managedPages
+      .filter((page) => extractReaderDocumentId(page) === titleMatchReaderId)
+      .map((page) => getPreferredPageName(page))
+      .filter(
+        (value): value is string =>
+          typeof value === 'string' && value.length > 0,
+      )
+    const incomingReaderIdPages = managedPages
+      .filter((page) => extractReaderDocumentId(page) === readerDocumentId)
+      .map((page) => getPreferredPageName(page))
+      .filter(
+        (value): value is string =>
+          typeof value === 'string' && value.length > 0,
+      )
+
     throw new Error(
-      `Managed page identity conflict for ${expectedPageName}: existing rw-reader-id=${titleMatchReaderId}, incoming rw-reader-id=${readerDocumentId}`,
+      `Managed page identity conflict for ${expectedPageName}: existing rw-reader-id=${titleMatchReaderId}, incoming rw-reader-id=${readerDocumentId}; existing-id pages=[${existingReaderIdPages.join(', ')}]; incoming-id pages=[${incomingReaderIdPages.join(', ')}]`,
     )
   }
 

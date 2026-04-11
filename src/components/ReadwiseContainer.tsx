@@ -40,10 +40,11 @@ import type {
 } from '../types'
 
 export const ReadwiseContainer = () => {
+  const defaultReaderFullScanTargetDocuments = 20
+  const defaultReaderFullScanDebugHighlightPageLimit = 0
   const debugSyncMaxBooksLimit = 5
   const debugNamespaceRoot = 'ReadwiseDebug'
   const formalNamespaceRoot = 'ReadwiseHighlights'
-  const readerPreviewMaxBooksLimit = 20
   const readerPreviewNamespaceRoot = 'ReadwiseReaderPreview'
   const formalSyncLogPrefix = '[Readwise Sync]'
   const sessionTestLogPrefix = '[Readwise Session Test]'
@@ -66,6 +67,7 @@ export const ReadwiseContainer = () => {
   const [pageDiffResult, setPageDiffResult] =
     useState<CurrentPageDiffResult | null>(null)
   const [etaTick, setEtaTick] = useState(0)
+  const [showMaintenanceTools, setShowMaintenanceTools] = useState(false)
   const [activeFormalTestSessionCount, setActiveFormalTestSessionCount] =
     useState<number | null>(null)
 
@@ -315,6 +317,26 @@ export const ReadwiseContainer = () => {
     const rawDebugSyncMaxBooks = Number(logseq.settings?.debugSyncMaxBooks ?? 20)
     return Number.isFinite(rawDebugSyncMaxBooks) && rawDebugSyncMaxBooks > 0
       ? Math.floor(rawDebugSyncMaxBooks)
+      : null
+  }
+
+  const resolveConfiguredReaderFullScanTargetDocuments = () => {
+    const rawTargetDocuments = Number(
+      logseq.settings?.readerFullScanTargetDocuments ??
+        defaultReaderFullScanTargetDocuments,
+    )
+    return Number.isFinite(rawTargetDocuments) && rawTargetDocuments > 0
+      ? Math.floor(rawTargetDocuments)
+      : defaultReaderFullScanTargetDocuments
+  }
+
+  const resolveConfiguredReaderDebugHighlightPageLimit = () => {
+    const rawHighlightPageLimit = Number(
+      logseq.settings?.readerFullScanDebugHighlightPageLimit ??
+        defaultReaderFullScanDebugHighlightPageLimit,
+    )
+    return Number.isFinite(rawHighlightPageLimit) && rawHighlightPageLimit > 0
+      ? Math.floor(rawHighlightPageLimit)
       : null
   }
 
@@ -1122,6 +1144,7 @@ export const ReadwiseContainer = () => {
   const handleSync = async () => {
     const conflicts = await detectFormalSyncConflicts()
     if (conflicts != null) {
+      setShowMaintenanceTools(true)
       const summary = formatManagedPageConflictSummary(conflicts)
       console.warn(
         `${formalSyncLogPrefix} blocked formal sync because conflicting managed pages still exist`,
@@ -1215,15 +1238,23 @@ export const ReadwiseContainer = () => {
       return
     }
 
+    const targetDocuments = resolveConfiguredReaderFullScanTargetDocuments()
+    const debugHighlightPageLimit =
+      resolveConfiguredReaderDebugHighlightPageLimit()
+    const debugCapSummary =
+      debugHighlightPageLimit != null
+        ? `, debug cap ${debugHighlightPageLimit} highlight page(s)`
+        : ''
+
     cancelledRef.current = false
     setErrors([])
     setPageDiffResult(null)
     setCurrent(0)
-    setTotal(readerPreviewMaxBooksLimit)
+    setTotal(debugHighlightPageLimit ?? 0)
     setCurrentBook('')
     setStatus('fetching')
     setStatusMessage(
-      `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${readerPreviewMaxBooksLimit} target document(s))...`,
+      `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${targetDocuments} target document(s)${debugCapSummary})...`,
     )
 
     const client = createReadwiseClient(token)
@@ -1246,8 +1277,9 @@ export const ReadwiseContainer = () => {
 
     try {
       const previewLoadResult = await loadReaderPreviewBooks(client, {
-        maxDocuments: readerPreviewMaxBooksLimit,
+        maxDocuments: targetDocuments,
         mode: 'full-library-scan',
+        maxHighlightPages: debugHighlightPageLimit ?? undefined,
         onProgress: (progress) => {
           if (cancelledRef.current) return
 
@@ -1266,10 +1298,10 @@ export const ReadwiseContainer = () => {
 
           setStatus('syncing')
           setCurrent(progress.completed ?? 0)
-          setTotal(progress.total ?? readerPreviewMaxBooksLimit)
+          setTotal(progress.total ?? targetDocuments)
           setCurrentBook(progress.pageTitle ?? '')
           setStatusMessage(
-            `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? readerPreviewMaxBooksLimit}.`,
+            `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? targetDocuments}.`,
           )
         },
       })
@@ -1367,7 +1399,7 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         syncErrorsForRun.length > 0
           ? `${statusPrefix}: completed with ${syncErrorsForRun.length} error(s).`
-          : `${statusPrefix}: complete. ${previewBooks.length} page(s) written to ${namespacePrefix}.`,
+          : `${statusPrefix}: complete. ${previewBooks.length} page(s) written to ${namespacePrefix}.${debugHighlightPageLimit != null ? ` Debug cap ${debugHighlightPageLimit} was active.` : ''}`,
       )
       console.info(`${logPrefix} sync completed`, {
         namespacePrefix,
@@ -1748,112 +1780,95 @@ export const ReadwiseContainer = () => {
                   parent_id, then rewrites managed pages in
                   `ReadwiseHighlights/&lt;title&gt;`.
                 </div>
-              </div>
-
-              <div className="rw-action-group">
-                <div className="rw-action-group-label">
-                  Legacy Export Tools
-                </div>
-                <div className="rw-action-row">
-                  <button className="rw-btn" onClick={handleLimitedSync}>
-                    {sessionTestSyncLabel}
-                  </button>
-                  <button className="rw-btn" onClick={handleBackupFormalTestPages}>
-                    Backup Test Pages
-                  </button>
-                  <button className="rw-btn" onClick={handleRestoreTestPages}>
-                    Restore Test Pages
-                  </button>
-                  <button className="rw-btn" onClick={handleClearSessionTestPages}>
-                    Clear Session Test Pages
-                  </button>
-                  {showAdvancedFormalTestActions && (
-                    <button className="rw-btn" onClick={handleClearFormalTestPages}>
-                      Clear Formal Test Pages
-                    </button>
-                  )}
-                </div>
                 <div className="rw-action-note">
-                  Old export/checkpoint-based path kept temporarily for rollback
-                  and comparison. It is no longer the primary sync route.
+                  For short debug runs, lower "Reader Full Scan Target
+                  Documents" and set "Reader Full Scan Debug Highlight Page
+                  Limit" in plugin settings. Set the debug page limit back to 0
+                  for a real full scan.
                 </div>
               </div>
 
-              <div className="rw-action-group">
-                <div className="rw-action-group-label">
-                  Fake UUID Test
-                </div>
-                <div className="rw-action-row">
-                  <button className="rw-btn" onClick={handleDebugSyncFromScratch}>
-                    Start Debug Sync (5)
-                  </button>
-                  <button className="rw-btn" onClick={handleClearDebugPages}>
-                    Clear Debug Pages
-                  </button>
-                </div>
-              </div>
-
-              <div className="rw-action-group">
-                <div className="rw-action-group-label">
-                  Reader Preview Namespace
-                </div>
-                <div className="rw-action-row">
-                  <button className="rw-btn" onClick={handleReaderPreviewSync}>
-                    Start Reader Preview (20, full scan)
-                  </button>
-                  <button className="rw-btn" onClick={handleClearReaderPreviewPages}>
-                    Clear Reader Preview Pages
-                  </button>
-                </div>
-                <div className="rw-action-note">
-                  Same Reader v3 full-scan engine as formal sync, but writes into
-                  a separate preview namespace for non-destructive validation.
-                </div>
-              </div>
-
-              <div className="rw-action-group">
-                <div className="rw-action-group-label">
-                  Page File Diff
-                </div>
-                <div className="rw-action-row">
-                  <button className="rw-btn" onClick={handleCaptureCurrentPageSnapshot}>
-                    Capture Page Snapshot
-                  </button>
-                  <button className="rw-btn" onClick={handleDiffCurrentPageSnapshot}>
-                    Diff Page Snapshot
-                  </button>
-                </div>
-              </div>
-
-              <div className="rw-action-group">
-                <div className="rw-action-group-label">
-                  Raw File Diff
-                </div>
-                <div className="rw-action-row">
-                  <button
-                    className="rw-btn"
-                    onClick={() => void handleCopyExternalRawSnapshotCommand('capture')}
-                  >
-                    Copy Raw Capture Cmd
-                  </button>
-                  <button
-                    className="rw-btn"
-                    onClick={() => void handleCopyExternalRawSnapshotCommand('diff')}
-                  >
-                    Copy Raw Diff Cmd
-                  </button>
-                  <button
-                    className="rw-btn"
-                    onClick={() => void handleCopyExternalRawSnapshotWorkflow()}
-                  >
-                    Copy Raw Workflow
-                  </button>
-                </div>
-                <div className="rw-action-note">
-                  These buttons copy terminal commands. The Logseq plugin runtime
-                  cannot execute the raw file script directly.
-                </div>
-              </div>
+              {showMaintenanceTools && (
+                <>
+                  <div className="rw-action-group">
+                    <div className="rw-action-group-label">
+                      Maintenance Tools
+                    </div>
+                    <div className="rw-action-row">
+                      <button className="rw-btn" onClick={handleLimitedSync}>
+                        {sessionTestSyncLabel}
+                      </button>
+                      <button className="rw-btn" onClick={handleBackupFormalTestPages}>
+                        Backup Test Pages
+                      </button>
+                      <button className="rw-btn" onClick={handleRestoreTestPages}>
+                        Restore Test Pages
+                      </button>
+                      <button className="rw-btn" onClick={handleClearSessionTestPages}>
+                        Clear Session Test Pages
+                      </button>
+                      {showAdvancedFormalTestActions && (
+                        <button className="rw-btn" onClick={handleClearFormalTestPages}>
+                          Clear Formal Test Pages
+                        </button>
+                      )}
+                    </div>
+                    <div className="rw-action-row">
+                      <button className="rw-btn" onClick={handleDebugSyncFromScratch}>
+                        Start Debug Sync (5)
+                      </button>
+                      <button className="rw-btn" onClick={handleClearDebugPages}>
+                        Clear Debug Pages
+                      </button>
+                      <button className="rw-btn" onClick={handleReaderPreviewSync}>
+                        Start Reader Preview (20, full scan)
+                      </button>
+                      <button className="rw-btn" onClick={handleClearReaderPreviewPages}>
+                        Clear Reader Preview Pages
+                      </button>
+                    </div>
+                    <div className="rw-action-row">
+                      <button className="rw-btn" onClick={handleCaptureCurrentPageSnapshot}>
+                        Capture Page Snapshot
+                      </button>
+                      <button className="rw-btn" onClick={handleDiffCurrentPageSnapshot}>
+                        Diff Page Snapshot
+                      </button>
+                      <button
+                        className="rw-btn"
+                        onClick={() => void handleCopyExternalRawSnapshotCommand('capture')}
+                      >
+                        Copy Raw Capture Cmd
+                      </button>
+                      <button
+                        className="rw-btn"
+                        onClick={() => void handleCopyExternalRawSnapshotCommand('diff')}
+                      >
+                        Copy Raw Diff Cmd
+                      </button>
+                      <button
+                        className="rw-btn"
+                        onClick={() => void handleCopyExternalRawSnapshotWorkflow()}
+                      >
+                        Copy Raw Workflow
+                      </button>
+                    </div>
+                    <div className="rw-action-row">
+                      <button
+                        className="rw-btn"
+                        onClick={() => setShowMaintenanceTools(false)}
+                      >
+                        Hide Maintenance Tools
+                      </button>
+                    </div>
+                    <div className="rw-action-note">
+                      These tools stay hidden during normal use. They are
+                      exposed automatically when formal sync detects conflicting
+                      managed pages that must be cleared first.
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
           {isBusy && (

@@ -59,10 +59,12 @@ export const loadReaderPreviewBooks = async (
     typeof options.maxDocuments === 'number' && options.maxDocuments > 0
       ? Math.floor(options.maxDocuments)
       : 20
-  const maxHighlightPages =
+  const effectiveMaxHighlightPages =
     typeof options.maxHighlightPages === 'number' && options.maxHighlightPages > 0
       ? Math.floor(options.maxHighlightPages)
-      : 20
+      : mode === 'recent-window'
+        ? 20
+        : null
   const targetParentIds: string[] = []
   const seenParentIds = new Set<string>()
   const highlightsByParent = new Map<string, ReaderDocument[]>()
@@ -76,7 +78,10 @@ export const loadReaderPreviewBooks = async (
   const fetchHighlightsStartedAt = Date.now()
 
   while (true) {
-    if (mode === 'recent-window' && pageNumber >= maxHighlightPages) {
+    if (
+      effectiveMaxHighlightPages != null &&
+      pageNumber >= effectiveMaxHighlightPages
+    ) {
       break
     }
 
@@ -126,10 +131,19 @@ export const loadReaderPreviewBooks = async (
       }
     }
 
+    const estimatedTotalPages = Math.max(
+      initialTotalPages ??
+        effectiveMaxHighlightPages ??
+        pageNumber,
+      pageNumber,
+    )
     options.onProgress?.({
       phase: 'fetch-highlights',
       pageNumber,
-      totalPages: Math.max(initialTotalPages ?? 0, pageNumber) || undefined,
+      totalPages:
+        effectiveMaxHighlightPages != null
+          ? Math.min(estimatedTotalPages, effectiveMaxHighlightPages)
+          : estimatedTotalPages,
       totalResults: initialTotalResults ?? undefined,
       uniqueParents: targetParentIds.length,
       totalHighlights,

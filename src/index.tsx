@@ -17,27 +17,13 @@ const main = async () => {
 
   logseq.App.registerUIItem('toolbar', {
     key: 'felixhuoez-logseq-readwise-sync',
-    template: `<a class="button" data-on-click="syncHighlights"><i class="ti ti-letter-r"></i></a>`,
-  })
-
-  logseq.App.registerUIItem('toolbar', {
-    key: 'felixhuoez-logseq-readwise-sync-v1-preview',
     template:
-      '<a class="button" data-on-click="previewV1SyncPlan" title="Readwise V1 Preview"><i class="ti ti-eye"></i></a>',
+      '<a class="button" data-on-click="syncHighlights" title="Open Readwise Sync" aria-label="Open Readwise Sync"><i class="ti ti-refresh"></i></a>',
   })
 
   logseq.provideModel({
     syncHighlights() {
       logseq.showMainUI()
-    },
-    async previewV1SyncPlan() {
-      logseq.UI.showMsg('Starting Readwise V1 preview...')
-      console.info('[Readwise V1 Preview] toolbar click')
-      try {
-        await runSyncPlanPreviewV1()
-      } catch (error) {
-        console.error('[Readwise V1 Preview] failed', error)
-      }
     },
   })
 

@@ -1755,9 +1755,67 @@ export const ReadwiseContainer = () => {
   const isBusy = status === 'fetching' || status === 'syncing'
   const configuredSyncMaxBooks =
     resolveConfiguredSyncMaxBooks() ?? debugSyncMaxBooksLimit
+  const configuredReaderTargetDocuments =
+    resolveConfiguredReaderFullScanTargetDocuments()
+  const configuredReaderDebugHighlightPageLimit =
+    resolveConfiguredReaderDebugHighlightPageLimit() ?? 0
   const sessionTestSyncCount =
     activeFormalTestSessionCount ?? configuredSyncMaxBooks
   const sessionTestSyncLabel = `Start Sync (session test: ${sessionTestSyncCount})`
+  const statusLabel =
+    status === 'completed' && errors.length > 0
+      ? 'warning'
+      : status === 'idle'
+        ? 'ready'
+        : status
+  const statusHeadline =
+    status === 'idle'
+      ? 'Ready for formal Reader sync'
+      : status === 'fetching'
+        ? 'Scanning Reader highlights'
+        : status === 'syncing'
+          ? 'Rebuilding managed pages'
+          : status === 'completed' && errors.length > 0
+            ? 'Completed with issues'
+            : status === 'completed'
+              ? 'Formal sync completed'
+              : 'Formal sync stopped'
+  const statusPhaseLabel =
+    etaSnapshot?.label ??
+    (status === 'fetching'
+      ? 'highlight scan'
+      : status === 'syncing'
+        ? 'page writes'
+        : status === 'completed'
+          ? 'latest run'
+          : 'formal reader sync')
+  const currentOperationLabel =
+    status === 'syncing'
+      ? currentBook
+      : status === 'fetching'
+        ? 'Scanning Reader highlight pages and grouping by parent document.'
+        : ''
+  const formalSyncScopeLabel =
+    configuredReaderDebugHighlightPageLimit > 0
+      ? `Target ${configuredReaderTargetDocuments} page(s) · Scan ${configuredReaderDebugHighlightPageLimit} highlight page(s)`
+      : `Target ${configuredReaderTargetDocuments} page(s) · Full-library highlight scan`
+  const highlightScanDetailLabel =
+    configuredReaderDebugHighlightPageLimit > 0
+      ? `Debug cap active. Roughly 100 highlights per page; current scan is intentionally incomplete.`
+      : 'No debug cap. This run scans the full Reader highlight library before grouping by parent document.'
+  const progressLabel =
+    total > 0
+      ? `${current} / ${total} (${progressPct}%)${etaSuffix}`
+      : status === 'fetching' || status === 'syncing'
+        ? `0 / 0${etaSuffix}`
+        : ''
+  const statusPanelClassName = [
+    'rw-status-panel',
+    `rw-status-panel-${status}`,
+    status === 'completed' && errors.length > 0 ? 'rw-status-panel-warning' : '',
+  ]
+    .filter((value) => value.length > 0)
+    .join(' ')
   const formatManagedPageConflictSummary = (
     conflicts: Array<{
       label: string
@@ -1793,8 +1851,19 @@ export const ReadwiseContainer = () => {
     >
       <div className="rw-card">
         <div className="rw-header">
-          <h2>Readwise Sync</h2>
-          <span className={`rw-badge ${status}`}>{status}</span>
+          <div className="rw-header-copy">
+            <div className="rw-kicker">Reader v3 formal sync</div>
+            <h2>Readwise Sync</h2>
+            <div className="rw-header-subtitle">{formalSyncScopeLabel}</div>
+          </div>
+          <div className="rw-header-meta">
+            <span className={`rw-badge ${statusLabel}`}>{statusLabel}</span>
+            <span className="rw-scope-chip">
+              {configuredReaderDebugHighlightPageLimit > 0
+                ? 'debug scope'
+                : 'full scan'}
+            </span>
+          </div>
         </div>
 
         <div className="rw-body">
@@ -1805,53 +1874,89 @@ export const ReadwiseContainer = () => {
             </div>
           )}
 
-          <div className="rw-status">
-            {statusMessage || 'Ready to sync your Readwise highlights.'}
+          <div className="rw-summary-grid">
+            <div className="rw-summary-card">
+              <div className="rw-summary-label">Managed pages</div>
+              <div className="rw-summary-value">
+                {configuredReaderTargetDocuments}
+              </div>
+              <div className="rw-summary-note">
+                Formal pages targeted per run.
+              </div>
+            </div>
+            <div className="rw-summary-card">
+              <div className="rw-summary-label">Highlight scan</div>
+              <div className="rw-summary-value">
+                {configuredReaderDebugHighlightPageLimit > 0
+                  ? `${configuredReaderDebugHighlightPageLimit} page(s)`
+                  : 'Full library'}
+              </div>
+              <div className="rw-summary-note">{highlightScanDetailLabel}</div>
+            </div>
           </div>
 
-          {status !== 'idle' && (
-            <>
-              <div className="rw-current-book">
-                {status === 'syncing' && currentBook}
-                {status === 'fetching' &&
-                  statusMessage === 'Fetching highlights from Readwise...' &&
-                  'Fetching data from Readwise API...'}
+          <div className={statusPanelClassName}>
+            <div className="rw-status-panel-header">
+              <div className="rw-status-panel-copy">
+                <div className="rw-status-phase">{statusPhaseLabel}</div>
+                <div className="rw-status-headline">{statusHeadline}</div>
+                <div className="rw-status">
+                  {statusMessage || 'Ready to sync your Readwise highlights.'}
+                </div>
               </div>
-              <div className="rw-progress-track">
-                <div
-                  className={`rw-progress-bar ${status}`}
-                  style={{
-                    width:
-                      status === 'fetching' && total === 0
-                        ? '100%'
-                        : `${progressPct}%`,
-                    opacity: status === 'fetching' ? 0.4 : 1,
-                  }}
-                />
-              </div>
-              <div className="rw-progress-label">
-                {status === 'fetching'
-                  ? `${current} / ${total} (${progressPct}%)${etaSuffix}`
-                  : `${current} / ${total} (${progressPct}%)${etaSuffix}`}
-              </div>
-            </>
-          )}
+              {isBusy && (
+                <div className="rw-activity-indicator" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              )}
+            </div>
+
+            {currentOperationLabel && (
+              <div className="rw-current-book">{currentOperationLabel}</div>
+            )}
+
+            {status !== 'idle' && (
+              <>
+                <div className="rw-progress-track">
+                  <div
+                    className={`rw-progress-bar ${status}`}
+                    style={{
+                      width:
+                        status === 'fetching' && total === 0
+                          ? '8%'
+                          : `${Math.max(progressPct, status === 'completed' ? 100 : 4)}%`,
+                    }}
+                  />
+                </div>
+                <div className="rw-progress-label">{progressLabel}</div>
+              </>
+            )}
+          </div>
 
           {errors.length > 0 && (
-            <div className="rw-errors">
-              {errors.map((err, i) => (
-                <div key={i} className="rw-error-item">
-                  <strong>{err.book}</strong>
-                  {err.message}
-                </div>
-              ))}
+            <div className="rw-feedback-block">
+              <div className="rw-section-header">
+                <div className="rw-section-title">Run issues</div>
+                <div className="rw-section-meta">{errors.length} item(s)</div>
+              </div>
+              <div className="rw-errors">
+                {errors.map((err, i) => (
+                  <div key={i} className="rw-error-item">
+                    <strong>{err.book}</strong>
+                    {err.message}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
           {pageDiffResult && (
-            <div className="rw-diff-panel">
+            <div className="rw-feedback-block rw-diff-panel">
               <div className="rw-diff-header">
                 <div className="rw-diff-header-text">
+                  <div className="rw-section-title">Current page diff</div>
                   <strong>
                     {pageDiffResult.pageName} @ line {pageDiffResult.firstDiffLine ?? '?'}
                   </strong>
@@ -1963,9 +2068,8 @@ export const ReadwiseContainer = () => {
                   </button>
                 </div>
                 <div className="rw-action-note">
-                  Uses Reader v3 full-library highlight scan, groups by
-                  parent_id, then rewrites managed pages in
-                  `ReadwiseHighlights/&lt;title&gt;`.
+                  Uses Reader v3 highlight scan, groups by `parent_id`, then
+                  rewrites managed pages in `ReadwiseHighlights/&lt;title&gt;`.
                 </div>
                 <div className="rw-action-note">
                   For short debug runs, lower "Reader Full Scan Target

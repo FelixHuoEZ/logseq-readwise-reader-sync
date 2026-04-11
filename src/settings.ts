@@ -18,11 +18,13 @@ export const settingsSchema: SettingSchemaDesc[] = [
   },
   {
     key: 'logLevel',
-    type: 'string',
+    type: 'enum',
     title: 'Log Level',
     description:
-      'Allowed values: error, warn, info, debug. Default warn. Normally leave unchanged.',
+      'Default warn. Normally leave unchanged.',
     default: 'warn',
+    enumChoices: ['error', 'warn', 'info', 'debug'],
+    enumPicker: 'select',
   },
   {
     key: 'readerFullScanTargetDocuments',

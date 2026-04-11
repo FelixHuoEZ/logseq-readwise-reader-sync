@@ -1,9 +1,6 @@
 import type { EmitResult, EmittedBlock, SemanticPage } from './types'
 
-const getMetadataValue = (
-  page: SemanticPage,
-  key: string,
-): string | null =>
+const getMetadataValue = (page: SemanticPage, key: string): string | null =>
   page.metadata.find((entry) => entry.key === key)?.value ?? null
 
 const emitPropertyLine = (
@@ -13,6 +10,66 @@ const emitPropertyLine = (
 ) => `:${key}: ${value ? (formatter ? formatter(value) : value) : ''}`
 
 const wrapWikiLink = (value: string) => `[[${value}]]`
+
+export const buildPageProperties = (
+  page: SemanticPage,
+): Array<{ key: string; value: string | null }> => {
+  const readwiseId = getMetadataValue(page, 'rw-id')
+  const readerId = getMetadataValue(page, 'rw-reader-id')
+  const author = getMetadataValue(page, 'AUTHOR')
+  const category = getMetadataValue(page, 'CATEGORIES')
+  const link = getMetadataValue(page, 'LINK')
+  const tags = getMetadataValue(page, 'TAGS')
+  const date = getMetadataValue(page, 'DATE')
+  const published = getMetadataValue(page, 'PUBLISHED')
+  const saved = getMetadataValue(page, 'SAVED')
+  const reservedKeys = new Set([
+    'rw-id',
+    'rw-reader-id',
+    'AUTHOR',
+    'CATEGORIES',
+    'LINK',
+    'TAGS',
+    'DATE',
+    'PUBLISHED',
+    'SAVED',
+  ])
+  const extraMetadataEntries = page.metadata.filter(
+    (entry) => !reservedKeys.has(entry.key),
+  )
+
+  return [
+    { key: 'rw-id', value: readwiseId },
+    { key: 'rw-reader-id', value: readerId },
+    { key: 'AUTHOR', value: author ? wrapWikiLink(author) : null },
+    { key: 'CATEGORIES', value: category },
+    { key: 'LINK', value: link },
+    { key: 'TAGS', value: tags },
+    { key: 'DATE', value: date ? wrapWikiLink(date) : null },
+    { key: 'PUBLISHED', value: published ? wrapWikiLink(published) : null },
+    { key: 'SAVED', value: saved ? wrapWikiLink(saved) : null },
+    ...extraMetadataEntries.map((entry) => ({
+      key: entry.key,
+      value: entry.value,
+    })),
+  ]
+}
+
+export const emitPageNoteText = (page: SemanticPage): string | null => {
+  const imageLine = page.pageNote?.imageUrl
+    ? wrapWikiLink(page.pageNote.imageUrl)
+    : ''
+  const summaryLine = page.pageNote?.summary ?? ''
+  const noteLines = [imageLine, summaryLine].filter(
+    (line) => line.trim().length > 0,
+  )
+
+  if (noteLines.length === 0) {
+    return null
+  }
+
+  return ['#+BEGIN_NOTE', ...noteLines, '#+END_NOTE'].join('\n')
+}
 
 const normalizeBoundaryBlankLines = (value: string) => {
   const lines = value.split('\n')
@@ -43,54 +100,13 @@ const normalizeBoundaryBlankLines = (value: string) => {
   return lines.slice(firstContentLine, lastContentLine + 1).join('\n')
 }
 
-const emitMetadataText = (page: SemanticPage) => {
-  const readwiseId = getMetadataValue(page, 'rw-id')
-  const readerId = getMetadataValue(page, 'rw-reader-id')
-  const author = getMetadataValue(page, 'AUTHOR')
-  const category = getMetadataValue(page, 'CATEGORIES')
-  const link = getMetadataValue(page, 'LINK')
-  const tags = getMetadataValue(page, 'TAGS')
-  const date = getMetadataValue(page, 'DATE')
-  const published = getMetadataValue(page, 'PUBLISHED')
-  const saved = getMetadataValue(page, 'SAVED')
-  const reservedKeys = new Set([
-    'rw-id',
-    'rw-reader-id',
-    'AUTHOR',
-    'CATEGORIES',
-    'LINK',
-    'TAGS',
-    'DATE',
-    'PUBLISHED',
-    'SAVED',
-  ])
-  const extraMetadataLines = page.metadata
-    .filter((entry) => !reservedKeys.has(entry.key))
-    .map((entry) => emitPropertyLine(entry.key, entry.value))
-  const imageLine = page.pageNote?.imageUrl
-    ? wrapWikiLink(page.pageNote.imageUrl)
-    : ''
-  const summaryLine = page.pageNote?.summary ?? ''
-  const noteLines = [imageLine, summaryLine].filter((line) => line.trim().length > 0)
-  const noteSection =
-    noteLines.length > 0
-      ? ['#+BEGIN_NOTE', ...noteLines, '#+END_NOTE']
-      : []
-
+const emitMetadataText = (
+  pageProperties: Array<{ key: string; value: string | null }>,
+) => {
   return [
     ':PROPERTIES:',
-    ...(readwiseId != null ? [emitPropertyLine('rw-id', readwiseId)] : []),
-    ...(readerId != null ? [emitPropertyLine('rw-reader-id', readerId)] : []),
-    emitPropertyLine('AUTHOR', author, wrapWikiLink),
-    emitPropertyLine('CATEGORIES', category),
-    emitPropertyLine('LINK', link),
-    emitPropertyLine('TAGS', tags),
-    emitPropertyLine('DATE', date, wrapWikiLink),
-    emitPropertyLine('PUBLISHED', published, wrapWikiLink),
-    emitPropertyLine('SAVED', saved, wrapWikiLink),
-    ...extraMetadataLines,
+    ...pageProperties.map((entry) => emitPropertyLine(entry.key, entry.value)),
     ':END:',
-    ...noteSection,
   ].join('\n')
 }
 
@@ -104,8 +120,10 @@ const emitHighlightMainText = (
         ? ` (${highlight.locationLabel})`
         : ''
 
-  const emittedTags = ['[[ReadwiseHighlights]]', ...highlight.tags.map((tag) => `[[${tag}]]`)]
-    .join('  ,  ')
+  const emittedTags = [
+    '[[ReadwiseHighlights]]',
+    ...highlight.tags.map((tag) => `[[${tag}]]`),
+  ].join('  ,  ')
 
   const [firstLine = '', ...restLines] = highlight.text.split('\n')
   const restText = normalizeBoundaryBlankLines(restLines.join('\n'))
@@ -131,27 +149,40 @@ const emitHighlightBlocks = (page: SemanticPage): EmittedBlock[] =>
   }))
 
 export const emitOrgPage = (page: SemanticPage): EmitResult => {
-  const metadataText = emitMetadataText(page)
-  const syncHeaderText = page.syncHeader.text
-    ? `* ${page.syncHeader.text}`
-    : ''
+  const pageProperties = buildPageProperties(page)
+  const metadataText = emitMetadataText(pageProperties)
+  const pageNoteText = emitPageNoteText(page)
+  const syncHeaderText = page.syncHeader.text ? `* ${page.syncHeader.text}` : ''
   const highlightBlocks = emitHighlightBlocks(page)
   const highlightTexts = highlightBlocks.map((block) =>
-    [block.text, ...(block.children?.map((child) => child.text) ?? [])].join('\n'),
+    [block.text, ...(block.children?.map((child) => child.text) ?? [])].join(
+      '\n',
+    ),
   )
-  const contentText = [syncHeaderText, ...highlightTexts]
-    .filter((part): part is string => typeof part === 'string' && part.length > 0)
+  const bodyText = [syncHeaderText, ...highlightTexts]
+    .filter(
+      (part): part is string => typeof part === 'string' && part.length > 0,
+    )
     .join('\n')
+  const pageContentText = [pageNoteText, bodyText]
+    .filter(
+      (part): part is string => typeof part === 'string' && part.length > 0,
+    )
+    .join('\n\n')
 
-  const outputParts = [metadataText, contentText].filter(
+  const outputParts = [metadataText, pageContentText].filter(
     (part): part is string => typeof part === 'string' && part.length > 0,
   )
 
   return {
     format: 'org',
+    pageProperties,
     metadataText,
+    pageNoteText,
     syncHeaderText,
     highlightBlocks,
+    bodyText,
+    pageContentText,
     outputText: outputParts.join('\n\n'),
   }
 }

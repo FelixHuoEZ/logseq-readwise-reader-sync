@@ -1,7 +1,4 @@
-import type {
-  NormalizedBookExport,
-  NormalizedHighlight,
-} from '../normalizer'
+import type { NormalizedBookExport, NormalizedHighlight } from '../normalizer'
 
 export type DocumentFormat = 'org' | 'markdown'
 
@@ -69,9 +66,16 @@ export interface EmittedBlock {
 
 export interface EmitResult {
   format: DocumentFormat
+  pageProperties: Array<{
+    key: string
+    value: string | null
+  }>
   metadataText: string
+  pageNoteText: string | null
   syncHeaderText: string | null
   highlightBlocks: EmittedBlock[]
+  bodyText: string
+  pageContentText: string
   outputText: string
 }
 

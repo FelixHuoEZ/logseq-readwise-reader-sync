@@ -16,7 +16,11 @@ import {
   renameManagedReaderPageIfNeededV1,
   resolveManagedReaderPageV1,
 } from './resolve-managed-reader-page'
-import { createManagedPageV1, writeSingleRootPageContentV1 } from './single-root-page-content'
+import {
+  createManagedPageV1,
+  writeSingleRootPageContentV1,
+} from './single-root-page-content'
+import { syncManagedPagePropertiesV1 } from './sync-managed-page-properties'
 
 const toYmd = (value: string | null | undefined) => {
   if (!value) return null
@@ -45,9 +49,7 @@ const buildMetadataEntries = (
     {
       key: 'TAGS',
       value:
-        documentTags.length > 0
-          ? ` ${documentTags.join('  ,  ')}  ,  `
-          : null,
+        documentTags.length > 0 ? ` ${documentTags.join('  ,  ')}  ,  ` : null,
     },
     { key: 'DATE', value: syncDate },
     { key: 'PUBLISHED', value: toYmd(document.published_date) },
@@ -78,10 +80,9 @@ const buildReaderPreviewSemanticPage = (
   syncHeaderText: string,
 ): SemanticPage => ({
   format: 'org',
-  pageTitle:
-    previewBook.document.title?.trim().length
-      ? previewBook.document.title
-      : previewBook.document.id,
+  pageTitle: previewBook.document.title?.trim().length
+    ? previewBook.document.title
+    : previewBook.document.id,
   metadata: buildMetadataEntries(previewBook, syncDate),
   pageNote: {
     imageUrl: previewBook.document.image_url ?? null,
@@ -194,11 +195,12 @@ export const syncRenderedReaderPreviewPage = async (
   const emitResult = emitOrgPage(semanticPage)
   const renderHashInput = buildRenderHashInput(semanticPage)
   const renderHash = computeRenderHash(renderHashInput)
-  const content = emitResult.outputText
+  const content = emitResult.pageContentText
 
   logRenderedContentDiagnostics(pageName, content, logPrefix)
 
   const page = existingPage ?? (await createManagedPageV1(pageName, logPrefix))
+  await syncManagedPagePropertiesV1(page, emitResult.pageProperties, logPrefix)
   const result = await writeSingleRootPageContentV1(
     page,
     pageName,

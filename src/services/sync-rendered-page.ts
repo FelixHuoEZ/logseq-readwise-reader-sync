@@ -5,7 +5,11 @@ import { buildPageRenderContext, renderPage } from '../renderer'
 import type { ExportedBook } from '../types'
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import { buildFormalManagedPageName } from './readwise-page-names'
-import { createManagedPageV1, writeSingleRootPageContentV1 } from './single-root-page-content'
+import {
+  createManagedPageV1,
+  writeSingleRootPageContentV1,
+} from './single-root-page-content'
+import { syncManagedPagePropertiesV1 } from './sync-managed-page-properties'
 
 const logRenderedContentDiagnostics = (
   pageName: string,
@@ -40,10 +44,13 @@ export const syncRenderedPage = async (
   readerDocumentUrl: string | null = null,
 ) => {
   if (book.is_deleted) {
-    console.info(`${logPrefix} skipping deleted book until delete handling is implemented`, {
-      userBookId: book.user_book_id,
-      title: book.title,
-    })
+    console.info(
+      `${logPrefix} skipping deleted book until delete handling is implemented`,
+      {
+        userBookId: book.user_book_id,
+        title: book.title,
+      },
+    )
     return
   }
 
@@ -62,9 +69,14 @@ export const syncRenderedPage = async (
     buildPageRenderContext(normalizedBook, renderRuntime),
     computeCompatibleHighlightUuid,
   )
-  const content = renderedPage.emitResult.outputText
+  const content = renderedPage.emitResult.pageContentText
   logRenderedContentDiagnostics(pageName, content, logPrefix)
   const page = existingPage ?? (await createManagedPageV1(pageName, logPrefix))
+  await syncManagedPagePropertiesV1(
+    page,
+    renderedPage.emitResult.pageProperties,
+    logPrefix,
+  )
   const result = await writeSingleRootPageContentV1(
     page,
     pageName,

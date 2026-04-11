@@ -137,8 +137,10 @@ export const loadReaderPreviewBooks = async (
 ): Promise<ReaderPreviewLoadResult> => {
   const mode = options.mode ?? 'full-library-scan'
   const maxDocuments =
-    typeof options.maxDocuments === 'number' && options.maxDocuments > 0
-      ? Math.floor(options.maxDocuments)
+    typeof options.maxDocuments === 'number' && Number.isFinite(options.maxDocuments)
+      ? options.maxDocuments > 0
+        ? Math.floor(options.maxDocuments)
+        : null
       : 20
   const effectiveMaxHighlightPages =
     typeof options.maxHighlightPages === 'number' && options.maxHighlightPages > 0
@@ -259,7 +261,9 @@ export const loadReaderPreviewBooks = async (
 
     if (
       !response.nextPageCursor ||
-      (mode === 'recent-window' && targetParentIds.length >= maxDocuments)
+      (mode === 'recent-window' &&
+        maxDocuments != null &&
+        targetParentIds.length >= maxDocuments)
     ) {
       break
     }
@@ -272,8 +276,8 @@ export const loadReaderPreviewBooks = async (
   const previewBooks: ReaderPreviewBook[] = []
   const selectedParentIds =
     mode === 'full-library-scan'
-      ? [...targetParentIds]
-          .sort((left, right) => {
+      ? (() => {
+          const sorted = [...targetParentIds].sort((left, right) => {
             const leftLatest = latestHighlightByParent.get(left)
             const rightLatest = latestHighlightByParent.get(right)
             if (!leftLatest && !rightLatest) return 0
@@ -281,8 +285,12 @@ export const loadReaderPreviewBooks = async (
             if (!rightLatest) return -1
             return sortByUpdatedAtDescending(leftLatest, rightLatest)
           })
-          .slice(0, maxDocuments)
-      : targetParentIds.slice(0, maxDocuments)
+
+          return maxDocuments == null ? sorted : sorted.slice(0, maxDocuments)
+        })()
+      : maxDocuments == null
+        ? [...targetParentIds]
+        : targetParentIds.slice(0, maxDocuments)
   const fetchDocumentsStartedAt = Date.now()
   options.onProgress?.({
     phase: 'fetch-documents',

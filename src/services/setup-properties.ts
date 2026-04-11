@@ -91,7 +91,7 @@ export const setupProps = async (): Promise<SetupPropsResult> => {
     const existingIdentifiers = new Set(allPropsInLs?.map((prop) => prop.ident))
     let compatibilityMode = !canInspectProperties
 
-    const pluginName = 'logseq-readwise-plugin'
+    const pluginName = 'felixhuoez-logseq-readwise-sync'
     const propsToCreate = readwisePageProps.filter(({ key }) => {
       const fullIdentifier = `:plugin.property.${pluginName}/${key}`
       return !existingIdentifiers.has(fullIdentifier)

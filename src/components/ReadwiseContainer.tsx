@@ -443,11 +443,21 @@ export const ReadwiseContainer = () => {
   }
 
   const resolveConfiguredReaderFullScanTargetDocuments = () => {
-    const rawTargetDocuments = Number(
-      logseq.settings?.readerFullScanTargetDocuments ??
-        defaultReaderFullScanTargetDocuments,
-    )
-    return Number.isFinite(rawTargetDocuments) && rawTargetDocuments > 0
+    const rawSetting = logseq.settings?.readerFullScanTargetDocuments
+    if (rawSetting == null || rawSetting === '') {
+      return defaultReaderFullScanTargetDocuments
+    }
+
+    const rawTargetDocuments = Number(rawSetting)
+    if (!Number.isFinite(rawTargetDocuments)) {
+      return defaultReaderFullScanTargetDocuments
+    }
+
+    if (rawTargetDocuments === 0) {
+      return null
+    }
+
+    return rawTargetDocuments > 0
       ? Math.floor(rawTargetDocuments)
       : defaultReaderFullScanTargetDocuments
   }
@@ -1373,6 +1383,8 @@ export const ReadwiseContainer = () => {
       debugHighlightPageLimit != null
         ? `, debug cap ${debugHighlightPageLimit} highlight page(s)`
         : ''
+    const targetDocumentsSummary =
+      targetDocuments == null ? 'all matched documents' : `${targetDocuments} target document(s)`
 
     cancelledRef.current = false
     setErrors([])
@@ -1382,7 +1394,7 @@ export const ReadwiseContainer = () => {
     setCurrentBook('')
     setStatus('fetching')
     setStatusMessage(
-      `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${targetDocuments} target document(s)${debugCapSummary})...`,
+      `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${targetDocumentsSummary}${debugCapSummary})...`,
     )
 
     const client = createReadwiseClient(token)
@@ -1408,7 +1420,7 @@ export const ReadwiseContainer = () => {
     try {
       beginReaderSyncEtaPhase('fetch-highlights', 'highlight scan')
       const previewLoadResult = await loadReaderPreviewBooks(client, {
-        maxDocuments: targetDocuments,
+        maxDocuments: targetDocuments ?? undefined,
         mode: 'full-library-scan',
         maxHighlightPages: debugHighlightPageLimit ?? undefined,
         logPrefix,
@@ -1436,16 +1448,16 @@ export const ReadwiseContainer = () => {
 
           setStatus('syncing')
           setCurrent(progress.completed ?? 0)
-          setTotal(progress.total ?? targetDocuments)
+          setTotal(progress.total ?? 0)
           setCurrentBook(progress.pageTitle ?? '')
           updateReaderSyncEta(
             'fetch-documents',
             'parent document fetch',
             progress.completed ?? 0,
-            progress.total ?? targetDocuments,
+            progress.total ?? 0,
           )
           setStatusMessage(
-            `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? targetDocuments}.`,
+            `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? 0}.`,
           )
         },
       })
@@ -1797,8 +1809,8 @@ export const ReadwiseContainer = () => {
         : ''
   const formalSyncScopeLabel =
     configuredReaderDebugHighlightPageLimit > 0
-      ? `Target ${configuredReaderTargetDocuments} page(s) · Scan ${configuredReaderDebugHighlightPageLimit} highlight page(s)`
-      : `Target ${configuredReaderTargetDocuments} page(s) · Full-library highlight scan`
+      ? `${configuredReaderTargetDocuments == null ? 'Sync all matched pages' : `Target ${configuredReaderTargetDocuments} page(s)`} · Scan ${configuredReaderDebugHighlightPageLimit} highlight page(s)`
+      : `${configuredReaderTargetDocuments == null ? 'Sync all matched pages' : `Target ${configuredReaderTargetDocuments} page(s)`} · Full-library highlight scan`
   const highlightScanDetailLabel =
     configuredReaderDebugHighlightPageLimit > 0
       ? `Debug cap active. Roughly 100 highlights per page; current scan is intentionally incomplete.`
@@ -1853,7 +1865,7 @@ export const ReadwiseContainer = () => {
         <div className="rw-header">
           <div className="rw-header-copy">
             <div className="rw-kicker">Reader v3 formal sync</div>
-            <h2>Readwise Sync</h2>
+            <h2>Readwise Sync Fork</h2>
             <div className="rw-header-subtitle">{formalSyncScopeLabel}</div>
           </div>
           <div className="rw-header-meta">
@@ -1878,10 +1890,14 @@ export const ReadwiseContainer = () => {
             <div className="rw-summary-card">
               <div className="rw-summary-label">Managed pages</div>
               <div className="rw-summary-value">
-                {configuredReaderTargetDocuments}
+                {configuredReaderTargetDocuments == null
+                  ? 'All matched'
+                  : configuredReaderTargetDocuments}
               </div>
               <div className="rw-summary-note">
-                Formal pages targeted per run.
+                {configuredReaderTargetDocuments == null
+                  ? 'Writes every matched parent document in this run.'
+                  : 'Formal pages targeted per run.'}
               </div>
             </div>
             <div className="rw-summary-card">
@@ -2075,7 +2091,8 @@ export const ReadwiseContainer = () => {
                   For short debug runs, lower "Reader Full Scan Target
                   Documents" and set "Reader Full Scan Debug Highlight Page
                   Limit" in plugin settings. Set the debug page limit back to 0
-                  for a real full scan.
+                  for a real full scan. Set target documents to 0 if you want
+                  to sync every matched parent document.
                 </div>
               </div>
 

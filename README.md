@@ -1,8 +1,8 @@
-# Logseq Readwise Plugin Fork
+# Readwise Sync Fork for Logseq
 
 Logseq plugin fork for syncing Readwise highlights into managed Logseq pages.
 
-This fork prioritizes stability, observability, and local control over parity with the old unofficial plugin or the official black-box export flow.
+This fork is published as an independent Logseq plugin release line. It prioritizes stability, observability, and local control over parity with the old unofficial plugin or the official black-box export flow.
 
 ## Current Status
 
@@ -27,11 +27,11 @@ Formal sync currently scans the Reader highlight library before grouping by pare
 
 ## Install From Release
 
-1. Download the latest `logseq-readwise-plugin.zip` from [Releases](https://github.com/FelixHuoEZ/logseq-readwise-plugin-fork/releases).
-2. Extract the archive. It should produce a `logseq-readwise-plugin/` folder.
+1. Download the latest `logseq-readwise-sync-fork.zip` from [Releases](https://github.com/FelixHuoEZ/logseq-readwise-plugin-fork/releases).
+2. Extract the archive. It should produce a `logseq-readwise-sync-fork/` folder.
 3. In Logseq, open `Plugins`.
 4. Choose `Load unpacked plugin`.
-5. Select the extracted `logseq-readwise-plugin/` folder.
+5. Select the extracted `logseq-readwise-sync-fork/` folder.
 
 ## Configure
 
@@ -41,6 +41,8 @@ Formal sync currently scans the Reader highlight library before grouping by pare
    - `Log Level = warn`
    - `Reader Full Scan Target Documents = 20`
    - `Reader Full Scan Debug Highlight Page Limit = 0`
+
+Do not run this fork and another Readwise Logseq plugin against the same graph at the same time. They share managed page namespaces and properties even though the plugin package id is distinct.
 
 ## Use
 
@@ -94,14 +96,17 @@ To build a release-ready archive locally:
 npm run package:plugin
 ```
 
-This command creates `logseq-readwise-plugin.zip` in the repository root.
+This command creates `logseq-readwise-sync-fork.zip` in the repository root.
 
 ## Credits
 
-This fork builds on work from:
+This fork builds on work from and explicitly references ideas from:
 
-- [hkgnp](https://github.com/hkgnp)
-- [benjypng](https://github.com/benjypng)
+- [hkgnp](https://github.com/hkgnp), for the original community plugin
+- [benjypng/logseq-readwise-plugin](https://github.com/benjypng/logseq-readwise-plugin), for the local-first fork base and sync architecture direction
+- [readwiseio/logseq-readwise-official-plugin](https://github.com/readwiseio/logseq-readwise-official-plugin), for output compatibility targets and export integration ideas
+
+This fork does not claim affiliation with Readwise or the original community maintainers. It is a separately maintained release line.
 
 ## License
 

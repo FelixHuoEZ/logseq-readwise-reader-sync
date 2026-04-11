@@ -4,7 +4,8 @@ import type {
   RunStateV1,
 } from './types'
 
-const MACHINE_ID_STORAGE_KEY = 'logseq-readwise-plugin/machine-id-v1'
+const MACHINE_ID_STORAGE_KEY =
+  'felixhuoez-logseq-readwise-sync/machine-id-v1'
 
 const resolveMachineId = () => {
   const existing = window.localStorage.getItem(MACHINE_ID_STORAGE_KEY)

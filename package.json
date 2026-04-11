@@ -1,12 +1,12 @@
 {
-  "name": "logseq-readwise-plugin",
-  "version": "6.0.0",
+  "name": "logseq-readwise-sync-fork",
+  "version": "0.1.0",
   "author": "FelixHuoEZ (fork of hkgnp and benjypng)",
   "description": "Reader v3-based Logseq Readwise sync fork with managed pages and formal sync diagnostics.",
   "license": "MIT",
   "logseq": {
-    "id": "logseq-readwise-plugin",
-    "title": "Readwise Sync",
+    "id": "felixhuoez-logseq-readwise-sync",
+    "title": "Readwise Sync Fork",
     "icon": "./icon.png",
     "main": "dist/index.html"
   },
@@ -29,7 +29,7 @@
         "@semantic-release/github",
         {
           "assets": [
-            "logseq-readwise-plugin.zip"
+            "logseq-readwise-sync-fork.zip"
           ]
         }
       ]

@@ -8,7 +8,7 @@ import { settingsSchema } from './settings'
 import { runSyncPlanPreviewV1 } from './sync'
 
 const main = async () => {
-  logseq.UI.showMsg('logseq-readwise-plugin loaded')
+  logseq.UI.showMsg('Readwise Sync Fork loaded')
 
   const el = document.getElementById('app')
   if (!el) return
@@ -16,12 +16,12 @@ const main = async () => {
   root.render(<ReadwiseContainer />)
 
   logseq.App.registerUIItem('toolbar', {
-    key: 'logseq-readwise-plugin',
+    key: 'felixhuoez-logseq-readwise-sync',
     template: `<a class="button" data-on-click="syncHighlights"><i class="ti ti-letter-r"></i></a>`,
   })
 
   logseq.App.registerUIItem('toolbar', {
-    key: 'logseq-readwise-plugin-v1-preview',
+    key: 'felixhuoez-logseq-readwise-sync-v1-preview',
     template:
       '<a class="button" data-on-click="previewV1SyncPlan" title="Readwise V1 Preview"><i class="ti ti-eye"></i></a>',
   })

@@ -3,7 +3,11 @@ import './ReadwiseContainer.css'
 import { useEffect, useRef, useState } from 'react'
 import { format } from 'date-fns'
 
-import { createReadwiseClient, loadReaderPreviewBooks } from '../api'
+import {
+  createReadwiseClient,
+  loadReaderPreviewBooks,
+  type ReaderPreviewLoadStats,
+} from '../api'
 import {
   type GraphLastFormalSyncSummaryV1,
   type GraphCheckpointSourceV1,
@@ -39,6 +43,15 @@ import type {
   SyncStatus,
 } from '../types'
 
+type ReaderSyncEtaPhase = 'fetch-highlights' | 'fetch-documents' | 'write-pages'
+
+interface ReaderSyncEtaSnapshot {
+  phase: ReaderSyncEtaPhase
+  label: string
+  etaMs: number | null
+  observedAt: number
+}
+
 export const ReadwiseContainer = () => {
   const defaultReaderFullScanTargetDocuments = 20
   const defaultReaderFullScanDebugHighlightPageLimit = 0
@@ -54,7 +67,19 @@ export const ReadwiseContainer = () => {
   const readerPreviewLogPrefix = '[Readwise Reader Preview]'
   const showAdvancedFormalTestActions = false
   const cancelledRef = useRef(false)
-  const syncPhaseStartedAtRef = useRef<number | null>(null)
+  const etaEstimatorRef = useRef<{
+    phase: ReaderSyncEtaPhase | null
+    label: string
+    lastCompleted: number
+    lastTimestamp: number | null
+    samplesMs: number[]
+  }>({
+    phase: null,
+    label: '',
+    lastCompleted: 0,
+    lastTimestamp: null,
+    samplesMs: [],
+  })
   const [propsReady, setPropsReady] = useState(
     () => !!logseq.settings?.propsConfigured,
   )
@@ -67,6 +92,7 @@ export const ReadwiseContainer = () => {
   const [pageDiffResult, setPageDiffResult] =
     useState<CurrentPageDiffResult | null>(null)
   const [etaTick, setEtaTick] = useState(0)
+  const [etaSnapshot, setEtaSnapshot] = useState<ReaderSyncEtaSnapshot | null>(null)
   const [showMaintenanceTools, setShowMaintenanceTools] = useState(false)
   const [activeFormalTestSessionCount, setActiveFormalTestSessionCount] =
     useState<number | null>(null)
@@ -81,21 +107,10 @@ export const ReadwiseContainer = () => {
   }, [])
 
   useEffect(() => {
-    if (status !== 'fetching' && status !== 'syncing') {
-      syncPhaseStartedAtRef.current = null
-      return
-    }
-
-    if (current === 0 || syncPhaseStartedAtRef.current == null) {
-      syncPhaseStartedAtRef.current = Date.now()
-    }
-  }, [status, current, total])
-
-  useEffect(() => {
     if (
       (status !== 'fetching' && status !== 'syncing') ||
-      current <= 0 ||
-      total <= current
+      etaSnapshot == null ||
+      etaSnapshot.etaMs == null
     ) {
       return
     }
@@ -111,6 +126,14 @@ export const ReadwiseContainer = () => {
 
   const resetUiState = () => {
     cancelledRef.current = false
+    etaEstimatorRef.current = {
+      phase: null,
+      label: '',
+      lastCompleted: 0,
+      lastTimestamp: null,
+      samplesMs: [],
+    }
+    setEtaSnapshot(null)
     setStatus('idle')
     setCurrent(0)
     setTotal(0)
@@ -118,6 +141,90 @@ export const ReadwiseContainer = () => {
     setStatusMessage('')
     setErrors([])
     setPageDiffResult(null)
+  }
+
+  const beginReaderSyncEtaPhase = (
+    phase: ReaderSyncEtaPhase,
+    label: string,
+  ) => {
+    etaEstimatorRef.current = {
+      phase,
+      label,
+      lastCompleted: 0,
+      lastTimestamp: Date.now(),
+      samplesMs: [],
+    }
+    setEtaSnapshot({
+      phase,
+      label,
+      etaMs: null,
+      observedAt: Date.now(),
+    })
+  }
+
+  const updateReaderSyncEta = (
+    phase: ReaderSyncEtaPhase,
+    label: string,
+    completed: number,
+    totalUnits: number,
+  ) => {
+    const now = Date.now()
+    const estimator = etaEstimatorRef.current
+
+    if (estimator.phase !== phase) {
+      etaEstimatorRef.current = {
+        phase,
+        label,
+        lastCompleted: completed,
+        lastTimestamp: now,
+        samplesMs: [],
+      }
+      setEtaSnapshot({
+        phase,
+        label,
+        etaMs: null,
+        observedAt: now,
+      })
+      return
+    }
+
+    if (
+      estimator.lastTimestamp != null &&
+      completed > estimator.lastCompleted
+    ) {
+      const deltaUnits = completed - estimator.lastCompleted
+      const sampleMs = (now - estimator.lastTimestamp) / deltaUnits
+      const nextSamples = [...estimator.samplesMs, sampleMs].slice(-5)
+      etaEstimatorRef.current = {
+        phase,
+        label,
+        lastCompleted: completed,
+        lastTimestamp: now,
+        samplesMs: nextSamples,
+      }
+
+      const rollingAverageMs =
+        nextSamples.reduce((sum, value) => sum + value, 0) / nextSamples.length
+      const remainingUnits = Math.max(0, totalUnits - completed)
+      setEtaSnapshot({
+        phase,
+        label,
+        etaMs: remainingUnits > 0 ? rollingAverageMs * remainingUnits : 0,
+        observedAt: now,
+      })
+      return
+    }
+
+    setEtaSnapshot((previous) =>
+      previous == null
+        ? {
+            phase,
+            label,
+            etaMs: null,
+            observedAt: now,
+          }
+        : previous,
+    )
   }
 
   const copyText = async (text: string, label: string) => {
@@ -1260,12 +1367,14 @@ export const ReadwiseContainer = () => {
     const client = createReadwiseClient(token)
     const syncErrorsForRun: Array<{ book: string; message: string }> = []
     const runStartedAt = Date.now()
-    let loadStats = {
+    let loadStats: ReaderPreviewLoadStats = {
       highlightPagesScanned: 0,
       highlightsScanned: 0,
       parentDocumentsIdentified: 0,
       pagesTargeted: 0,
       pagesProcessed: 0,
+      estimatedHighlightPages: null,
+      estimatedHighlightResults: null,
       fetchHighlightsDurationMs: 0,
       fetchDocumentsDurationMs: 0,
     }
@@ -1276,6 +1385,7 @@ export const ReadwiseContainer = () => {
     let renamedCount = 0
 
     try {
+      beginReaderSyncEtaPhase('fetch-highlights', 'highlight scan')
       const previewLoadResult = await loadReaderPreviewBooks(client, {
         maxDocuments: targetDocuments,
         mode: 'full-library-scan',
@@ -1290,6 +1400,12 @@ export const ReadwiseContainer = () => {
             setCurrent(progress.pageNumber ?? 0)
             setTotal(totalPages)
             setCurrentBook('')
+            updateReaderSyncEta(
+              'fetch-highlights',
+              'highlight scan',
+              progress.pageNumber ?? 0,
+              totalPages,
+            )
             setStatusMessage(
               `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`,
             )
@@ -1300,13 +1416,43 @@ export const ReadwiseContainer = () => {
           setCurrent(progress.completed ?? 0)
           setTotal(progress.total ?? targetDocuments)
           setCurrentBook(progress.pageTitle ?? '')
+          updateReaderSyncEta(
+            'fetch-documents',
+            'parent document fetch',
+            progress.completed ?? 0,
+            progress.total ?? targetDocuments,
+          )
           setStatusMessage(
             `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? targetDocuments}.`,
           )
         },
       })
       const previewBooks = previewLoadResult.books
-      loadStats = previewLoadResult.stats
+      loadStats = {
+        ...previewLoadResult.stats,
+        pagesProcessed: 0,
+      }
+      console.info(`${logPrefix} fetch timing diagnostics`, {
+        estimatedHighlightPages: loadStats.estimatedHighlightPages,
+        estimatedHighlightResults: loadStats.estimatedHighlightResults,
+        highlightPagesScanned: loadStats.highlightPagesScanned,
+        highlightsScanned: loadStats.highlightsScanned,
+        parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+        fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+        fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+        averageHighlightPageDurationMs:
+          loadStats.highlightPagesScanned > 0
+            ? Math.round(
+                loadStats.fetchHighlightsDurationMs / loadStats.highlightPagesScanned,
+              )
+            : null,
+        averageParentDocumentDurationMs:
+          loadStats.pagesTargeted > 0
+            ? Math.round(
+                loadStats.fetchDocumentsDurationMs / loadStats.pagesTargeted,
+              )
+            : null,
+      })
 
       if (cancelledRef.current) return
 
@@ -1320,6 +1466,7 @@ export const ReadwiseContainer = () => {
       setCurrent(0)
       setTotal(previewBooks.length)
       setCurrentBook('')
+      beginReaderSyncEtaPhase('write-pages', 'page writes')
       setStatusMessage(
         `${statusPrefix}: syncing ${previewBooks.length} Reader page(s) from full-library highlight groups into ${namespacePrefix}...`,
       )
@@ -1330,8 +1477,6 @@ export const ReadwiseContainer = () => {
 
         const previewBook = previewBooks[index]!
         const pageTitle = previewBook.document.title ?? previewBook.document.id
-        loadStats.pagesProcessed += 1
-        setCurrent(index + 1)
         setCurrentBook(pageTitle)
 
         try {
@@ -1363,8 +1508,25 @@ export const ReadwiseContainer = () => {
           syncErrorsForRun.push({ book: pageTitle, message })
           setErrors((prev) => [...prev, { book: pageTitle, message }])
         }
+        loadStats.pagesProcessed += 1
+        setCurrent(index + 1)
+        updateReaderSyncEta(
+          'write-pages',
+          'page writes',
+          index + 1,
+          previewBooks.length,
+        )
       }
       writePagesDurationMs = Date.now() - writePagesStartedAt
+      console.info(`${logPrefix} write timing diagnostics`, {
+        pagesWrittenAttempted: previewBooks.length,
+        pagesProcessed: loadStats.pagesProcessed,
+        writePagesDurationMs,
+        averagePageWriteDurationMs:
+          previewBooks.length > 0
+            ? Math.round(writePagesDurationMs / previewBooks.length)
+            : null,
+      })
 
       if (syncHeaderMode === 'formal') {
         const summary: GraphLastFormalSyncSummaryV1 = {
@@ -1551,20 +1713,16 @@ export const ReadwiseContainer = () => {
   }
 
   const progressPct = total > 0 ? Math.round((current / total) * 100) : 0
-  const syncElapsedMs =
+  const liveEstimatedRemainingMs =
+    etaSnapshot?.etaMs != null
+      ? Math.max(0, etaSnapshot.etaMs - ((etaTick || Date.now()) - etaSnapshot.observedAt))
+      : null
+  const etaSuffix =
     (status === 'fetching' || status === 'syncing') &&
-    current > 0 &&
-    total > current &&
-    syncPhaseStartedAtRef.current != null
-      ? Math.max(
-          0,
-          (etaTick || Date.now()) - syncPhaseStartedAtRef.current,
-        )
-      : null
-  const estimatedRemainingMs =
-    syncElapsedMs != null && current > 0
-      ? Math.max(0, (syncElapsedMs / current) * (total - current))
-      : null
+    liveEstimatedRemainingMs != null &&
+    etaSnapshot != null
+      ? ` · ETA ${formatDuration(liveEstimatedRemainingMs)} (${etaSnapshot.label})`
+      : ''
   const isBusy = status === 'fetching' || status === 'syncing'
   const configuredSyncMaxBooks =
     resolveConfiguredSyncMaxBooks() ?? debugSyncMaxBooksLimit
@@ -1644,8 +1802,8 @@ export const ReadwiseContainer = () => {
               </div>
               <div className="rw-progress-label">
                 {status === 'fetching'
-                  ? `${current} / ${total} (${progressPct}%)${estimatedRemainingMs != null ? ` · ETA ${formatDuration(estimatedRemainingMs)}` : ''}`
-                  : `${current} / ${total} (${progressPct}%)${estimatedRemainingMs != null ? ` · ETA ${formatDuration(estimatedRemainingMs)}` : ''}`}
+                  ? `${current} / ${total} (${progressPct}%)${etaSuffix}`
+                  : `${current} / ${total} (${progressPct}%)${etaSuffix}`}
               </div>
             </>
           )}

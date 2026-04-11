@@ -13,6 +13,8 @@ export interface ReaderPreviewLoadStats {
   parentDocumentsIdentified: number
   pagesTargeted: number
   pagesProcessed: number
+  estimatedHighlightPages: number | null
+  estimatedHighlightResults: number | null
   fetchHighlightsDurationMs: number
   fetchDocumentsDurationMs: number
 }
@@ -176,6 +178,12 @@ export const loadReaderPreviewBooks = async (
           .slice(0, maxDocuments)
       : targetParentIds.slice(0, maxDocuments)
   const fetchDocumentsStartedAt = Date.now()
+  options.onProgress?.({
+    phase: 'fetch-documents',
+    completed: 0,
+    total: selectedParentIds.length,
+    pageTitle: null,
+  })
 
   for (let index = 0; index < selectedParentIds.length; index += 1) {
     const parentId = selectedParentIds[index]!
@@ -211,6 +219,8 @@ export const loadReaderPreviewBooks = async (
       parentDocumentsIdentified: targetParentIds.length,
       pagesTargeted: selectedParentIds.length,
       pagesProcessed: previewBooks.length,
+      estimatedHighlightPages: initialTotalPages,
+      estimatedHighlightResults: initialTotalResults,
       fetchHighlightsDurationMs,
       fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
     },

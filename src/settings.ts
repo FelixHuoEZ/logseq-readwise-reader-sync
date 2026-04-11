@@ -10,28 +10,6 @@ export const settingsSchema: SettingSchemaDesc[] = [
     default: '',
   },
   {
-    key: 'lastSyncTimestamp',
-    type: 'string',
-    title: 'Last Sync Timestamp',
-    description: 'Internal — managed by the plugin. Do not edit manually.',
-    default: '',
-  },
-  {
-    key: 'propsConfigured',
-    type: 'boolean',
-    title: 'Properties Configured',
-    description: 'Internal — managed by the plugin. Do not edit manually.',
-    default: false,
-  },
-  {
-    key: 'debugSyncMaxBooks',
-    type: 'number',
-    title: 'Debug Sync Max Books',
-    description:
-      'Temporary debug limit for real sync. Set 0 to disable the limit and allow full sync.',
-    default: 5,
-  },
-  {
     key: 'readerFullScanTargetDocuments',
     type: 'number',
     title: 'Reader Full Scan Target Documents',
@@ -44,7 +22,7 @@ export const settingsSchema: SettingSchemaDesc[] = [
     type: 'number',
     title: 'Reader Full Scan Debug Highlight Page Limit',
     description:
-      'Debug-only cap for Reader highlight pages scanned before grouping by parent_id. Set 0 to disable.',
+      'Debug-only cap for Reader highlight pages scanned before grouping by parent_id. Roughly 100 highlights per page. Set 0 to disable.',
     default: 0,
   },
 ]

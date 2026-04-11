@@ -51,17 +51,6 @@ const main = async () => {
 
   logseq.App.registerCommandPalette(
     {
-      key: 'readwise:sync',
-      label: 'Readwise: Reset sync timestamp',
-    },
-    () =>
-      logseq.updateSettings({
-        lastSyncTimestamp: '',
-      }),
-  )
-
-  logseq.App.registerCommandPalette(
-    {
       key: 'readwise:v1-preview-sync-plan',
       label: 'Readwise: Preview V1 sync plan',
     },

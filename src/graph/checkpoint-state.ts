@@ -62,6 +62,9 @@ const LAST_FORMAL_SYNC_PROPERTY_KEYS = {
   failureSummary: 'rw-last-formal-sync-failure-summary',
 } as const
 
+const LAST_FORMAL_SYNC_SUMMARY_BLOCK_UUID =
+  'c2ddfe13-67d1-42df-9f0b-cd8684f16f61'
+
 const normalizePropertyKey = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]/g, '')
 
@@ -191,6 +194,62 @@ const ensureCheckpointPage = async (): Promise<PageEntity> => {
   }
 
   return created
+}
+
+const formatDurationMinutes = (milliseconds: number) =>
+  (milliseconds / 60000).toFixed(2)
+
+const buildLastFormalSyncSummaryBlockContent = (
+  summary: GraphLastFormalSyncSummaryV1,
+) => {
+  const lines = [
+    'Readwise Formal Sync Summary',
+    '',
+    `- rw-last-formal-sync-status: ${summary.status}`,
+    `- rw-last-formal-sync-kind: ${summary.runKind}`,
+    `- rw-last-formal-sync-completed-at: ${summary.completedAt}`,
+    `- rw-last-formal-sync-highlight-pages-scanned: ${summary.highlightPagesScanned}`,
+    `- rw-last-formal-sync-highlights-scanned: ${summary.highlightsScanned}`,
+    `- rw-last-formal-sync-parent-documents-identified: ${summary.parentDocumentsIdentified}`,
+    `- rw-last-formal-sync-pages-targeted: ${summary.pagesTargeted}`,
+    `- rw-last-formal-sync-pages-processed: ${summary.pagesProcessed}`,
+    `- rw-last-formal-sync-created: ${summary.createdCount}`,
+    `- rw-last-formal-sync-updated: ${summary.updatedCount}`,
+    `- rw-last-formal-sync-unchanged: ${summary.unchangedCount}`,
+    `- rw-last-formal-sync-renamed: ${summary.renamedCount}`,
+    `- rw-last-formal-sync-errors: ${summary.errorCount}`,
+    `- rw-last-formal-sync-total-duration-minutes: ${formatDurationMinutes(summary.totalDurationMs)}`,
+    `- rw-last-formal-sync-fetch-highlights-duration-minutes: ${formatDurationMinutes(summary.fetchHighlightsDurationMs)}`,
+    `- rw-last-formal-sync-fetch-documents-duration-minutes: ${formatDurationMinutes(summary.fetchDocumentsDurationMs)}`,
+    `- rw-last-formal-sync-write-pages-duration-minutes: ${formatDurationMinutes(summary.writePagesDurationMs)}`,
+  ]
+
+  if (summary.failureSummary) {
+    lines.push(`- rw-last-formal-sync-failure-summary: ${summary.failureSummary}`)
+  }
+
+  return lines.join('\n')
+}
+
+const upsertLastFormalSyncSummaryBlock = async (
+  page: PageEntity,
+  summary: GraphLastFormalSyncSummaryV1,
+) => {
+  const content = buildLastFormalSyncSummaryBlockContent(summary)
+  const existing = await logseq.Editor.getBlock(LAST_FORMAL_SYNC_SUMMARY_BLOCK_UUID)
+
+  if (existing) {
+    await logseq.Editor.updateBlock(LAST_FORMAL_SYNC_SUMMARY_BLOCK_UUID, content)
+    return
+  }
+
+  const created = await logseq.Editor.insertBlock(page.uuid, content, {
+    customUUID: LAST_FORMAL_SYNC_SUMMARY_BLOCK_UUID,
+  })
+
+  if (!created) {
+    throw new Error('Failed to create the last formal sync summary block.')
+  }
 }
 
 export const loadGraphCheckpointStateV1 =
@@ -323,101 +382,110 @@ export const saveGraphLastFormalSyncSummaryV1 = async (
 ): Promise<GraphLastFormalSyncSummaryV1> => {
   const page = await ensureCheckpointPage()
 
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.schemaVersion,
-    summary.schemaVersion,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.runKind,
-    summary.runKind,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.status,
-    summary.status,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.completedAt,
-    summary.completedAt,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightPagesScanned,
-    summary.highlightPagesScanned,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightsScanned,
-    summary.highlightsScanned,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.parentDocumentsIdentified,
-    summary.parentDocumentsIdentified,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.pagesTargeted,
-    summary.pagesTargeted,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.pagesProcessed,
-    summary.pagesProcessed,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.createdCount,
-    summary.createdCount,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.updatedCount,
-    summary.updatedCount,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.unchangedCount,
-    summary.unchangedCount,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.renamedCount,
-    summary.renamedCount,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.errorCount,
-    summary.errorCount,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.totalDurationMs,
-    summary.totalDurationMs,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.fetchHighlightsDurationMs,
-    summary.fetchHighlightsDurationMs,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.fetchDocumentsDurationMs,
-    summary.fetchDocumentsDurationMs,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.writePagesDurationMs,
-    summary.writePagesDurationMs,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    LAST_FORMAL_SYNC_PROPERTY_KEYS.failureSummary,
-    summary.failureSummary ?? '',
-  )
+  try {
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.schemaVersion,
+      summary.schemaVersion,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.runKind,
+      summary.runKind,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.status,
+      summary.status,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.completedAt,
+      summary.completedAt,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightPagesScanned,
+      summary.highlightPagesScanned,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightsScanned,
+      summary.highlightsScanned,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.parentDocumentsIdentified,
+      summary.parentDocumentsIdentified,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.pagesTargeted,
+      summary.pagesTargeted,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.pagesProcessed,
+      summary.pagesProcessed,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.createdCount,
+      summary.createdCount,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.updatedCount,
+      summary.updatedCount,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.unchangedCount,
+      summary.unchangedCount,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.renamedCount,
+      summary.renamedCount,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.errorCount,
+      summary.errorCount,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.totalDurationMs,
+      summary.totalDurationMs,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.fetchHighlightsDurationMs,
+      summary.fetchHighlightsDurationMs,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.fetchDocumentsDurationMs,
+      summary.fetchDocumentsDurationMs,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.writePagesDurationMs,
+      summary.writePagesDurationMs,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      LAST_FORMAL_SYNC_PROPERTY_KEYS.failureSummary,
+      summary.failureSummary ?? '',
+    )
+  } catch (error) {
+    console.warn(
+      '[Readwise Sync] failed to persist last formal sync summary as page properties; falling back to managed summary block only.',
+      error,
+    )
+  }
+
+  await upsertLastFormalSyncSummaryBlock(page, summary)
 
   return summary
 }

@@ -10,11 +10,18 @@ export const settingsSchema: SettingSchemaDesc[] = [
     default: '',
   },
   {
+    key: 'debugSection',
+    type: 'heading',
+    title: 'Debug',
+    description: 'Default behavior: do not modify these settings during normal use.',
+    default: null,
+  },
+  {
     key: 'readerFullScanTargetDocuments',
     type: 'number',
     title: 'Reader Full Scan Target Documents',
     description:
-      'How many managed Reader documents formal sync should write. Default 20.',
+      'How many managed Reader documents formal sync should write. Default 20. Normally leave unchanged.',
     default: 20,
   },
   {
@@ -22,7 +29,7 @@ export const settingsSchema: SettingSchemaDesc[] = [
     type: 'number',
     title: 'Reader Full Scan Debug Highlight Page Limit',
     description:
-      'Debug-only cap for Reader highlight pages scanned before grouping by parent_id. Roughly 100 highlights per page. Set 0 to disable.',
+      'Debug-only cap for Reader highlight pages scanned before grouping by parent_id. Roughly 100 highlights per page. Keep 0 for normal use.',
     default: 0,
   },
 ]

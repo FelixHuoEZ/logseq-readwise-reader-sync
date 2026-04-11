@@ -40,6 +40,7 @@ export interface LoadReaderPreviewBooksOptions {
   maxDocuments?: number
   mode?: 'full-library-scan' | 'recent-window'
   maxHighlightPages?: number
+  logPrefix?: string
   onProgress?: (progress: LoadReaderPreviewBooksProgress) => void
 }
 
@@ -88,6 +89,7 @@ export const loadReaderPreviewBooks = async (
     }
 
     pageNumber += 1
+    const pageStartedAt = Date.now()
     const response = await client.listReaderDocuments({
       category: 'highlight',
       limit: 100,
@@ -139,13 +141,31 @@ export const loadReaderPreviewBooks = async (
         pageNumber,
       pageNumber,
     )
+    const displayTotalPages =
+      effectiveMaxHighlightPages != null
+        ? Math.min(estimatedTotalPages, effectiveMaxHighlightPages)
+        : estimatedTotalPages
+
+    if (options.logPrefix) {
+      console.info(`${options.logPrefix} fetched highlight page`, {
+        pageNumber,
+        estimatedTotalPages: displayTotalPages,
+        estimatedTotalResults: initialTotalResults,
+        responseResultCount: response.results.length,
+        totalHighlights,
+        uniqueParents: targetParentIds.length,
+        hasNextPage: !!response.nextPageCursor,
+        cappedByDebugLimit:
+          effectiveMaxHighlightPages != null &&
+          pageNumber >= effectiveMaxHighlightPages,
+        pageDurationMs: Date.now() - pageStartedAt,
+      })
+    }
+
     options.onProgress?.({
       phase: 'fetch-highlights',
       pageNumber,
-      totalPages:
-        effectiveMaxHighlightPages != null
-          ? Math.min(estimatedTotalPages, effectiveMaxHighlightPages)
-          : estimatedTotalPages,
+      totalPages: displayTotalPages,
       totalResults: initialTotalResults ?? undefined,
       uniqueParents: targetParentIds.length,
       totalHighlights,

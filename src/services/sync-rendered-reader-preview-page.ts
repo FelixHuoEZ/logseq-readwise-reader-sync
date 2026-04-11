@@ -147,6 +147,13 @@ export const syncRenderedReaderPreviewPage = async (
       : previewBook.document.id,
     namespacePrefix,
   )
+  console.info(`${logPrefix} preparing rendered Reader page`, {
+    readerDocumentId: previewBook.document.id,
+    pageName,
+    namespacePrefix,
+    pageResolveMode: options.pageResolveMode ?? 'title_only',
+    highlightCount: previewBook.highlights.length,
+  })
   const syncDate = format(new Date(), 'yyyy-MM-dd')
   const pageResolution =
     options.pageResolveMode === 'reader_id_then_title'

@@ -52,6 +52,65 @@ interface ReaderSyncEtaSnapshot {
   observedAt: number
 }
 
+const extractErrorTextParts = (value: unknown): string[] => {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? [trimmed] : []
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return [String(value)]
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => extractErrorTextParts(item))
+  }
+
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return [
+      ...extractErrorTextParts(record.message),
+      ...extractErrorTextParts(record.reason),
+      ...extractErrorTextParts(record.error),
+      ...extractErrorTextParts(record.name),
+      ...extractErrorTextParts(record.code),
+    ]
+  }
+
+  return []
+}
+
+const describeUnknownError = (error: unknown): string => {
+  if (error instanceof Error) {
+    const message = error.message.trim()
+    return message.length > 0 ? message : error.name
+  }
+
+  const extracted = extractErrorTextParts(error)
+  const uniqueExtracted = extracted.filter(
+    (value, index, values) => values.indexOf(value) === index,
+  )
+
+  if (uniqueExtracted.length > 0) {
+    return uniqueExtracted.join(' | ')
+  }
+
+  if (error && typeof error === 'object') {
+    try {
+      const serialized = JSON.stringify(error)
+      if (serialized && serialized !== '{}') {
+        return serialized
+      }
+    } catch {
+      return 'Unknown error object'
+    }
+
+    return 'Unknown error object'
+  }
+
+  return String(error)
+}
+
 export const ReadwiseContainer = () => {
   const defaultReaderFullScanTargetDocuments = 20
   const defaultReaderFullScanDebugHighlightPageLimit = 0
@@ -1390,6 +1449,7 @@ export const ReadwiseContainer = () => {
         maxDocuments: targetDocuments,
         mode: 'full-library-scan',
         maxHighlightPages: debugHighlightPageLimit ?? undefined,
+        logPrefix,
         onProgress: (progress) => {
           if (cancelledRef.current) return
 
@@ -1504,7 +1564,14 @@ export const ReadwiseContainer = () => {
           if (pageSyncResult.result === 'unchanged') unchangedCount += 1
           if (pageSyncResult.pageRenamed) renamedCount += 1
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err)
+          const message = describeUnknownError(err)
+          console.error(`${logPrefix} failed to sync rendered Reader page`, {
+            pageTitle,
+            readerDocumentId: previewBook.document.id,
+            namespacePrefix,
+            formattedError: message,
+            error: err,
+          })
           syncErrorsForRun.push({ book: pageTitle, message })
           setErrors((prev) => [...prev, { book: pageTitle, message }])
         }
@@ -1550,7 +1617,7 @@ export const ReadwiseContainer = () => {
           writePagesDurationMs,
           failureSummary:
             syncErrorsForRun.length > 0
-              ? `${syncErrorsForRun.length} page(s) failed during formal Reader sync.`
+              ? `${syncErrorsForRun.length} page(s) failed during formal Reader sync. First error: ${syncErrorsForRun[0]?.book}: ${syncErrorsForRun[0]?.message}`
               : null,
         }
         await saveGraphLastFormalSyncSummaryV1(summary)
@@ -1570,7 +1637,7 @@ export const ReadwiseContainer = () => {
       })
     } catch (err: unknown) {
       if (syncHeaderMode === 'formal') {
-        const message = err instanceof Error ? err.message : String(err)
+        const message = describeUnknownError(err)
         const summary: GraphLastFormalSyncSummaryV1 = {
           schemaVersion: 1,
           runKind: 'reader_full_scan',
@@ -1598,7 +1665,7 @@ export const ReadwiseContainer = () => {
       console.error(`${logPrefix} sync failed`, err)
       setStatus('error')
       setStatusMessage(
-        `${statusPrefix} failed: ${err instanceof Error ? err.message : String(err)}`,
+        `${statusPrefix} failed: ${describeUnknownError(err)}`,
       )
     }
   }

@@ -6,6 +6,8 @@ import { format } from 'date-fns'
 import {
   createReadwiseClient,
   loadReaderPreviewBooks,
+  isReaderPreviewLoadResumeError,
+  type ReaderPreviewLoadResumeState,
   type ReaderPreviewLoadStats,
 } from '../api'
 import {
@@ -62,6 +64,7 @@ interface ReaderSyncEtaSnapshot {
 export const ReadwiseContainer = () => {
   const defaultReaderFullScanTargetDocuments = 20
   const defaultReaderFullScanDebugHighlightPageLimit = 0
+  const maxAutomaticResumeRetries = 10
   const debugSyncMaxBooksLimit = 5
   const debugNamespaceRoot = 'ReadwiseDebug'
   const formalNamespaceRoot = 'ReadwiseHighlights'
@@ -74,6 +77,11 @@ export const ReadwiseContainer = () => {
   const readerPreviewLogPrefix = '[Readwise Reader Preview]'
   const showAdvancedFormalTestActions = false
   const cancelledRef = useRef(false)
+  const retryActionRef = useRef<{
+    kind: 'formal' | 'preview'
+    label: string
+    run: () => Promise<void>
+  } | null>(null)
   const etaEstimatorRef = useRef<{
     phase: ReaderSyncEtaPhase | null
     label: string
@@ -133,6 +141,7 @@ export const ReadwiseContainer = () => {
 
   const resetUiState = () => {
     cancelledRef.current = false
+    retryActionRef.current = null
     etaEstimatorRef.current = {
       phase: null,
       label: '',
@@ -371,6 +380,7 @@ export const ReadwiseContainer = () => {
 
   const handleCancel = () => {
     cancelledRef.current = true
+    retryActionRef.current = null
     setStatus('idle')
     setStatusMessage('Sync cancelled.')
     setCurrentBook('')
@@ -1045,6 +1055,7 @@ export const ReadwiseContainer = () => {
     }
 
     cancelledRef.current = false
+    retryActionRef.current = null
     setErrors([])
     setPageDiffResult(null)
     setCurrent(0)
@@ -1363,11 +1374,17 @@ export const ReadwiseContainer = () => {
     logPrefix,
     statusPrefix,
     syncHeaderMode,
+    resumeState,
+    automaticResumeAttempt = 0,
+    runStartedAtMs,
   }: {
     namespacePrefix: string
     logPrefix: string
     statusPrefix: string
     syncHeaderMode: 'formal' | 'preview'
+    resumeState?: ReaderPreviewLoadResumeState
+    automaticResumeAttempt?: number
+    runStartedAtMs?: number
   }) => {
     const token = logseq.settings?.apiToken as string
     if (!token) {
@@ -1387,6 +1404,7 @@ export const ReadwiseContainer = () => {
       targetDocuments == null ? 'all matched documents' : `${targetDocuments} target document(s)`
 
     cancelledRef.current = false
+    retryActionRef.current = null
     setErrors([])
     setPageDiffResult(null)
     setCurrent(0)
@@ -1399,7 +1417,7 @@ export const ReadwiseContainer = () => {
 
     const client = createReadwiseClient(token)
     const syncErrorsForRun: Array<{ book: string; message: string }> = []
-    const runStartedAt = Date.now()
+    const runStartedAt = runStartedAtMs ?? Date.now()
     let loadStats: ReaderPreviewLoadStats = {
       highlightPagesScanned: 0,
       highlightsScanned: 0,
@@ -1423,6 +1441,7 @@ export const ReadwiseContainer = () => {
         maxDocuments: targetDocuments,
         mode: 'full-library-scan',
         maxHighlightPages: debugHighlightPageLimit ?? undefined,
+        resumeState,
         logPrefix,
         onProgress: (progress) => {
           if (cancelledRef.current) return
@@ -1610,6 +1629,78 @@ export const ReadwiseContainer = () => {
         errorCount: syncErrorsForRun.length,
       })
     } catch (err: unknown) {
+      if (isReaderPreviewLoadResumeError(err)) {
+        const retryTarget = describeReaderResumeTarget(err.resumeState)
+
+        if (automaticResumeAttempt < maxAutomaticResumeRetries) {
+          const retryDelayMs = 1500 * (automaticResumeAttempt + 1)
+          const automaticRetryOrdinal = automaticResumeAttempt + 1
+          const retryTotal = maxAutomaticResumeRetries
+          const isFetchHighlightsResume =
+            err.resumeState.phase === 'fetch-highlights'
+          const resumeTotal =
+            err.resumeState.phase === 'fetch-highlights'
+              ? Math.max(
+                  err.resumeState.initialTotalPages ??
+                    err.resumeState.maxHighlightPages ??
+                    err.resumeState.pageNumber,
+                  err.resumeState.pageNumber,
+                )
+              : err.resumeState.selectedParentIds.length
+
+          retryActionRef.current = null
+          setStatus(isFetchHighlightsResume ? 'fetching' : 'syncing')
+          setCurrent(
+            isFetchHighlightsResume
+              ? err.resumeState.pageNumber
+              : err.resumeState.documentIndex,
+          )
+          setTotal(resumeTotal)
+          setCurrentBook('')
+          setStatusMessage(
+            `${statusPrefix}: interrupted during ${retryTarget}. Retrying automatically ${automaticRetryOrdinal} / ${retryTotal}...`,
+          )
+          logReadwiseWarn(logPrefix, 'resumable Reader sync step failed; retrying automatically', {
+            retryTarget,
+            automaticRetryOrdinal,
+            retryTotal,
+            retryDelayMs,
+            resumePhase: err.resumeState.phase,
+            formattedError: describeUnknownError(err),
+          })
+          await sleep(retryDelayMs)
+
+          if (cancelledRef.current) {
+            return
+          }
+
+          await runReaderFullScanSync({
+            namespacePrefix,
+            logPrefix,
+            statusPrefix,
+            syncHeaderMode,
+            resumeState: err.resumeState,
+            automaticResumeAttempt: automaticResumeAttempt + 1,
+            runStartedAtMs: runStartedAt,
+          })
+          return
+        }
+
+        retryActionRef.current = {
+          kind: syncHeaderMode,
+          label: retryTarget,
+          run: () =>
+            runReaderFullScanSync({
+              namespacePrefix,
+              logPrefix,
+              statusPrefix,
+              syncHeaderMode,
+              resumeState: err.resumeState,
+              runStartedAtMs: runStartedAt,
+            }),
+        }
+      }
+
       if (syncHeaderMode === 'formal') {
         const message = describeUnknownError(err)
         const summary: GraphLastFormalSyncSummaryV1 = {
@@ -1639,7 +1730,9 @@ export const ReadwiseContainer = () => {
       logReadwiseError(logPrefix, 'sync failed', err)
       setStatus('error')
       setStatusMessage(
-        `${statusPrefix} failed: ${describeUnknownError(err)}`,
+        isReaderPreviewLoadResumeError(err)
+          ? `${statusPrefix} failed: ${describeUnknownError(err)}. Retry will resume ${describeReaderResumeTarget(err.resumeState)}.`
+          : `${statusPrefix} failed: ${describeUnknownError(err)}`,
       )
     }
   }
@@ -1846,6 +1939,28 @@ export const ReadwiseContainer = () => {
         return `${conflict.label} ${conflict.pages.length} page(s)${sampleText}; clear via ${conflict.clearAction}`
       })
       .join(' | ')
+
+  const describeReaderResumeTarget = (
+    resumeState: ReaderPreviewLoadResumeState,
+  ) => {
+    if (resumeState.phase === 'fetch-highlights') {
+      return `highlight scan page ${resumeState.pageNumber + 1}`
+    }
+
+    return `parent document ${resumeState.documentIndex + 1} / ${resumeState.selectedParentIds.length}`
+  }
+
+  const handleRetry = async () => {
+    const retryAction = retryActionRef.current
+
+    if (retryAction) {
+      await retryAction.run()
+      return
+    }
+
+    await handleSync()
+  }
+
   const handleClose = () => {
     if (!isBusy) {
       resetUiState()
@@ -2190,7 +2305,7 @@ export const ReadwiseContainer = () => {
             </button>
           )}
           {status === 'error' && (
-            <button className="rw-btn rw-btn-primary" onClick={handleSync}>
+            <button className="rw-btn rw-btn-primary" onClick={handleRetry}>
               Retry
             </button>
           )}

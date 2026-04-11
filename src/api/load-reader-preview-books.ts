@@ -24,6 +24,44 @@ export interface ReaderPreviewLoadStats {
   fetchDocumentsDurationMs: number
 }
 
+export type ReaderPreviewLoadPhase = 'fetch-highlights' | 'fetch-documents'
+
+export interface ReaderPreviewLoadResumeState {
+  phase: ReaderPreviewLoadPhase
+  mode: 'full-library-scan' | 'recent-window'
+  maxDocuments: number | null
+  maxHighlightPages: number | null
+  targetParentIds: string[]
+  highlightsByParent: Array<[string, ReaderDocument[]]>
+  seenHighlightIds: string[]
+  latestHighlightByParent: Array<[string, ReaderDocument]>
+  totalHighlights: number
+  pageNumber: number
+  pageCursor: string | null
+  initialTotalPages: number | null
+  initialTotalResults: number | null
+  fetchHighlightsDurationMs: number
+  selectedParentIds: string[]
+  previewBooks: ReaderPreviewBook[]
+  documentIndex: number
+  fetchDocumentsDurationMs: number
+}
+
+export class ReaderPreviewLoadResumeError extends Error {
+  resumeState: ReaderPreviewLoadResumeState
+
+  constructor(message: string, resumeState: ReaderPreviewLoadResumeState) {
+    super(message)
+    this.name = 'ReaderPreviewLoadResumeError'
+    this.resumeState = resumeState
+  }
+}
+
+export const isReaderPreviewLoadResumeError = (
+  error: unknown,
+): error is ReaderPreviewLoadResumeError =>
+  error instanceof ReaderPreviewLoadResumeError
+
 export interface ReaderPreviewLoadResult {
   books: ReaderPreviewBook[]
   stats: ReaderPreviewLoadStats
@@ -45,6 +83,7 @@ export interface LoadReaderPreviewBooksOptions {
   maxDocuments?: number | null
   mode?: 'full-library-scan' | 'recent-window'
   maxHighlightPages?: number
+  resumeState?: ReaderPreviewLoadResumeState
   logPrefix?: string
   onProgress?: (progress: LoadReaderPreviewBooksProgress) => void
 }
@@ -150,176 +189,239 @@ export const loadReaderPreviewBooks = async (
       : mode === 'recent-window'
         ? 20
         : null
-  const targetParentIds: string[] = []
-  const seenParentIds = new Set<string>()
-  const highlightsByParent = new Map<string, ReaderDocument[]>()
-  const seenHighlightIds = new Set<string>()
-  const latestHighlightByParent = new Map<string, ReaderDocument>()
-  let totalHighlights = 0
-  let pageNumber = 0
-  let pageCursor: string | undefined
-  let initialTotalPages: number | null = null
-  let initialTotalResults: number | null = null
-  const fetchHighlightsStartedAt = Date.now()
+  const resumeState = options.resumeState
+  const targetParentIds = [...(resumeState?.targetParentIds ?? [])]
+  const seenParentIds = new Set(targetParentIds)
+  const highlightsByParent = new Map<string, ReaderDocument[]>(
+    resumeState?.highlightsByParent ?? [],
+  )
+  const seenHighlightIds = new Set(resumeState?.seenHighlightIds ?? [])
+  const latestHighlightByParent = new Map<string, ReaderDocument>(
+    resumeState?.latestHighlightByParent ?? [],
+  )
+  let totalHighlights = resumeState?.totalHighlights ?? 0
+  let pageNumber = resumeState?.pageNumber ?? 0
+  let pageCursor = resumeState?.pageCursor ?? null
+  let initialTotalPages = resumeState?.initialTotalPages ?? null
+  let initialTotalResults = resumeState?.initialTotalResults ?? null
+  const fetchHighlightsStartedAt =
+    Date.now() - (resumeState?.fetchHighlightsDurationMs ?? 0)
 
-  while (true) {
-    if (
-      effectiveMaxHighlightPages != null &&
-      pageNumber >= effectiveMaxHighlightPages
-    ) {
-      break
-    }
-
-    pageNumber += 1
-    const pageStartedAt = Date.now()
-    const response = await listReaderDocumentsWithRetry(
-      client,
-      {
-      category: 'highlight',
-      limit: 100,
-      pageCursor,
-      },
-      {
-        logPrefix: options.logPrefix,
-        stage: 'fetch-highlights',
-        pageNumber,
-      },
-    )
-
-    if (initialTotalPages == null) {
-      initialTotalPages =
-        typeof response.count === 'number' && response.count > 0
-          ? Math.ceil(response.count / 100)
-          : null
-      initialTotalResults =
-        typeof response.count === 'number' && response.count > 0
-          ? response.count
-          : null
-    }
-
-    for (const highlight of response.results) {
-      const parentId =
-        typeof highlight.parent_id === 'string' && highlight.parent_id.length > 0
-          ? highlight.parent_id
-          : null
-      if (!parentId || seenHighlightIds.has(highlight.id)) continue
-
-      const text = getHighlightText(highlight)
-      if (text.length === 0) continue
-
-      seenHighlightIds.add(highlight.id)
-      totalHighlights += 1
-
-      if (!seenParentIds.has(parentId)) {
-        seenParentIds.add(parentId)
-        targetParentIds.push(parentId)
-      }
-
-      const existing = highlightsByParent.get(parentId) ?? []
-      existing.push(highlight)
-      highlightsByParent.set(parentId, existing)
-
-      const latestExisting = latestHighlightByParent.get(parentId)
-      if (!latestExisting || highlight.updated_at > latestExisting.updated_at) {
-        latestHighlightByParent.set(parentId, highlight)
-      }
-    }
-
-    const estimatedTotalPages = Math.max(
-      initialTotalPages ??
-        effectiveMaxHighlightPages ??
-        pageNumber,
-      pageNumber,
-    )
-    const displayTotalPages =
-      effectiveMaxHighlightPages != null
-        ? Math.min(estimatedTotalPages, effectiveMaxHighlightPages)
-        : estimatedTotalPages
-
-    if (options.logPrefix) {
-      logReadwiseDebug(options.logPrefix, 'fetched highlight page', {
-        pageNumber,
-        estimatedTotalPages: displayTotalPages,
-        estimatedTotalResults: initialTotalResults,
-        responseResultCount: response.results.length,
-        totalHighlights,
-        uniqueParents: targetParentIds.length,
-        hasNextPage: !!response.nextPageCursor,
-        cappedByDebugLimit:
-          effectiveMaxHighlightPages != null &&
-          pageNumber >= effectiveMaxHighlightPages,
-        pageDurationMs: Date.now() - pageStartedAt,
-      })
-    }
-
-    options.onProgress?.({
-      phase: 'fetch-highlights',
-      pageNumber,
-      totalPages: displayTotalPages,
-      totalResults: initialTotalResults ?? undefined,
-      uniqueParents: targetParentIds.length,
-      totalHighlights,
+  const sortedParentIds = () =>
+    [...targetParentIds].sort((left, right) => {
+      const leftLatest = latestHighlightByParent.get(left)
+      const rightLatest = latestHighlightByParent.get(right)
+      if (!leftLatest && !rightLatest) return 0
+      if (!leftLatest) return 1
+      if (!rightLatest) return -1
+      return sortByUpdatedAtDescending(leftLatest, rightLatest)
     })
 
-    if (
-      !response.nextPageCursor ||
-      (mode === 'recent-window' &&
-        maxDocuments != null &&
-        targetParentIds.length >= maxDocuments)
-    ) {
-      break
-    }
+  const buildResumeState = (
+    phase: ReaderPreviewLoadPhase,
+    extra: Partial<ReaderPreviewLoadResumeState> = {},
+  ): ReaderPreviewLoadResumeState => ({
+    phase,
+    mode,
+    maxDocuments,
+    maxHighlightPages: effectiveMaxHighlightPages,
+    targetParentIds: [...targetParentIds],
+    highlightsByParent: [...highlightsByParent.entries()],
+    seenHighlightIds: [...seenHighlightIds],
+    latestHighlightByParent: [...latestHighlightByParent.entries()],
+    totalHighlights,
+    pageNumber,
+    pageCursor,
+    initialTotalPages,
+    initialTotalResults,
+    fetchHighlightsDurationMs: Date.now() - fetchHighlightsStartedAt,
+    selectedParentIds: extra.selectedParentIds ?? [],
+    previewBooks: extra.previewBooks ?? [],
+    documentIndex: extra.documentIndex ?? 0,
+    fetchDocumentsDurationMs: extra.fetchDocumentsDurationMs ?? 0,
+  })
 
-    pageCursor = response.nextPageCursor
+  if ((resumeState?.phase ?? 'fetch-highlights') === 'fetch-highlights') {
+    while (true) {
+      if (
+        effectiveMaxHighlightPages != null &&
+        pageNumber >= effectiveMaxHighlightPages
+      ) {
+        break
+      }
+
+      const nextPageNumber = pageNumber + 1
+      const pageStartedAt = Date.now()
+      let response: Awaited<ReturnType<ReadwiseClient['listReaderDocuments']>>
+
+      try {
+        response = await listReaderDocumentsWithRetry(
+          client,
+          {
+            category: 'highlight',
+            limit: 100,
+            pageCursor: pageCursor ?? undefined,
+          },
+          {
+            logPrefix: options.logPrefix,
+            stage: 'fetch-highlights',
+            pageNumber: nextPageNumber,
+          },
+        )
+      } catch (error) {
+        throw new ReaderPreviewLoadResumeError(
+          describeUnknownError(error),
+          buildResumeState('fetch-highlights'),
+        )
+      }
+
+      pageNumber = nextPageNumber
+
+      if (initialTotalPages == null) {
+        initialTotalPages =
+          typeof response.count === 'number' && response.count > 0
+            ? Math.ceil(response.count / 100)
+            : null
+        initialTotalResults =
+          typeof response.count === 'number' && response.count > 0
+            ? response.count
+            : null
+      }
+
+      for (const highlight of response.results) {
+        const parentId =
+          typeof highlight.parent_id === 'string' && highlight.parent_id.length > 0
+            ? highlight.parent_id
+            : null
+        if (!parentId || seenHighlightIds.has(highlight.id)) continue
+
+        const text = getHighlightText(highlight)
+        if (text.length === 0) continue
+
+        seenHighlightIds.add(highlight.id)
+        totalHighlights += 1
+
+        if (!seenParentIds.has(parentId)) {
+          seenParentIds.add(parentId)
+          targetParentIds.push(parentId)
+        }
+
+        const existing = highlightsByParent.get(parentId) ?? []
+        existing.push(highlight)
+        highlightsByParent.set(parentId, existing)
+
+        const latestExisting = latestHighlightByParent.get(parentId)
+        if (!latestExisting || highlight.updated_at > latestExisting.updated_at) {
+          latestHighlightByParent.set(parentId, highlight)
+        }
+      }
+
+      const estimatedTotalPages = Math.max(
+        initialTotalPages ?? effectiveMaxHighlightPages ?? pageNumber,
+        pageNumber,
+      )
+      const displayTotalPages =
+        effectiveMaxHighlightPages != null
+          ? Math.min(estimatedTotalPages, effectiveMaxHighlightPages)
+          : estimatedTotalPages
+
+      if (options.logPrefix) {
+        logReadwiseDebug(options.logPrefix, 'fetched highlight page', {
+          pageNumber,
+          estimatedTotalPages: displayTotalPages,
+          estimatedTotalResults: initialTotalResults,
+          responseResultCount: response.results.length,
+          totalHighlights,
+          uniqueParents: targetParentIds.length,
+          hasNextPage: !!response.nextPageCursor,
+          cappedByDebugLimit:
+            effectiveMaxHighlightPages != null &&
+            pageNumber >= effectiveMaxHighlightPages,
+          pageDurationMs: Date.now() - pageStartedAt,
+        })
+      }
+
+      options.onProgress?.({
+        phase: 'fetch-highlights',
+        pageNumber,
+        totalPages: displayTotalPages,
+        totalResults: initialTotalResults ?? undefined,
+        uniqueParents: targetParentIds.length,
+        totalHighlights,
+      })
+
+      pageCursor = response.nextPageCursor
+
+      if (
+        !response.nextPageCursor ||
+        (mode === 'recent-window' &&
+          maxDocuments != null &&
+          targetParentIds.length >= maxDocuments)
+      ) {
+        break
+      }
+    }
   }
 
   const fetchHighlightsDurationMs = Date.now() - fetchHighlightsStartedAt
-
-  const previewBooks: ReaderPreviewBook[] = []
   const selectedParentIds =
-    mode === 'full-library-scan'
-      ? (() => {
-          const sorted = [...targetParentIds].sort((left, right) => {
-            const leftLatest = latestHighlightByParent.get(left)
-            const rightLatest = latestHighlightByParent.get(right)
-            if (!leftLatest && !rightLatest) return 0
-            if (!leftLatest) return 1
-            if (!rightLatest) return -1
-            return sortByUpdatedAtDescending(leftLatest, rightLatest)
-          })
+    resumeState?.phase === 'fetch-documents' && resumeState.selectedParentIds.length > 0
+      ? [...resumeState.selectedParentIds]
+      : mode === 'full-library-scan'
+        ? (() => {
+            const sorted = sortedParentIds()
+            return maxDocuments == null ? sorted : sorted.slice(0, maxDocuments)
+          })()
+        : maxDocuments == null
+          ? [...targetParentIds]
+          : targetParentIds.slice(0, maxDocuments)
+  const previewBooks = [...(resumeState?.previewBooks ?? [])]
+  let documentIndex =
+    resumeState?.phase === 'fetch-documents' ? resumeState.documentIndex : 0
+  const fetchDocumentsStartedAt =
+    Date.now() - (resumeState?.fetchDocumentsDurationMs ?? 0)
 
-          return maxDocuments == null ? sorted : sorted.slice(0, maxDocuments)
-        })()
-      : maxDocuments == null
-        ? [...targetParentIds]
-        : targetParentIds.slice(0, maxDocuments)
-  const fetchDocumentsStartedAt = Date.now()
   options.onProgress?.({
     phase: 'fetch-documents',
-    completed: 0,
+    completed: documentIndex,
     total: selectedParentIds.length,
     pageTitle: null,
   })
 
-  for (let index = 0; index < selectedParentIds.length; index += 1) {
-    const parentId = selectedParentIds[index]!
-    const response = await listReaderDocumentsWithRetry(
-      client,
-      {
-        id: parentId,
-        limit: 1,
-      },
-      {
-        logPrefix: options.logPrefix,
-        stage: 'fetch-documents',
-        parentId,
-      },
-    )
+  for (; documentIndex < selectedParentIds.length; documentIndex += 1) {
+    const parentId = selectedParentIds[documentIndex]!
+    let response: Awaited<ReturnType<ReadwiseClient['listReaderDocuments']>>
+
+    try {
+      response = await listReaderDocumentsWithRetry(
+        client,
+        {
+          id: parentId,
+          limit: 1,
+        },
+        {
+          logPrefix: options.logPrefix,
+          stage: 'fetch-documents',
+          parentId,
+        },
+      )
+    } catch (error) {
+      throw new ReaderPreviewLoadResumeError(
+        describeUnknownError(error),
+        buildResumeState('fetch-documents', {
+          selectedParentIds,
+          previewBooks,
+          documentIndex,
+          fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
+        }),
+      )
+    }
+
     const document = response.results[0]
 
     options.onProgress?.({
       phase: 'fetch-documents',
-      completed: index + 1,
+      completed: documentIndex + 1,
       total: selectedParentIds.length,
       pageTitle: document?.title ?? parentId,
     })

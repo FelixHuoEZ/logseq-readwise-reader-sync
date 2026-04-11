@@ -84,6 +84,27 @@ interface ManagedPageRepairCandidate {
   signatures: string[]
 }
 
+type ReaderSyncHelpPanelId =
+  | 'managed-pages'
+  | 'highlight-scan'
+  | 'global-sync'
+  | 'current-page'
+  | 'maintenance-tools'
+
+interface ReaderSyncHelpPopoverState {
+  id: ReaderSyncHelpPanelId
+  title: string
+  notes: string[]
+  anchorRect: {
+    left: number
+    top: number
+    right: number
+    bottom: number
+    width: number
+    height: number
+  }
+}
+
 export const ReadwiseContainer = () => {
   const defaultReaderFullScanTargetDocuments = 20
   const defaultReaderFullScanDebugHighlightPageLimit = 0
@@ -136,6 +157,53 @@ export const ReadwiseContainer = () => {
   const [showMaintenanceTools, setShowMaintenanceTools] = useState(false)
   const [activeFormalTestSessionCount, setActiveFormalTestSessionCount] =
     useState<number | null>(null)
+  const [hoveredHelpPopover, setHoveredHelpPopover] =
+    useState<ReaderSyncHelpPopoverState | null>(null)
+  const [pinnedHelpPopover, setPinnedHelpPopover] =
+    useState<ReaderSyncHelpPopoverState | null>(null)
+  const helpHideTimeoutRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (pinnedHelpPopover == null) {
+      return undefined
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) {
+        setPinnedHelpPopover(null)
+        return
+      }
+
+      if (
+        !event.target.closest('.rw-help-anchor') &&
+        !event.target.closest('.rw-help-popover')
+      ) {
+        setPinnedHelpPopover(null)
+      }
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPinnedHelpPopover(null)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [pinnedHelpPopover])
+
+  useEffect(() => {
+    return () => {
+      if (helpHideTimeoutRef.current != null) {
+        window.clearTimeout(helpHideTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const refreshActiveFormalTestSessionCount = async () => {
     const activeFormalTestSession = await loadActiveFormalTestSessionManifestV1()
@@ -3265,12 +3333,46 @@ export const ReadwiseContainer = () => {
       : status === 'fetching'
         ? 'Scanning Reader highlight pages and grouping by parent document.'
         : ''
-  const formalSyncScopeLabel =
-    'Global sync plus current-page maintenance for managed Reader pages'
+  const activeHelpPopover = pinnedHelpPopover ?? hoveredHelpPopover
+  const shortManagedPagesSummary =
+    configuredReaderTargetDocuments == null
+      ? 'Full Refresh targets every matched parent page.'
+      : 'Full Refresh targets this many managed pages.'
+  const managedPagesHelpNotes = [
+    configuredReaderTargetDocuments == null
+      ? 'Full Refresh writes every matched parent document in this run.'
+      : 'Full Refresh targets this many managed pages per run.',
+  ]
+  const highlightScanHelpNotes =
+    configuredReaderDebugHighlightPageLimit > 0
+      ? [
+          'Debug cap active for any remote Reader highlight scan.',
+          'Full Refresh stays intentionally incomplete while the cap is on.',
+          'A truncated run does not refresh the local cached snapshot.',
+          'Roughly 100 highlights arrive per remote page.',
+        ]
+      : [
+          'Incremental Sync scans changed Reader highlights only.',
+          'Full Refresh scans the full Reader highlight library.',
+        ]
+  const globalSyncHelpNotes = [
+    'Incremental Sync pulls changed Reader highlights, refreshes parent metadata for matched documents, and rewrites managed pages in ReadwiseHighlights/<title>.',
+    'Full Refresh rescans the full Reader highlight library, refreshes parent metadata, and replaces the local full-library snapshot used for future rebuilds and deletion calibration.',
+    'Full Refresh uses the Debug settings. A truncated highlight scan does not refresh the local cached snapshot.',
+  ]
+  const currentPageHelpNotes = [
+    'Rebuild Current Page From Cache uses rw-reader-id, reads the cached highlight snapshot for that parent, and rewrites only the current managed page.',
+    "Refresh Current Page Metadata re-fetches the current page's parent metadata from Reader, combines it with cached highlights, and rewrites only the current managed page.",
+  ]
+  const maintenanceToolsHelpNotes = [
+    'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
+    'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
+    'Repair Managed Pages scans ReadwiseHighlights/* for the legacy duplicated metadata and header signature, then rewrites only the matched pages from the cached highlight snapshot.',
+  ]
   const highlightScanDetailLabel =
     configuredReaderDebugHighlightPageLimit > 0
-      ? `Debug cap active for any remote Reader highlight scan. Roughly 100 highlights per page; Full Refresh stays intentionally incomplete while the cap is on, and a truncated run will not refresh the local cached snapshot.`
-      : 'No debug cap. Incremental Sync scans changed Reader highlights only; Full Refresh scans the full Reader highlight library.'
+      ? 'Debug cap active for remote highlight scans.'
+      : 'Incremental scans changes; Full Refresh scans the full library.'
   const progressLabel =
     total > 0
       ? `${current} / ${total} (${progressPct}%)${etaSuffix}`
@@ -3332,6 +3434,125 @@ export const ReadwiseContainer = () => {
     logseq.hideMainUI()
   }
 
+  const clearHelpHideTimeout = () => {
+    if (helpHideTimeoutRef.current != null) {
+      window.clearTimeout(helpHideTimeoutRef.current)
+      helpHideTimeoutRef.current = null
+    }
+  }
+
+  const scheduleHoveredHelpClose = () => {
+    if (pinnedHelpPopover != null) {
+      return
+    }
+
+    clearHelpHideTimeout()
+    helpHideTimeoutRef.current = window.setTimeout(() => {
+      setHoveredHelpPopover(null)
+      helpHideTimeoutRef.current = null
+    }, 120)
+  }
+
+  const buildHelpPopoverState = (
+    id: ReaderSyncHelpPanelId,
+    title: string,
+    notes: string[],
+    target: HTMLElement,
+  ): ReaderSyncHelpPopoverState => {
+    const rect = target.getBoundingClientRect()
+
+    return {
+      id,
+      title,
+      notes,
+      anchorRect: {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      },
+    }
+  }
+
+  const openHoveredHelpPopover = (
+    id: ReaderSyncHelpPanelId,
+    title: string,
+    notes: string[],
+    target: HTMLElement,
+  ) => {
+    if (pinnedHelpPopover != null) {
+      return
+    }
+
+    clearHelpHideTimeout()
+    setHoveredHelpPopover(buildHelpPopoverState(id, title, notes, target))
+  }
+
+  const computeHelpPopoverStyle = (popover: ReaderSyncHelpPopoverState) => {
+    const viewportPadding = 12
+    const preferredWidth =
+      popover.id === 'managed-pages' || popover.id === 'highlight-scan'
+        ? 220
+        : 280
+    const width = Math.min(preferredWidth, window.innerWidth - viewportPadding * 2)
+    const desiredLeft =
+      popover.anchorRect.left + popover.anchorRect.width / 2 - width / 2
+    const left = Math.min(
+      Math.max(viewportPadding, desiredLeft),
+      window.innerWidth - width - viewportPadding,
+    )
+
+    return {
+      top: `${popover.anchorRect.bottom + 6}px`,
+      left: `${left}px`,
+      width: `${width}px`,
+    }
+  }
+
+  const renderHelpPanel = (
+    id: ReaderSyncHelpPanelId,
+    title: string,
+    notes: string[],
+  ) => {
+    const isOpen = activeHelpPopover?.id === id
+
+    return (
+      <div className="rw-help-anchor">
+        <button
+          type="button"
+          className={`rw-help-trigger ${isOpen ? 'is-open' : ''}`}
+          aria-label={`${title} help`}
+          aria-expanded={isOpen}
+          onMouseEnter={(event) => {
+            openHoveredHelpPopover(id, title, notes, event.currentTarget)
+          }}
+          onMouseLeave={() => {
+            scheduleHoveredHelpClose()
+          }}
+          onFocus={(event) => {
+            openHoveredHelpPopover(id, title, notes, event.currentTarget)
+          }}
+          onBlur={() => {
+            scheduleHoveredHelpClose()
+          }}
+          onClick={(event) => {
+            clearHelpHideTimeout()
+            setHoveredHelpPopover(null)
+            setPinnedHelpPopover((currentPopover) =>
+              currentPopover?.id === id
+                ? null
+                : buildHelpPopoverState(id, title, notes, event.currentTarget),
+            )
+          }}
+        >
+          i
+        </button>
+      </div>
+    )
+  }
+
   return (
     <div
       className="rw-overlay"
@@ -3344,7 +3565,6 @@ export const ReadwiseContainer = () => {
           <div className="rw-header-copy">
             <div className="rw-kicker">Reader sync modes</div>
             <h2>Readwise Reader Sync</h2>
-            <div className="rw-header-subtitle">{formalSyncScopeLabel}</div>
           </div>
           <div className="rw-header-meta">
             <span className={`rw-badge ${statusLabel}`}>{statusLabel}</span>
@@ -3366,20 +3586,30 @@ export const ReadwiseContainer = () => {
 
           <div className="rw-summary-grid">
             <div className="rw-summary-card">
-              <div className="rw-summary-label">Managed pages</div>
+              <div className="rw-summary-heading">
+                <div className="rw-summary-label">Managed pages</div>
+                {renderHelpPanel(
+                  'managed-pages',
+                  'Managed Pages',
+                  managedPagesHelpNotes,
+                )}
+              </div>
               <div className="rw-summary-value">
                 {configuredReaderTargetDocuments == null
                   ? 'All matched'
                   : configuredReaderTargetDocuments}
               </div>
-              <div className="rw-summary-note">
-                {configuredReaderTargetDocuments == null
-                  ? 'Full Refresh writes every matched parent document in this run.'
-                  : 'Full Refresh targets this many managed pages per run.'}
-              </div>
+              <div className="rw-summary-note">{shortManagedPagesSummary}</div>
             </div>
             <div className="rw-summary-card">
-              <div className="rw-summary-label">Highlight scan</div>
+              <div className="rw-summary-heading">
+                <div className="rw-summary-label">Highlight scan</div>
+                {renderHelpPanel(
+                  'highlight-scan',
+                  'Highlight Scan',
+                  highlightScanHelpNotes,
+                )}
+              </div>
               <div className="rw-summary-value">
                 {configuredReaderDebugHighlightPageLimit > 0
                   ? `${configuredReaderDebugHighlightPageLimit} page(s)`
@@ -3578,8 +3808,11 @@ export const ReadwiseContainer = () => {
           {propsReady && status === 'idle' && (
             <div className="rw-action-groups">
               <div className="rw-action-group">
-                <div className="rw-action-group-label">
-                  Global Sync
+                <div className="rw-action-group-heading">
+                  <div className="rw-action-group-label">
+                    Global Sync
+                  </div>
+                  {renderHelpPanel('global-sync', 'Global Sync', globalSyncHelpNotes)}
                 </div>
                 <div className="rw-action-row">
                   <button className="rw-btn rw-btn-primary" onClick={handleSync}>
@@ -3592,29 +3825,18 @@ export const ReadwiseContainer = () => {
                     Close
                   </button>
                 </div>
-                <div className="rw-action-note">
-                  Incremental Sync pulls changed Reader highlights, refreshes
-                  parent metadata for matched documents, and rewrites managed
-                  pages in
-                  `ReadwiseHighlights/&lt;title&gt;`.
-                </div>
-                <div className="rw-action-note">
-                  Full Refresh rescans the full Reader highlight library,
-                  refreshes parent metadata, and replaces the local full-library
-                  snapshot used for future rebuilds and deletion calibration.
-                </div>
-                <div className="rw-action-note">
-                  Full Refresh uses the Debug settings. Lower "Reader Full
-                  Scan Target Documents" and set "Reader Full Scan Debug
-                  Highlight Page Limit" for short test runs. Set both back to 0
-                  if you want a true all-documents full refresh. A truncated
-                  highlight scan does not refresh the local cached snapshot.
-                </div>
               </div>
 
               <div className="rw-action-group">
-                <div className="rw-action-group-label">
-                  Current Page
+                <div className="rw-action-group-heading">
+                  <div className="rw-action-group-label">
+                    Current Page
+                  </div>
+                  {renderHelpPanel(
+                    'current-page',
+                    'Current Page',
+                    currentPageHelpNotes,
+                  )}
                 </div>
                 <div className="rw-action-row">
                   <button className="rw-btn" onClick={handleRebuildCurrentPageFromCache}>
@@ -3624,24 +3846,37 @@ export const ReadwiseContainer = () => {
                     Refresh Current Page Metadata
                   </button>
                 </div>
-                <div className="rw-action-note">
-                  Rebuild Current Page From Cache uses `rw-reader-id`, reads the
-                  cached highlight snapshot for that parent, and rewrites only
-                  the current managed page.
-                </div>
-                <div className="rw-action-note">
-                  Refresh Current Page Metadata re-fetches the current page's
-                  parent metadata from Reader, combines it with cached
-                  highlights, and rewrites only the current managed page.
-                </div>
               </div>
 
-              {showMaintenanceTools && (
-                <>
-                  <div className="rw-action-group">
-                    <div className="rw-action-group-label">
-                      Maintenance Tools
-                    </div>
+              <div className="rw-action-group">
+                <div className="rw-action-group-heading">
+                  <div className="rw-action-group-label">
+                    Maintenance Tools
+                  </div>
+                  <div className="rw-action-group-heading-actions">
+                    {renderHelpPanel(
+                      'maintenance-tools',
+                      'Maintenance Tools',
+                      maintenanceToolsHelpNotes,
+                    )}
+                    <button
+                      type="button"
+                      className="rw-btn rw-btn-small rw-toggle-btn"
+                      onClick={() =>
+                        setShowMaintenanceTools((currentValue) => !currentValue)
+                      }
+                    >
+                      {showMaintenanceTools ? 'Hide Tools' : 'Show Tools'}
+                    </button>
+                  </div>
+                </div>
+                {!showMaintenanceTools && (
+                  <div className="rw-summary-note">
+                    Audit, repair, backup, and debug tools for managed pages.
+                  </div>
+                )}
+                {showMaintenanceTools && (
+                  <>
                     <div className="rw-action-row">
                       <button className="rw-btn" onClick={handleLimitedSync}>
                         {sessionTestSyncLabel}
@@ -3707,33 +3942,9 @@ export const ReadwiseContainer = () => {
                         Copy Raw Workflow
                       </button>
                     </div>
-                    <div className="rw-action-row">
-                      <button
-                        className="rw-btn"
-                        onClick={() => setShowMaintenanceTools(false)}
-                      >
-                        Hide Maintenance Tools
-                      </button>
-                    </div>
-                    <div className="rw-action-note">
-                      These tools stay hidden during normal use. They are
-                      exposed automatically when formal sync detects conflicting
-                      managed pages that must be cleared first.
-                    </div>
-                    <div className="rw-action-note">
-                      Audit Managed IDs checks duplicate `rw-reader-id`
-                      bindings, missing `rw-reader-id`, and managed page names
-                      that would exceed Logseq file-name limits on recreate.
-                    </div>
-                    <div className="rw-action-note">
-                      Repair Managed Pages scans `ReadwiseHighlights/*` for the
-                      legacy duplicated metadata/note/header signature, then
-                      rewrites only the matched pages from the cached highlight
-                      snapshot.
-                    </div>
-                  </div>
-                </>
-              )}
+                  </>
+                )}
+              </div>
             </div>
           )}
           {isBusy && (
@@ -3758,6 +3969,27 @@ export const ReadwiseContainer = () => {
           )}
         </div>
       </div>
+      {activeHelpPopover && (
+        <div
+          className="rw-help-popover"
+          role="dialog"
+          aria-label={activeHelpPopover.title}
+          style={computeHelpPopoverStyle(activeHelpPopover)}
+          onMouseEnter={() => {
+            clearHelpHideTimeout()
+          }}
+          onMouseLeave={() => {
+            scheduleHoveredHelpClose()
+          }}
+        >
+          <div className="rw-help-popover-title">{activeHelpPopover.title}</div>
+          <div className="rw-help-popover-body">
+            {activeHelpPopover.notes.map((note) => (
+              <p key={note}>{note}</p>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

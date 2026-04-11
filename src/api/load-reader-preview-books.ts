@@ -1,4 +1,9 @@
 import type { ReaderDocument } from '../types'
+import {
+  describeUnknownError,
+  logReadwiseDebug,
+  logReadwiseWarn,
+} from '../logging'
 import type { ReadwiseClient } from './index'
 
 export interface ReaderPreviewBook {
@@ -53,6 +58,79 @@ const sortByUpdatedAtDescending = (left: ReaderDocument, right: ReaderDocument) 
 const getHighlightText = (document: ReaderDocument) =>
   typeof document.content === 'string' ? document.content.trim() : ''
 
+const sleep = async (milliseconds: number) =>
+  new Promise((resolve) => {
+    window.setTimeout(resolve, milliseconds)
+  })
+
+const isRetriableReaderListError = (error: unknown) => {
+  const message = describeUnknownError(error)
+
+  return (
+    error instanceof TypeError ||
+    /Failed to fetch|NetworkError|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_NETWORK_CHANGED|ERR_INTERNET_DISCONNECTED|fetch/i.test(
+      message,
+    )
+  )
+}
+
+const listReaderDocumentsWithRetry = async (
+  client: ReadwiseClient,
+  params: Parameters<ReadwiseClient['listReaderDocuments']>[0],
+  options: {
+    logPrefix?: string
+    stage: 'fetch-highlights' | 'fetch-documents'
+    pageNumber?: number
+    parentId?: string
+  },
+) => {
+  let lastError: unknown = null
+  const totalAttempts = 3
+
+  for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+    try {
+      return await client.listReaderDocuments(params)
+    } catch (error) {
+      lastError = error
+
+      if (!isRetriableReaderListError(error) || attempt === totalAttempts - 1) {
+        break
+      }
+
+      if (options.logPrefix) {
+        logReadwiseWarn(options.logPrefix, 'Reader API list request failed; retrying', {
+          stage: options.stage,
+          pageNumber: options.pageNumber ?? null,
+          parentId: options.parentId ?? null,
+          attempt: attempt + 1,
+          totalAttempts,
+          formattedError: describeUnknownError(error),
+        })
+      }
+
+      await sleep(1000 * (attempt + 1))
+    }
+  }
+
+  const lastMessage = describeUnknownError(lastError)
+  const stageLabel =
+    options.stage === 'fetch-highlights'
+      ? `Reader highlight scan request${
+          options.pageNumber != null ? ` at page ${options.pageNumber}` : ''
+        }`
+      : `Reader parent document fetch${
+          options.parentId ? ` for ${options.parentId}` : ''
+        }`
+  const detail =
+    lastMessage === 'Failed to fetch'
+      ? 'Network request failed before Readwise returned a response.'
+      : lastMessage
+
+  throw new Error(
+    `${stageLabel} failed after ${totalAttempts} attempt(s). ${detail}`,
+  )
+}
+
 export const loadReaderPreviewBooks = async (
   client: ReadwiseClient,
   options: LoadReaderPreviewBooksOptions = {},
@@ -90,11 +168,19 @@ export const loadReaderPreviewBooks = async (
 
     pageNumber += 1
     const pageStartedAt = Date.now()
-    const response = await client.listReaderDocuments({
+    const response = await listReaderDocumentsWithRetry(
+      client,
+      {
       category: 'highlight',
       limit: 100,
       pageCursor,
-    })
+      },
+      {
+        logPrefix: options.logPrefix,
+        stage: 'fetch-highlights',
+        pageNumber,
+      },
+    )
 
     if (initialTotalPages == null) {
       initialTotalPages =
@@ -147,7 +233,7 @@ export const loadReaderPreviewBooks = async (
         : estimatedTotalPages
 
     if (options.logPrefix) {
-      console.info(`${options.logPrefix} fetched highlight page`, {
+      logReadwiseDebug(options.logPrefix, 'fetched highlight page', {
         pageNumber,
         estimatedTotalPages: displayTotalPages,
         estimatedTotalResults: initialTotalResults,
@@ -207,10 +293,18 @@ export const loadReaderPreviewBooks = async (
 
   for (let index = 0; index < selectedParentIds.length; index += 1) {
     const parentId = selectedParentIds[index]!
-    const response = await client.listReaderDocuments({
-      id: parentId,
-      limit: 1,
-    })
+    const response = await listReaderDocumentsWithRetry(
+      client,
+      {
+        id: parentId,
+        limit: 1,
+      },
+      {
+        logPrefix: options.logPrefix,
+        stage: 'fetch-documents',
+        parentId,
+      },
+    )
     const document = response.results[0]
 
     options.onProgress?.({

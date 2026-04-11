@@ -69,6 +69,11 @@ const emitMetadataText = (page: SemanticPage) => {
     ? wrapWikiLink(page.pageNote.imageUrl)
     : ''
   const summaryLine = page.pageNote?.summary ?? ''
+  const noteLines = [imageLine, summaryLine].filter((line) => line.trim().length > 0)
+  const noteSection =
+    noteLines.length > 0
+      ? ['#+BEGIN_NOTE', ...noteLines, '#+END_NOTE']
+      : []
 
   return [
     ':PROPERTIES:',
@@ -82,10 +87,7 @@ const emitMetadataText = (page: SemanticPage) => {
     emitPropertyLine('PUBLISHED', published, wrapWikiLink),
     ...extraMetadataLines,
     ':END:',
-    '#+BEGIN_NOTE',
-    imageLine,
-    summaryLine,
-    '#+END_NOTE',
+    ...noteSection,
   ].join('\n')
 }
 

@@ -42,6 +42,13 @@ import type {
   ExportResponse,
   SyncStatus,
 } from '../types'
+import {
+  describeUnknownError,
+  logReadwiseDebug,
+  logReadwiseError,
+  logReadwiseInfo,
+  logReadwiseWarn,
+} from '../logging'
 
 type ReaderSyncEtaPhase = 'fetch-highlights' | 'fetch-documents' | 'write-pages'
 
@@ -50,65 +57,6 @@ interface ReaderSyncEtaSnapshot {
   label: string
   etaMs: number | null
   observedAt: number
-}
-
-const extractErrorTextParts = (value: unknown): string[] => {
-  if (typeof value === 'string') {
-    const trimmed = value.trim()
-    return trimmed.length > 0 ? [trimmed] : []
-  }
-
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return [String(value)]
-  }
-
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => extractErrorTextParts(item))
-  }
-
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    return [
-      ...extractErrorTextParts(record.message),
-      ...extractErrorTextParts(record.reason),
-      ...extractErrorTextParts(record.error),
-      ...extractErrorTextParts(record.name),
-      ...extractErrorTextParts(record.code),
-    ]
-  }
-
-  return []
-}
-
-const describeUnknownError = (error: unknown): string => {
-  if (error instanceof Error) {
-    const message = error.message.trim()
-    return message.length > 0 ? message : error.name
-  }
-
-  const extracted = extractErrorTextParts(error)
-  const uniqueExtracted = extracted.filter(
-    (value, index, values) => values.indexOf(value) === index,
-  )
-
-  if (uniqueExtracted.length > 0) {
-    return uniqueExtracted.join(' | ')
-  }
-
-  if (error && typeof error === 'object') {
-    try {
-      const serialized = JSON.stringify(error)
-      if (serialized && serialized !== '{}') {
-        return serialized
-      }
-    } catch {
-      return 'Unknown error object'
-    }
-
-    return 'Unknown error object'
-  }
-
-  return String(error)
 }
 
 export const ReadwiseContainer = () => {
@@ -291,7 +239,7 @@ export const ReadwiseContainer = () => {
       await navigator.clipboard.writeText(text)
       setStatusMessage(`${label} copied to clipboard.`)
     } catch (err: unknown) {
-      console.error(`${formalSyncLogPrefix} failed to copy text`, err)
+      logReadwiseError(formalSyncLogPrefix, 'failed to copy text', err)
       setStatusMessage(
         `Copy failed: ${err instanceof Error ? err.message : String(err)}`,
       )
@@ -360,7 +308,11 @@ export const ReadwiseContainer = () => {
         mode === 'capture' ? 'Raw capture command' : 'Raw diff command',
       )
     } catch (err: unknown) {
-      console.error(`${formalSyncLogPrefix} failed to build external raw snapshot command`, err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'failed to build external raw snapshot command',
+        err,
+      )
       setStatusMessage(
         `Command build failed: ${err instanceof Error ? err.message : String(err)}`,
       )
@@ -376,7 +328,11 @@ export const ReadwiseContainer = () => {
         'Raw snapshot workflow',
       )
     } catch (err: unknown) {
-      console.error(`${formalSyncLogPrefix} failed to build external raw snapshot workflow`, err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'failed to build external raw snapshot workflow',
+        err,
+      )
       setStatusMessage(
         `Workflow build failed: ${err instanceof Error ? err.message : String(err)}`,
       )
@@ -463,7 +419,7 @@ export const ReadwiseContainer = () => {
           throw error
         }
 
-        console.warn(`${formalSyncLogPrefix} transient export fetch failed; retrying`, {
+        logReadwiseWarn(formalSyncLogPrefix, 'transient export fetch failed; retrying', {
           context,
           attempt: attempt + 1,
           params,
@@ -525,7 +481,7 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         `Using active formal test session (${frozenBooks.length} frozen book(s)).`,
       )
-      console.info(`${sessionTestLogPrefix} using active formal test session for formal page selection`, {
+      logReadwiseInfo(sessionTestLogPrefix, 'using active formal test session for formal page selection', {
         sessionId: activeFormalTestSession.sessionId,
         namespacePrefix: formalNamespaceRoot,
         updatedAfter: activeFormalTestSession.updatedAfter,
@@ -548,7 +504,7 @@ export const ReadwiseContainer = () => {
     const books: ExportedBookIdentity[] = []
     let cursor: string | null = null
 
-    console.info(`${sessionTestLogPrefix} loading formal test books`, {
+    logReadwiseInfo(sessionTestLogPrefix, 'loading formal test books', {
       namespacePrefix: formalNamespaceRoot,
       updatedAfter: updatedAfter ?? null,
       maxBooks,
@@ -682,7 +638,7 @@ export const ReadwiseContainer = () => {
           ? `Backed up and removed ${result.touchedPages} formal test page(s) to ${result.backupDirectory}. Formal test session is now active in ${formalTestNamespacePrefix}.`
           : 'No formal test pages were backed up.',
       )
-      console.info(`${backupLogPrefix} backed up formal test pages`, {
+      logReadwiseInfo(backupLogPrefix, 'backed up formal test pages', {
         sessionId,
         formalTestNamespacePrefix,
         targetedBooks: result.targetedBooks,
@@ -695,7 +651,7 @@ export const ReadwiseContainer = () => {
         maxBooks,
       })
     } catch (err: unknown) {
-      console.error(`${backupLogPrefix} failed to back up formal test pages`, err)
+      logReadwiseError(backupLogPrefix, 'failed to back up formal test pages', err)
       setStatus('error')
       setStatusMessage(
         `Backup failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -760,7 +716,7 @@ export const ReadwiseContainer = () => {
           ? `Deleted ${result.touchedPages} formal test page(s).`
           : 'No formal test pages were deleted.',
       )
-      console.info(`${sessionTestLogPrefix} cleared formal test pages`, {
+      logReadwiseInfo(sessionTestLogPrefix, 'cleared formal test pages', {
         targetedBooks: result.targetedBooks,
         matchedPages: result.matchedPages,
         deletedPages: result.touchedPages,
@@ -770,7 +726,7 @@ export const ReadwiseContainer = () => {
         maxBooks,
       })
     } catch (err: unknown) {
-      console.error(`${sessionTestLogPrefix} failed to clear formal test pages`, err)
+      logReadwiseError(sessionTestLogPrefix, 'failed to clear formal test pages', err)
       setStatus('error')
       setStatusMessage(
         `Clear failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -843,7 +799,7 @@ export const ReadwiseContainer = () => {
           ? `Restored ${result.touchedPages} formal test page(s) from ${result.backupDirectory}.`
           : 'No formal test pages were restored.',
       )
-      console.info(`${restoreLogPrefix} restored formal test pages`, {
+      logReadwiseInfo(restoreLogPrefix, 'restored formal test pages', {
         targetedBackups: result.targetedBooks,
         matchedPages: result.matchedPages,
         restoredPages: result.touchedPages,
@@ -852,7 +808,7 @@ export const ReadwiseContainer = () => {
         backupDirectory: result.backupDirectory,
       })
     } catch (err: unknown) {
-      console.error(`${restoreLogPrefix} failed to restore formal test pages`, err)
+      logReadwiseError(restoreLogPrefix, 'failed to restore formal test pages', err)
       setStatus('error')
       setStatusMessage(
         `Restore failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -929,7 +885,7 @@ export const ReadwiseContainer = () => {
             ? `No session test pages were deleted. Next session test run will use ${rotatedFormalTestSession.namespacePrefix}.`
             : 'No session test pages were deleted.',
       )
-      console.info(`${sessionTestLogPrefix} cleared session test pages`, {
+      logReadwiseInfo(sessionTestLogPrefix, 'cleared session test pages', {
         sessionId: activeFormalTestSession?.sessionId ?? null,
         nextSessionId: rotatedFormalTestSession?.sessionId ?? null,
         nextNamespacePrefix: rotatedFormalTestSession?.namespacePrefix ?? null,
@@ -940,7 +896,7 @@ export const ReadwiseContainer = () => {
         namespaceRoot: formalNamespaceRoot,
       })
     } catch (err: unknown) {
-      console.error(`${sessionTestLogPrefix} failed to clear session test pages`, err)
+      logReadwiseError(sessionTestLogPrefix, 'failed to clear session test pages', err)
       setStatus('error')
       setStatusMessage(
         `Clear failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -987,14 +943,14 @@ export const ReadwiseContainer = () => {
 
       setStatus('completed')
       setStatusMessage(`Deleted ${result.touchedPages} debug page(s).`)
-      console.info(`${debugLogPrefix} cleared debug pages`, {
+      logReadwiseInfo(debugLogPrefix, 'cleared debug pages', {
         namespacePrefix: debugNamespaceRoot,
         matchedPages: result.matchedPages,
         deletedPages: result.touchedPages,
         skippedPages: result.skippedPages,
       })
     } catch (err: unknown) {
-      console.error(`${debugLogPrefix} failed to clear debug pages`, err)
+      logReadwiseError(debugLogPrefix, 'failed to clear debug pages', err)
       setStatus('error')
       setStatusMessage(
         `Failed to clear debug pages: ${err instanceof Error ? err.message : String(err)}`,
@@ -1018,7 +974,7 @@ export const ReadwiseContainer = () => {
         `Captured snapshot for ${result.pageName} via ${result.source} (${result.lineCount} lines).`,
       )
     } catch (err: unknown) {
-      console.error(`${formalSyncLogPrefix} failed to capture current page snapshot`, err)
+      logReadwiseError(formalSyncLogPrefix, 'failed to capture current page snapshot', err)
       setStatus('error')
       setStatusMessage(
         `Snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1050,7 +1006,7 @@ export const ReadwiseContainer = () => {
       setStatus('completed')
       setStatusMessage(result.summary)
     } catch (err: unknown) {
-      console.error(`${formalSyncLogPrefix} failed to diff current page snapshot`, err)
+      logReadwiseError(formalSyncLogPrefix, 'failed to diff current page snapshot', err)
       setStatus('error')
       setStatusMessage(
         `Diff failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1115,15 +1071,19 @@ export const ReadwiseContainer = () => {
         : activeFormalTestSession || syncLimitMaxBooks != null
           ? sessionTestLogPrefix
           : formalSyncLogPrefix
-    console.info(`${syncLogPrefix} starting sync`)
-    console.info(`${syncLogPrefix} checkpointBeforeRun`, checkpointBeforeRun)
-    console.info(`${syncLogPrefix} updatedAfter`, updatedAfter ?? null)
-    console.info(`${syncLogPrefix} syncLimitMaxBooks`, syncLimitMaxBooks)
-    console.info(`${syncLogPrefix} ignoreCheckpoint`, ignoreCheckpoint)
-    console.info(`${syncLogPrefix} namespacePrefix`, effectiveNamespacePrefix)
-    console.info(`${syncLogPrefix} renderedDebugPages`, renderedDebugPages)
-    console.info(`${syncLogPrefix} pageNameMode`, pageNameMode)
-    console.info(`${syncLogPrefix} formalTestSessionId`, activeFormalTestSession?.sessionId ?? null)
+    logReadwiseInfo(syncLogPrefix, 'starting sync')
+    logReadwiseDebug(syncLogPrefix, 'checkpointBeforeRun', checkpointBeforeRun)
+    logReadwiseDebug(syncLogPrefix, 'updatedAfter', updatedAfter ?? null)
+    logReadwiseDebug(syncLogPrefix, 'syncLimitMaxBooks', syncLimitMaxBooks)
+    logReadwiseDebug(syncLogPrefix, 'ignoreCheckpoint', ignoreCheckpoint)
+    logReadwiseDebug(syncLogPrefix, 'namespacePrefix', effectiveNamespacePrefix)
+    logReadwiseDebug(syncLogPrefix, 'renderedDebugPages', renderedDebugPages)
+    logReadwiseDebug(syncLogPrefix, 'pageNameMode', pageNameMode)
+    logReadwiseDebug(
+      syncLogPrefix,
+      'formalTestSessionId',
+      activeFormalTestSession?.sessionId ?? null,
+    )
 
     try {
       do {
@@ -1158,14 +1118,14 @@ export const ReadwiseContainer = () => {
               ? `Fetched ${allBooks.length} / ${syncLimitMaxBooks} test book(s) so far...`
             : `Fetched ${allBooks.length} book(s) so far...`,
         )
-        console.info(`${syncLogPrefix} export page`, {
+        logReadwiseDebug(syncLogPrefix, 'export page', {
           pageResultCount: page.results.length,
           totalFetched: allBooks.length,
           nextPageCursor: page.nextPageCursor,
           syncLimitMaxBooks,
         })
         if (syncLimitMaxBooks != null && allBooks.length >= syncLimitMaxBooks) {
-          console.info(`${syncLogPrefix} sync limit reached`, {
+          logReadwiseInfo(syncLogPrefix, 'sync limit reached', {
             syncLimitMaxBooks,
           })
           cursor = null
@@ -1181,7 +1141,7 @@ export const ReadwiseContainer = () => {
       if (allBooks.length === 0) {
         setStatus('completed')
         setStatusMessage('No new highlights to sync.')
-        console.info(`${syncLogPrefix} no new highlights`)
+        logReadwiseInfo(syncLogPrefix, 'no new highlights')
         return
       }
 
@@ -1240,7 +1200,7 @@ export const ReadwiseContainer = () => {
         syncLimitMaxBooks != null ||
         ignoreCheckpoint
       ) {
-        console.info(`${syncLogPrefix} skipping checkpoint save`, {
+        logReadwiseInfo(syncLogPrefix, 'skipping checkpoint save', {
           formalTestSessionId: activeFormalTestSession?.sessionId ?? null,
           syncLimitMaxBooks,
           nextUpdatedAfter,
@@ -1248,8 +1208,9 @@ export const ReadwiseContainer = () => {
           errorCount: syncErrorsForRun.length,
         })
       } else if (hasSyncErrors) {
-        console.warn(
-          `${syncLogPrefix} skipping checkpoint save because page sync errors occurred`,
+        logReadwiseWarn(
+          syncLogPrefix,
+          'skipping checkpoint save because page sync errors occurred',
           {
             nextUpdatedAfter,
             errorCount: syncErrorsForRun.length,
@@ -1267,14 +1228,14 @@ export const ReadwiseContainer = () => {
           committedAt: new Date().toISOString(),
           source: checkpointSource,
         }
-        console.info(`${syncLogPrefix} saving graph checkpoint`, checkpointToSave)
+        logReadwiseInfo(syncLogPrefix, 'saving graph checkpoint', checkpointToSave)
         await saveGraphCheckpointStateV1({
           schemaVersion: 1,
           updatedAfter: nextUpdatedAfter,
           committedAt: checkpointToSave.committedAt,
           source: checkpointToSave.source,
         })
-        console.info(`${syncLogPrefix} saved graph checkpoint`, checkpointToSave)
+        logReadwiseInfo(syncLogPrefix, 'saved graph checkpoint', checkpointToSave)
       }
 
       setStatus('completed')
@@ -1289,7 +1250,7 @@ export const ReadwiseContainer = () => {
             ? `Sync completed with ${syncErrorsForRun.length} error(s). Checkpoint was not advanced.`
           : `Sync complete. ${allBooks.length} book(s) processed.`,
       )
-      console.info(`${syncLogPrefix} sync completed`, {
+      logReadwiseInfo(syncLogPrefix, 'sync completed', {
         processedBooks: allBooks.length,
         formalTestSessionId: activeFormalTestSession?.sessionId ?? null,
         nextUpdatedAfter,
@@ -1299,10 +1260,10 @@ export const ReadwiseContainer = () => {
         namespacePrefix: effectiveNamespacePrefix,
       })
     } catch (err: unknown) {
-      console.error(`${syncLogPrefix} sync failed`, err)
+      logReadwiseError(syncLogPrefix, 'sync failed', err)
       setStatus('error')
       setStatusMessage(
-        `Sync failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Sync failed: ${describeUnknownError(err)}`,
       )
     }
   }
@@ -1312,8 +1273,9 @@ export const ReadwiseContainer = () => {
     if (conflicts != null) {
       setShowMaintenanceTools(true)
       const summary = formatManagedPageConflictSummary(conflicts)
-      console.warn(
-        `${formalSyncLogPrefix} blocked formal sync because conflicting managed pages still exist`,
+      logReadwiseWarn(
+        formalSyncLogPrefix,
+        'blocked formal sync because conflicting managed pages still exist',
         {
           conflicts: conflicts.map((conflict) => ({
             label: conflict.label,
@@ -1492,7 +1454,7 @@ export const ReadwiseContainer = () => {
         ...previewLoadResult.stats,
         pagesProcessed: 0,
       }
-      console.info(`${logPrefix} fetch timing diagnostics`, {
+      logReadwiseInfo(logPrefix, 'fetch timing diagnostics', {
         estimatedHighlightPages: loadStats.estimatedHighlightPages,
         estimatedHighlightResults: loadStats.estimatedHighlightResults,
         highlightPagesScanned: loadStats.highlightPagesScanned,
@@ -1519,7 +1481,7 @@ export const ReadwiseContainer = () => {
       if (previewBooks.length === 0) {
         setStatus('completed')
         setStatusMessage(`${statusPrefix}: no Reader pages were available.`)
-        console.info(`${logPrefix} no pages available`)
+        logReadwiseInfo(logPrefix, 'no pages available')
         return
       }
 
@@ -1565,7 +1527,7 @@ export const ReadwiseContainer = () => {
           if (pageSyncResult.pageRenamed) renamedCount += 1
         } catch (err: unknown) {
           const message = describeUnknownError(err)
-          console.error(`${logPrefix} failed to sync rendered Reader page`, {
+          logReadwiseError(logPrefix, 'failed to sync rendered Reader page', {
             pageTitle,
             readerDocumentId: previewBook.document.id,
             namespacePrefix,
@@ -1585,7 +1547,7 @@ export const ReadwiseContainer = () => {
         )
       }
       writePagesDurationMs = Date.now() - writePagesStartedAt
-      console.info(`${logPrefix} write timing diagnostics`, {
+      logReadwiseInfo(logPrefix, 'write timing diagnostics', {
         pagesWrittenAttempted: previewBooks.length,
         pagesProcessed: loadStats.pagesProcessed,
         writePagesDurationMs,
@@ -1621,7 +1583,7 @@ export const ReadwiseContainer = () => {
               : null,
         }
         await saveGraphLastFormalSyncSummaryV1(summary)
-        console.info(`${logPrefix} saved graph formal sync summary`, summary)
+        logReadwiseInfo(logPrefix, 'saved graph formal sync summary', summary)
       }
 
       setStatus('completed')
@@ -1630,7 +1592,7 @@ export const ReadwiseContainer = () => {
           ? `${statusPrefix}: completed with ${syncErrorsForRun.length} error(s).`
           : `${statusPrefix}: complete. ${previewBooks.length} page(s) written to ${namespacePrefix}.${debugHighlightPageLimit != null ? ` Debug cap ${debugHighlightPageLimit} was active.` : ''}`,
       )
-      console.info(`${logPrefix} sync completed`, {
+      logReadwiseInfo(logPrefix, 'sync completed', {
         namespacePrefix,
         processedBooks: previewBooks.length,
         errorCount: syncErrorsForRun.length,
@@ -1660,9 +1622,9 @@ export const ReadwiseContainer = () => {
           failureSummary: message,
         }
         await saveGraphLastFormalSyncSummaryV1(summary)
-        console.info(`${logPrefix} saved graph formal sync summary`, summary)
+        logReadwiseInfo(logPrefix, 'saved graph formal sync summary', summary)
       }
-      console.error(`${logPrefix} sync failed`, err)
+      logReadwiseError(logPrefix, 'sync failed', err)
       setStatus('error')
       setStatusMessage(
         `${statusPrefix} failed: ${describeUnknownError(err)}`,
@@ -1764,14 +1726,14 @@ export const ReadwiseContainer = () => {
 
       setStatus('completed')
       setStatusMessage(`Deleted ${result.touchedPages} Reader preview page(s).`)
-      console.info(`${readerPreviewLogPrefix} cleared preview pages`, {
+      logReadwiseInfo(readerPreviewLogPrefix, 'cleared preview pages', {
         namespacePrefix: readerPreviewNamespaceRoot,
         matchedPages: result.matchedPages,
         deletedPages: result.touchedPages,
         skippedPages: result.skippedPages,
       })
     } catch (err: unknown) {
-      console.error(`${readerPreviewLogPrefix} failed to clear preview pages`, err)
+      logReadwiseError(readerPreviewLogPrefix, 'failed to clear preview pages', err)
       setStatus('error')
       setStatusMessage(
         `Failed to clear Reader preview pages: ${err instanceof Error ? err.message : String(err)}`,

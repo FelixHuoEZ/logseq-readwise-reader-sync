@@ -1,4 +1,5 @@
 import type { PageEntity } from '@logseq/libs/dist/LSPlugin'
+import { logReadwiseInfo } from '../logging'
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
@@ -169,7 +170,7 @@ export const renameManagedReaderPageIfNeededV1 = async ({
     throw new Error(`Failed to resolve renamed page ${expectedPageName}`)
   }
 
-  console.info(`${logPrefix} renamed managed page to tracked title`, {
+  logReadwiseInfo(logPrefix, 'renamed managed page to tracked title', {
     previousPageName: currentPageName,
     nextPageName: expectedPageName,
   })

@@ -1,4 +1,5 @@
 import type { PageEntity } from '@logseq/libs/dist/LSPlugin'
+import { logReadwiseWarn } from '../logging'
 
 export type GraphCheckpointSourceV1 = 'full_sync' | 'incremental_sync'
 
@@ -31,7 +32,8 @@ export interface GraphLastFormalSyncSummaryV1 {
   failureSummary: string | null
 }
 
-export const GRAPH_CHECKPOINT_PAGE_NAME_V1 = 'Readwise Sync State'
+export const GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1 = 'Readwise Sync State'
+export const GRAPH_LEGACY_CHECKPOINT_PAGE_NAME_V1 = 'Readwise Legacy Sync State'
 
 const CHECKPOINT_PROPERTY_KEYS = {
   schemaVersion: 'rw-sync-schema',
@@ -174,14 +176,14 @@ const compareUpdatedAfter = (
   return left < right ? -1 : 1
 }
 
-const ensureCheckpointPage = async (): Promise<PageEntity> => {
-  const existing = await logseq.Editor.getPage(GRAPH_CHECKPOINT_PAGE_NAME_V1)
+const ensureManagedStatePage = async (pageName: string): Promise<PageEntity> => {
+  const existing = await logseq.Editor.getPage(pageName)
   if (existing) {
     return existing
   }
 
   const created = await logseq.Editor.createPage(
-    GRAPH_CHECKPOINT_PAGE_NAME_V1,
+    pageName,
     {},
     {
       createFirstBlock: false,
@@ -195,6 +197,12 @@ const ensureCheckpointPage = async (): Promise<PageEntity> => {
 
   return created
 }
+
+const ensureLegacyCheckpointPage = async () =>
+  ensureManagedStatePage(GRAPH_LEGACY_CHECKPOINT_PAGE_NAME_V1)
+
+const ensureFormalSyncStatePage = async () =>
+  ensureManagedStatePage(GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1)
 
 const formatDurationMinutes = (milliseconds: number) =>
   (milliseconds / 60000).toFixed(2)
@@ -255,7 +263,7 @@ const upsertLastFormalSyncSummaryBlock = async (
 export const loadGraphCheckpointStateV1 =
   async (): Promise<GraphCheckpointStateV1 | null> =>
     parseCheckpointPage(
-      await logseq.Editor.getPage(GRAPH_CHECKPOINT_PAGE_NAME_V1),
+      await logseq.Editor.getPage(GRAPH_LEGACY_CHECKPOINT_PAGE_NAME_V1),
     )
 
 export const pickPreferredCheckpointStateV1 = (
@@ -272,7 +280,7 @@ export const saveGraphCheckpointStateV1 = async (
 ): Promise<GraphCheckpointStateV1> => {
   const currentState = await loadGraphCheckpointStateV1()
   const preferredState = pickPreferredCheckpointStateV1(currentState, nextState)
-  const page = await ensureCheckpointPage()
+  const page = await ensureLegacyCheckpointPage()
 
   await logseq.Editor.upsertBlockProperty(
     page.uuid,
@@ -310,14 +318,14 @@ export const openGraphCheckpointStatePageV1 = async (): Promise<PageEntity> => {
     })
   }
 
-  const page = await ensureCheckpointPage()
-  logseq.App.pushState('page', { name: GRAPH_CHECKPOINT_PAGE_NAME_V1 })
+  const page = await ensureLegacyCheckpointPage()
+  logseq.App.pushState('page', { name: GRAPH_LEGACY_CHECKPOINT_PAGE_NAME_V1 })
   return page
 }
 
 export const loadGraphLastFormalSyncSummaryV1 =
   async (): Promise<GraphLastFormalSyncSummaryV1 | null> => {
-    const page = await logseq.Editor.getPage(GRAPH_CHECKPOINT_PAGE_NAME_V1)
+    const page = await logseq.Editor.getPage(GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1)
     if (!page) return null
 
     const schemaVersion = extractNumberValue(
@@ -377,10 +385,41 @@ export const loadGraphLastFormalSyncSummaryV1 =
     }
   }
 
+const migrateLegacyCheckpointOffFormalSyncStatePageV1 = async () => {
+  const formalPage = await logseq.Editor.getPage(GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1)
+  if (!formalPage) return
+
+  const legacyState = parseCheckpointPage(formalPage)
+  if (!legacyState) return
+
+  await saveGraphCheckpointStateV1(legacyState)
+
+  const pageBlocks = await logseq.Editor.getPageBlocksTree(
+    GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1,
+  )
+  const nonSummaryBlocks =
+    pageBlocks?.filter((block) => block.uuid !== LAST_FORMAL_SYNC_SUMMARY_BLOCK_UUID) ?? []
+
+  if (nonSummaryBlocks.length > 0) {
+    logReadwiseWarn(
+      '[Readwise Sync]',
+      'legacy checkpoint props were migrated, but the formal sync state page was not recreated because it contains additional managed blocks.',
+      {
+        pageName: GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1,
+        nonSummaryBlockCount: nonSummaryBlocks.length,
+      },
+    )
+    return
+  }
+
+  await logseq.Editor.deletePage(GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1)
+}
+
 export const saveGraphLastFormalSyncSummaryV1 = async (
   summary: GraphLastFormalSyncSummaryV1,
 ): Promise<GraphLastFormalSyncSummaryV1> => {
-  const page = await ensureCheckpointPage()
+  await migrateLegacyCheckpointOffFormalSyncStatePageV1()
+  const page = await ensureFormalSyncStatePage()
 
   try {
     await logseq.Editor.upsertBlockProperty(
@@ -479,8 +518,9 @@ export const saveGraphLastFormalSyncSummaryV1 = async (
       summary.failureSummary ?? '',
     )
   } catch (error) {
-    console.warn(
-      '[Readwise Sync] failed to persist last formal sync summary as page properties; falling back to managed summary block only.',
+    logReadwiseWarn(
+      '[Readwise Sync]',
+      'failed to persist last formal sync summary as page properties; falling back to managed summary block only.',
       error,
     )
   }

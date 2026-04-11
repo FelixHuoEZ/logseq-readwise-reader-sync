@@ -17,6 +17,14 @@ export const settingsSchema: SettingSchemaDesc[] = [
     default: null,
   },
   {
+    key: 'logLevel',
+    type: 'string',
+    title: 'Log Level',
+    description:
+      'Allowed values: error, warn, info, debug. Default warn. Normally leave unchanged.',
+    default: 'warn',
+  },
+  {
     key: 'readerFullScanTargetDocuments',
     type: 'number',
     title: 'Reader Full Scan Target Documents',

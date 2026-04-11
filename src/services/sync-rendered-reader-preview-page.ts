@@ -1,6 +1,7 @@
 import { format, isValid, parseISO } from 'date-fns'
 
 import type { ReaderPreviewBook } from '../api'
+import { logReadwiseDebug, logReadwiseInfo } from '../logging'
 import {
   buildRenderHashInput,
   computeRenderHash,
@@ -108,7 +109,7 @@ const logRenderedContentDiagnostics = (
       ? lines.slice(endNoteIndex + 1).find((line) => line.startsWith('* '))
       : null
 
-  console.info(`${logPrefix} rendered content diagnostics`, {
+  logReadwiseDebug(logPrefix, 'rendered content diagnostics', {
     pageName,
     previewHead: lines.slice(0, 18),
     transitionLines,
@@ -147,7 +148,7 @@ export const syncRenderedReaderPreviewPage = async (
       : previewBook.document.id,
     namespacePrefix,
   )
-  console.info(`${logPrefix} preparing rendered Reader page`, {
+  logReadwiseDebug(logPrefix, 'preparing rendered Reader page', {
     readerDocumentId: previewBook.document.id,
     pageName,
     namespacePrefix,
@@ -217,6 +218,6 @@ export const syncRenderedReaderPreviewPage = async (
     isNewPage: existingPage == null,
   }
 
-  console.info(`${logPrefix} synced rendered page`, summary)
+  logReadwiseInfo(logPrefix, 'synced rendered page', summary)
   return summary
 }

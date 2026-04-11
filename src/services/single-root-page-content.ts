@@ -1,4 +1,5 @@
 import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
+import { logReadwiseDebug } from '../logging'
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
@@ -34,7 +35,7 @@ const stabilizeInsertedRootBlock = async (
   await logseq.Editor.updateBlock(refreshedRoot.uuid, content)
   await delay(INSERTED_ROOT_POST_UPDATE_DELAY_MS)
 
-  console.info(`${logPrefix} stabilized inserted root block`, {
+  logReadwiseDebug(logPrefix, 'stabilized inserted root block', {
     pageName,
     rootBlockUuid: refreshedRoot.uuid,
     topLevelBlockCountAfterInsert: refreshedTree?.length ?? null,
@@ -73,7 +74,7 @@ export const writeSingleRootPageContentV1 = async (
 ): Promise<'created' | 'updated' | 'unchanged'> => {
   const pageBlocksTree = await logseq.Editor.getPageBlocksTree(page.name)
 
-  console.info(`${logPrefix} rendered page state`, {
+  logReadwiseDebug(logPrefix, 'rendered page state', {
     pageName,
     topLevelBlockCount: pageBlocksTree?.length ?? null,
     firstExistingBlockContent: pageBlocksTree?.[0]?.content ?? null,
@@ -93,7 +94,7 @@ export const writeSingleRootPageContentV1 = async (
       throw new Error(`Failed to insert rendered content for "${pageName}"`)
     }
 
-    console.info(`${logPrefix} rendered page branch`, {
+    logReadwiseDebug(logPrefix, 'rendered page branch', {
       pageName,
       branch: 'insert-first-block',
     })
@@ -112,14 +113,14 @@ export const writeSingleRootPageContentV1 = async (
   const needsContentUpdate = rootBlock.content !== content
 
   if (!needsContentUpdate && !hasDirectChildren && extraTopLevelBlocks.length === 0) {
-    console.info(`${logPrefix} rendered page branch`, {
+    logReadwiseDebug(logPrefix, 'rendered page branch', {
       pageName,
       branch: 'unchanged',
     })
     return 'unchanged'
   }
 
-  console.info(`${logPrefix} rendered page branch`, {
+  logReadwiseDebug(logPrefix, 'rendered page branch', {
     pageName,
     branch:
       extraTopLevelBlocks.length > 0 || hasDirectChildren

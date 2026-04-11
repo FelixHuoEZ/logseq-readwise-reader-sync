@@ -44,12 +44,27 @@ const normalizeBoundaryBlankLines = (value: string) => {
 }
 
 const emitMetadataText = (page: SemanticPage) => {
+  const readwiseId = getMetadataValue(page, 'rw-id')
+  const readerId = getMetadataValue(page, 'rw-reader-id')
   const author = getMetadataValue(page, 'AUTHOR')
   const category = getMetadataValue(page, 'CATEGORIES')
   const link = getMetadataValue(page, 'LINK')
   const tags = getMetadataValue(page, 'TAGS')
   const date = getMetadataValue(page, 'DATE')
   const published = getMetadataValue(page, 'PUBLISHED')
+  const reservedKeys = new Set([
+    'rw-id',
+    'rw-reader-id',
+    'AUTHOR',
+    'CATEGORIES',
+    'LINK',
+    'TAGS',
+    'DATE',
+    'PUBLISHED',
+  ])
+  const extraMetadataLines = page.metadata
+    .filter((entry) => !reservedKeys.has(entry.key))
+    .map((entry) => emitPropertyLine(entry.key, entry.value))
   const imageLine = page.pageNote?.imageUrl
     ? wrapWikiLink(page.pageNote.imageUrl)
     : ''
@@ -57,12 +72,15 @@ const emitMetadataText = (page: SemanticPage) => {
 
   return [
     ':PROPERTIES:',
+    ...(readwiseId != null ? [emitPropertyLine('rw-id', readwiseId)] : []),
+    ...(readerId != null ? [emitPropertyLine('rw-reader-id', readerId)] : []),
     emitPropertyLine('AUTHOR', author, wrapWikiLink),
     emitPropertyLine('CATEGORIES', category),
     emitPropertyLine('LINK', link),
     emitPropertyLine('TAGS', tags),
     emitPropertyLine('DATE', date, wrapWikiLink),
     emitPropertyLine('PUBLISHED', published, wrapWikiLink),
+    ...extraMetadataLines,
     ':END:',
     '#+BEGIN_NOTE',
     imageLine,

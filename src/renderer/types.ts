@@ -43,7 +43,7 @@ export interface SemanticSyncHeader {
 }
 
 export interface SemanticHighlight {
-  highlightId: number
+  highlightId: number | string
   uuid: string
   text: string
   locationLabel: string | null

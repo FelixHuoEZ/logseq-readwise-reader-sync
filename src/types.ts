@@ -53,6 +53,35 @@ export interface ExportedBook {
 
 export type ExportedBookIdentity = Pick<ExportedBook, 'user_book_id' | 'title'>
 
+export interface ReaderDocument {
+  id: string
+  url: string
+  parent_id: string | null
+  source_url: string | null
+  title: string | null
+  author: string | null
+  source: string | null
+  category: string | null
+  location: string | null
+  tags: Record<string, unknown> | null
+  site_name: string | null
+  word_count: number | null
+  reading_time: string | null
+  created_at: string
+  updated_at: string
+  published_date: string | null
+  summary: string | null
+  image_url: string | null
+  content: string | null
+  notes: string | null
+  reading_progress: number | null
+  first_opened_at: string | null
+  last_opened_at: string | null
+  saved_at: string | null
+  last_moved_at: string | null
+  html_content?: string | null
+}
+
 export interface ReadwisePageProp {
   key: string
   schema: {
@@ -72,6 +101,22 @@ export interface ExportResponse {
   count: number
   nextPageCursor: string | null
   results: ExportedBook[]
+}
+
+export interface ReaderListParams {
+  id?: string
+  updatedAfter?: string
+  location?: string
+  category?: string
+  limit?: number
+  pageCursor?: string
+  withHtmlContent?: boolean
+}
+
+export interface ReaderListResponse {
+  count: number
+  nextPageCursor: string | null
+  results: ReaderDocument[]
 }
 
 export type SyncStatus = 'idle' | 'fetching' | 'syncing' | 'completed' | 'error'

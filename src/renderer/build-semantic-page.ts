@@ -24,6 +24,7 @@ const buildMetadataEntries = (
   const { book, runtime } = context
 
   return [
+    { key: 'rw-id', value: String(book.userBookId) },
     { key: 'AUTHOR', value: book.author },
     { key: 'CATEGORIES', value: book.category },
     { key: 'LINK', value: book.sourceUrl ?? book.uniqueUrl },
@@ -82,6 +83,7 @@ const normalizeHighlightTags = (highlight: NormalizedHighlight): string[] => {
 const buildSemanticHighlight = (
   highlight: NormalizedHighlight,
   computeUuid: (locationUrl: string) => string,
+  readerDocumentUrl: string | null,
 ): SemanticHighlight => {
   const uuidSource = highlight.locationUrl ?? highlight.readwiseUrl
 
@@ -90,7 +92,7 @@ const buildSemanticHighlight = (
     uuid: computeUuid(uuidSource),
     text: highlight.text,
     locationLabel: highlight.locationLabel,
-    locationUrl: highlight.locationUrl,
+    locationUrl: readerDocumentUrl ?? highlight.locationUrl,
     createdDate: toYmd(highlight.highlightedAt ?? highlight.createdAt) ?? '',
     tags: normalizeHighlightTags(highlight),
     note: highlight.note,
@@ -110,6 +112,6 @@ export const buildSemanticPage = (
   },
   syncHeader: buildSyncHeader(context),
   highlights: context.book.highlights.map((highlight) =>
-    buildSemanticHighlight(highlight, computeUuid),
+    buildSemanticHighlight(highlight, computeUuid, context.book.readerDocumentUrl),
   ),
 })

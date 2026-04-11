@@ -23,6 +23,9 @@ const pickMostRecentTimestamp = (book: ExportedBook) => {
 
 export const normalizeBookExport = (
   book: ExportedBook,
+  options: {
+    readerDocumentUrl?: string | null
+  } = {},
 ): NormalizedBookExport => {
   const highlights = toArray(book.highlights)
   const documentTags = toArray(book.book_tags)
@@ -38,6 +41,7 @@ export const normalizeBookExport = (
     sourceUrl: book.source_url || null,
     uniqueUrl: book.unique_url || null,
     readwiseUrl: book.readwise_url,
+    readerDocumentUrl: options.readerDocumentUrl ?? null,
     coverImageUrl: book.cover_image_url,
     documentTags: documentTags.map((tag) => tag.name).filter(Boolean),
     documentNote: book.document_note,

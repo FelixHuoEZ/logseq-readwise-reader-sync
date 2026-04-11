@@ -7,8 +7,26 @@ const toArray = <T,>(value: T[] | null | undefined): T[] =>
 const buildLocationLabel = (
   highlight: ExportedHighlight,
 ): string | null => {
+  if (highlight.readwise_url) return 'View Highlight'
   if (highlight.location == null) return null
-  return String(highlight.location)
+
+  const location = String(highlight.location)
+  const locationType =
+    typeof highlight.location_type === 'string'
+      ? highlight.location_type.trim().toLowerCase()
+      : ''
+
+  if (locationType === 'page' || locationType === 'pages') {
+    return `Page ${location}`
+  }
+
+  if (locationType === 'location' || locationType.length === 0) {
+    return `Location ${location}`
+  }
+
+  const normalizedType =
+    locationType.charAt(0).toUpperCase() + locationType.slice(1)
+  return `${normalizedType} ${location}`
 }
 
 export const normalizeHighlight = (

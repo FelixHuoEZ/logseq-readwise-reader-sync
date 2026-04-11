@@ -3,7 +3,7 @@ import './ReadwiseContainer.css'
 import { useEffect, useRef, useState } from 'react'
 import { format } from 'date-fns'
 
-import { createReadwiseClient } from '../api'
+import { createReadwiseClient, loadReaderPreviewBooks } from '../api'
 import {
   type GraphCheckpointSourceV1,
   loadGraphCheckpointStateV1,
@@ -11,17 +11,21 @@ import {
 } from '../graph'
 import {
   backupFormalTestPages,
-  captureCurrentPageFileSnapshotV1,
-  clearManagedPagesBySessionNamespaceRoot,
+    captureCurrentPageFileSnapshotV1,
+    clearManagedPagesByNamespacePrefix,
+    clearManagedPagesBySessionNamespaceRoot,
   clearFormalTestPages,
   type CurrentPageDiffResult,
   diffCurrentPageFileSnapshotV1,
+  listManagedPagesByNamespacePrefix,
+  listManagedPagesBySessionNamespaceRoot,
   loadActiveFormalTestSessionManifestV1,
   rotateActiveFormalTestSessionNamespaceV1,
   restoreLatestFormalTestPageBackup,
   saveFormalTestSessionManifestV1,
   setupProps,
   syncRenderedDebugPage,
+  syncRenderedReaderPreviewPage,
   syncRenderedPage,
 } from '../services'
 import { deriveNextUpdatedAfterV1 } from '../sync'
@@ -37,13 +41,17 @@ export const ReadwiseContainer = () => {
   const debugSyncMaxBooksLimit = 5
   const debugNamespaceRoot = 'ReadwiseDebug'
   const formalNamespaceRoot = 'ReadwiseHighlights'
+  const readerPreviewMaxBooksLimit = 20
+  const readerPreviewNamespaceRoot = 'ReadwiseReaderPreview'
+  const formalSyncLogPrefix = '[Readwise Sync]'
+  const sessionTestLogPrefix = '[Readwise Session Test]'
+  const backupLogPrefix = '[Readwise Backup]'
+  const restoreLogPrefix = '[Readwise Restore]'
+  const debugLogPrefix = '[Readwise Debug Sync]'
+  const readerPreviewLogPrefix = '[Readwise Reader Preview]'
   const showAdvancedFormalTestActions = false
-  const isDebugPageTitle = (pageTitle: string) =>
-    pageTitle === debugNamespaceRoot ||
-    pageTitle.startsWith(`${debugNamespaceRoot}/`) ||
-    pageTitle.startsWith(`${debugNamespaceRoot}___`) ||
-    pageTitle.startsWith(`${debugNamespaceRoot}-`)
   const cancelledRef = useRef(false)
+  const syncPhaseStartedAtRef = useRef<number | null>(null)
   const [propsReady, setPropsReady] = useState(
     () => !!logseq.settings?.propsConfigured,
   )
@@ -55,6 +63,7 @@ export const ReadwiseContainer = () => {
   const [errors, setErrors] = useState<{ book: string; message: string }[]>([])
   const [pageDiffResult, setPageDiffResult] =
     useState<CurrentPageDiffResult | null>(null)
+  const [etaTick, setEtaTick] = useState(0)
   const [activeFormalTestSessionCount, setActiveFormalTestSessionCount] =
     useState<number | null>(null)
 
@@ -66,6 +75,31 @@ export const ReadwiseContainer = () => {
   useEffect(() => {
     void refreshActiveFormalTestSessionCount()
   }, [])
+
+  useEffect(() => {
+    if (status !== 'syncing') {
+      syncPhaseStartedAtRef.current = null
+      return
+    }
+
+    if (current === 0 || syncPhaseStartedAtRef.current == null) {
+      syncPhaseStartedAtRef.current = Date.now()
+    }
+  }, [status, current, total])
+
+  useEffect(() => {
+    if (status !== 'syncing' || current <= 0 || total <= current) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      setEtaTick(Date.now())
+    }, 1000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [status, current, total])
 
   const resetUiState = () => {
     cancelledRef.current = false
@@ -83,7 +117,7 @@ export const ReadwiseContainer = () => {
       await navigator.clipboard.writeText(text)
       setStatusMessage(`${label} copied to clipboard.`)
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to copy text', err)
+      console.error(`${formalSyncLogPrefix} failed to copy text`, err)
       setStatusMessage(
         `Copy failed: ${err instanceof Error ? err.message : String(err)}`,
       )
@@ -152,7 +186,7 @@ export const ReadwiseContainer = () => {
         mode === 'capture' ? 'Raw capture command' : 'Raw diff command',
       )
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to build external raw snapshot command', err)
+      console.error(`${formalSyncLogPrefix} failed to build external raw snapshot command`, err)
       setStatusMessage(
         `Command build failed: ${err instanceof Error ? err.message : String(err)}`,
       )
@@ -168,7 +202,7 @@ export const ReadwiseContainer = () => {
         'Raw snapshot workflow',
       )
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to build external raw snapshot workflow', err)
+      console.error(`${formalSyncLogPrefix} failed to build external raw snapshot workflow`, err)
       setStatusMessage(
         `Workflow build failed: ${err instanceof Error ? err.message : String(err)}`,
       )
@@ -217,6 +251,23 @@ export const ReadwiseContainer = () => {
       window.setTimeout(resolve, ms)
     })
 
+  const formatDuration = (milliseconds: number) => {
+    const totalSeconds = Math.max(0, Math.round(milliseconds / 1000))
+    const hours = Math.floor(totalSeconds / 3600)
+    const minutes = Math.floor((totalSeconds % 3600) / 60)
+    const seconds = totalSeconds % 60
+
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`
+    }
+
+    if (minutes > 0) {
+      return `${minutes}m ${seconds}s`
+    }
+
+    return `${seconds}s`
+  }
+
   const exportHighlightsWithRetry = async (
     client: ReturnType<typeof createReadwiseClient>,
     params: ExportParams,
@@ -238,7 +289,7 @@ export const ReadwiseContainer = () => {
           throw error
         }
 
-        console.warn('[Readwise Sync] transient export fetch failed; retrying', {
+        console.warn(`${formalSyncLogPrefix} transient export fetch failed; retrying`, {
           context,
           attempt: attempt + 1,
           params,
@@ -280,7 +331,7 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         `Using active formal test session (${frozenBooks.length} frozen book(s)).`,
       )
-      console.info('[Readwise Sync] using active formal test session for formal page selection', {
+      console.info(`${sessionTestLogPrefix} using active formal test session for formal page selection`, {
         sessionId: activeFormalTestSession.sessionId,
         namespacePrefix: formalNamespaceRoot,
         updatedAfter: activeFormalTestSession.updatedAfter,
@@ -303,7 +354,7 @@ export const ReadwiseContainer = () => {
     const books: ExportedBookIdentity[] = []
     let cursor: string | null = null
 
-    console.info('[Readwise Sync] loading formal test books', {
+    console.info(`${sessionTestLogPrefix} loading formal test books`, {
       namespacePrefix: formalNamespaceRoot,
       updatedAfter: updatedAfter ?? null,
       maxBooks,
@@ -399,6 +450,24 @@ export const ReadwiseContainer = () => {
 
       const result = await backupFormalTestPages(books, formalNamespaceRoot, {
         storagePrefix: backupStoragePrefix,
+        onProgress: ({ phase, total, completed, pageTitle }) => {
+          if (phase === 'start') {
+            setStatus('syncing')
+            setCurrent(0)
+            setTotal(total)
+            setCurrentBook('')
+            setStatusMessage(
+              `Backing up ${total} formal test page(s) to plugin storage, then deleting originals...`,
+            )
+            return
+          }
+
+          setStatus('syncing')
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageTitle ?? '')
+          setStatusMessage(`Backing up ${completed} / ${total} formal test page(s)...`)
+        },
       })
       await refreshActiveFormalTestSessionCount()
       setCurrent(books.length)
@@ -419,7 +488,7 @@ export const ReadwiseContainer = () => {
           ? `Backed up and removed ${result.touchedPages} formal test page(s) to ${result.backupDirectory}. Formal test session is now active in ${formalTestNamespacePrefix}.`
           : 'No formal test pages were backed up.',
       )
-      console.info('[Readwise Sync] backed up formal test pages', {
+      console.info(`${backupLogPrefix} backed up formal test pages`, {
         sessionId,
         formalTestNamespacePrefix,
         targetedBooks: result.targetedBooks,
@@ -432,7 +501,7 @@ export const ReadwiseContainer = () => {
         maxBooks,
       })
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to back up formal test pages', err)
+      console.error(`${backupLogPrefix} failed to back up formal test pages`, err)
       setStatus('error')
       setStatusMessage(
         `Backup failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -463,8 +532,24 @@ export const ReadwiseContainer = () => {
       setTotal(books.length)
       setStatusMessage(`Deleting ${books.length} formal test page(s)...`)
 
-      const result = await clearFormalTestPages(books, formalNamespaceRoot)
-      setCurrent(books.length)
+      const result = await clearFormalTestPages(books, formalNamespaceRoot, {
+        onProgress: ({ phase, total, completed, pageTitle }) => {
+          if (phase === 'start') {
+            setStatus('syncing')
+            setCurrent(0)
+            setTotal(total)
+            setCurrentBook('')
+            setStatusMessage(`Deleting ${total} formal test page(s)...`)
+            return
+          }
+
+          setStatus('syncing')
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageTitle ?? '')
+          setStatusMessage(`Deleting ${completed} / ${total} formal test page(s)...`)
+        },
+      })
 
       if (result.skippedPages.length > 0) {
         setErrors(
@@ -481,7 +566,7 @@ export const ReadwiseContainer = () => {
           ? `Deleted ${result.touchedPages} formal test page(s).`
           : 'No formal test pages were deleted.',
       )
-      console.info('[Readwise Sync] cleared formal test pages', {
+      console.info(`${sessionTestLogPrefix} cleared formal test pages`, {
         targetedBooks: result.targetedBooks,
         matchedPages: result.matchedPages,
         deletedPages: result.touchedPages,
@@ -491,7 +576,7 @@ export const ReadwiseContainer = () => {
         maxBooks,
       })
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to clear formal test pages', err)
+      console.error(`${sessionTestLogPrefix} failed to clear formal test pages`, err)
       setStatus('error')
       setStatusMessage(
         `Clear failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -509,7 +594,32 @@ export const ReadwiseContainer = () => {
     setStatusMessage('Restoring the latest formal test page backup...')
 
     try {
-      const result = await restoreLatestFormalTestPageBackup()
+      const result = await restoreLatestFormalTestPageBackup({
+        onProgress: ({ phase, total, completed, pageTitle }) => {
+          if (phase === 'start') {
+            setStatus('syncing')
+            setCurrent(0)
+            setTotal(total)
+            setCurrentBook('')
+            setStatusMessage(
+              total > 0
+                ? `Restoring ${total} formal test page(s)...`
+                : 'Restoring the latest formal test page backup...',
+            )
+            return
+          }
+
+          setStatus('syncing')
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageTitle ?? '')
+          setStatusMessage(
+            total > 0
+              ? `Restoring ${completed} / ${total} formal test page(s)...`
+              : 'Restoring the latest formal test page backup...',
+          )
+        },
+      })
       await refreshActiveFormalTestSessionCount()
 
       if (result.targetedBooks === 0) {
@@ -518,30 +628,37 @@ export const ReadwiseContainer = () => {
         return
       }
 
-      if (result.skippedPages.length > 0) {
-        setErrors(
-          result.skippedPages.map((pageTitle) => ({
+      if (result.skippedPages.length > 0 || result.failedPages.length > 0) {
+        setErrors([
+          ...result.skippedPages.map((pageTitle) => ({
             book: pageTitle,
             message: 'Restore skipped because backup content was empty.',
           })),
-        )
+          ...result.failedPages.map((failedPage) => ({
+            book: failedPage.pageTitle,
+            message: `Restore failed after retries: ${failedPage.message}`,
+          })),
+        ])
       }
 
       setStatus('completed')
       setStatusMessage(
-        result.touchedPages > 0
+        result.failedPages.length > 0
+          ? `Restored ${result.touchedPages} formal test page(s), but ${result.failedPages.length} page(s) failed. Active formal test session was kept for retry.`
+        : result.touchedPages > 0
           ? `Restored ${result.touchedPages} formal test page(s) from ${result.backupDirectory}.`
           : 'No formal test pages were restored.',
       )
-      console.info('[Readwise Sync] restored formal test pages', {
+      console.info(`${restoreLogPrefix} restored formal test pages`, {
         targetedBackups: result.targetedBooks,
         matchedPages: result.matchedPages,
         restoredPages: result.touchedPages,
         skippedPages: result.skippedPages,
+        failedPages: result.failedPages,
         backupDirectory: result.backupDirectory,
       })
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to restore formal test pages', err)
+      console.error(`${restoreLogPrefix} failed to restore formal test pages`, err)
       setStatus('error')
       setStatusMessage(
         `Restore failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -563,19 +680,43 @@ export const ReadwiseContainer = () => {
 
       setStatus('syncing')
       setCurrent(0)
-      setTotal(activeFormalTestSession?.books.length ?? 0)
+      setTotal(0)
       setStatusMessage(
         `Deleting session test page(s) under ${formalNamespaceRoot}/<run-id>/...`,
       )
 
-      const result = await clearManagedPagesBySessionNamespaceRoot(
-        formalNamespaceRoot,
-      )
+      const result = await clearManagedPagesBySessionNamespaceRoot(formalNamespaceRoot, {
+        onProgress: ({ phase, total, completed, pageTitle }) => {
+          if (phase === 'start') {
+            setStatus('syncing')
+            setCurrent(0)
+            setTotal(total)
+            setCurrentBook('')
+            setStatusMessage(
+              total > 0
+                ? `Deleting ${total} session test page(s)...`
+                : `Deleting session test page(s) under ${formalNamespaceRoot}/<run-id>/...`,
+            )
+            return
+          }
+
+          setStatus('syncing')
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageTitle ?? '')
+          setStatusMessage(
+            total > 0
+              ? `Deleting ${completed} / ${total} session test page(s)...`
+              : `Deleting session test page(s) under ${formalNamespaceRoot}/<run-id>/...`,
+          )
+        },
+      })
       const rotatedFormalTestSession = activeFormalTestSession
         ? await rotateActiveFormalTestSessionNamespaceV1()
         : null
       await refreshActiveFormalTestSessionCount()
-      setCurrent(activeFormalTestSession?.books.length ?? 0)
+      setCurrent(result.touchedPages)
+      setTotal(result.matchedPages)
 
       if (result.skippedPages.length > 0) {
         setErrors(
@@ -594,7 +735,7 @@ export const ReadwiseContainer = () => {
             ? `No session test pages were deleted. Next session test run will use ${rotatedFormalTestSession.namespacePrefix}.`
             : 'No session test pages were deleted.',
       )
-      console.info('[Readwise Sync] cleared session test pages', {
+      console.info(`${sessionTestLogPrefix} cleared session test pages`, {
         sessionId: activeFormalTestSession?.sessionId ?? null,
         nextSessionId: rotatedFormalTestSession?.sessionId ?? null,
         nextNamespacePrefix: rotatedFormalTestSession?.namespacePrefix ?? null,
@@ -605,7 +746,7 @@ export const ReadwiseContainer = () => {
         namespaceRoot: formalNamespaceRoot,
       })
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to clear session test pages', err)
+      console.error(`${sessionTestLogPrefix} failed to clear session test pages`, err)
       setStatus('error')
       setStatusMessage(
         `Clear failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -623,53 +764,43 @@ export const ReadwiseContainer = () => {
     setStatusMessage(`Deleting ${debugNamespaceRoot} pages...`)
 
     try {
-      const pages = (await logseq.Editor.getAllPages()) ?? []
-
-      const pageNames = new Set<string>()
-      const deleteTargets: string[] = []
-
-      for (const page of pages) {
-        const candidates = [
-          typeof page.originalName === 'string' ? page.originalName : '',
-          typeof page.name === 'string' ? page.name : '',
-          typeof page.title === 'string' ? page.title : '',
-        ].filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
-
-        if (candidates.some((candidate) => isDebugPageTitle(candidate))) {
-          for (const candidate of candidates) {
-            if (isDebugPageTitle(candidate)) {
-              pageNames.add(candidate)
-            }
+      const result = await clearManagedPagesByNamespacePrefix(debugNamespaceRoot, {
+        onProgress: ({ phase, total, completed, pageTitle }) => {
+          if (phase === 'start') {
+            setStatus('syncing')
+            setCurrent(0)
+            setTotal(total)
+            setCurrentBook('')
+            setStatusMessage(
+              total > 0
+                ? `Deleting ${total} debug page(s)...`
+                : `Deleting ${debugNamespaceRoot} pages...`,
+            )
+            return
           }
-          deleteTargets.push(...candidates)
-        }
-      }
 
-      const uniqueDeleteTargets = deleteTargets.filter(
-        (value, index, array) => array.indexOf(value) === index,
-      )
-
-      let deletedPages = 0
-
-      for (const pageName of uniqueDeleteTargets) {
-        try {
-          await logseq.Editor.deletePage(pageName)
-          deletedPages += 1
-        } catch {
-          // Try other aliases from getAllPages(); one of them is usually the
-          // actual page identity accepted by deletePage().
-        }
-      }
+          setStatus('syncing')
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageTitle ?? '')
+          setStatusMessage(
+            total > 0
+              ? `Deleting ${completed} / ${total} debug page(s)...`
+              : `Deleting ${debugNamespaceRoot} pages...`,
+          )
+        },
+      })
 
       setStatus('completed')
-      setStatusMessage(`Deleted ${deletedPages} debug page(s).`)
-      console.info('[Readwise Sync] cleared debug pages', {
+      setStatusMessage(`Deleted ${result.touchedPages} debug page(s).`)
+      console.info(`${debugLogPrefix} cleared debug pages`, {
         namespacePrefix: debugNamespaceRoot,
-        matchedPages: pageNames.size,
-        deletedPages,
+        matchedPages: result.matchedPages,
+        deletedPages: result.touchedPages,
+        skippedPages: result.skippedPages,
       })
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to clear debug pages', err)
+      console.error(`${debugLogPrefix} failed to clear debug pages`, err)
       setStatus('error')
       setStatusMessage(
         `Failed to clear debug pages: ${err instanceof Error ? err.message : String(err)}`,
@@ -693,7 +824,7 @@ export const ReadwiseContainer = () => {
         `Captured snapshot for ${result.pageName} via ${result.source} (${result.lineCount} lines).`,
       )
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to capture current page snapshot', err)
+      console.error(`${formalSyncLogPrefix} failed to capture current page snapshot`, err)
       setStatus('error')
       setStatusMessage(
         `Snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -725,7 +856,7 @@ export const ReadwiseContainer = () => {
       setStatus('completed')
       setStatusMessage(result.summary)
     } catch (err: unknown) {
-      console.error('[Readwise Sync] failed to diff current page snapshot', err)
+      console.error(`${formalSyncLogPrefix} failed to diff current page snapshot`, err)
       setStatus('error')
       setStatusMessage(
         `Diff failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -764,6 +895,7 @@ export const ReadwiseContainer = () => {
 
     const client = createReadwiseClient(token)
     const allBooks: ExportedBook[] = []
+    const syncErrorsForRun: Array<{ book: string; message: string }> = []
     let cursor: string | null = null
     const checkpointBeforeRun = await loadGraphCheckpointStateV1()
     const activeFormalTestSession = renderedDebugPages
@@ -783,15 +915,21 @@ export const ReadwiseContainer = () => {
     const formalTestBookIds = activeFormalTestSession?.books.map(
       (book) => book.userBookId,
     ) ?? null
-    console.info('[Readwise Sync] starting sync')
-    console.info('[Readwise Sync] checkpointBeforeRun', checkpointBeforeRun)
-    console.info('[Readwise Sync] updatedAfter', updatedAfter ?? null)
-    console.info('[Readwise Sync] syncLimitMaxBooks', syncLimitMaxBooks)
-    console.info('[Readwise Sync] ignoreCheckpoint', ignoreCheckpoint)
-    console.info('[Readwise Sync] namespacePrefix', effectiveNamespacePrefix)
-    console.info('[Readwise Sync] renderedDebugPages', renderedDebugPages)
-    console.info('[Readwise Sync] pageNameMode', pageNameMode)
-    console.info('[Readwise Sync] formalTestSessionId', activeFormalTestSession?.sessionId ?? null)
+    const syncLogPrefix =
+      renderedDebugPages
+        ? debugLogPrefix
+        : activeFormalTestSession || syncLimitMaxBooks != null
+          ? sessionTestLogPrefix
+          : formalSyncLogPrefix
+    console.info(`${syncLogPrefix} starting sync`)
+    console.info(`${syncLogPrefix} checkpointBeforeRun`, checkpointBeforeRun)
+    console.info(`${syncLogPrefix} updatedAfter`, updatedAfter ?? null)
+    console.info(`${syncLogPrefix} syncLimitMaxBooks`, syncLimitMaxBooks)
+    console.info(`${syncLogPrefix} ignoreCheckpoint`, ignoreCheckpoint)
+    console.info(`${syncLogPrefix} namespacePrefix`, effectiveNamespacePrefix)
+    console.info(`${syncLogPrefix} renderedDebugPages`, renderedDebugPages)
+    console.info(`${syncLogPrefix} pageNameMode`, pageNameMode)
+    console.info(`${syncLogPrefix} formalTestSessionId`, activeFormalTestSession?.sessionId ?? null)
 
     try {
       do {
@@ -826,14 +964,14 @@ export const ReadwiseContainer = () => {
               ? `Fetched ${allBooks.length} / ${syncLimitMaxBooks} test book(s) so far...`
             : `Fetched ${allBooks.length} book(s) so far...`,
         )
-        console.info('[Readwise Sync] export page', {
+        console.info(`${syncLogPrefix} export page`, {
           pageResultCount: page.results.length,
           totalFetched: allBooks.length,
           nextPageCursor: page.nextPageCursor,
           syncLimitMaxBooks,
         })
         if (syncLimitMaxBooks != null && allBooks.length >= syncLimitMaxBooks) {
-          console.info('[Readwise Sync] sync limit reached', {
+          console.info(`${syncLogPrefix} sync limit reached`, {
             syncLimitMaxBooks,
           })
           cursor = null
@@ -849,7 +987,7 @@ export const ReadwiseContainer = () => {
       if (allBooks.length === 0) {
         setStatus('completed')
         setStatusMessage('No new highlights to sync.')
-        console.info('[Readwise Sync] no new highlights')
+        console.info(`${syncLogPrefix} no new highlights`)
         return
       }
 
@@ -880,12 +1018,19 @@ export const ReadwiseContainer = () => {
               book,
               effectiveNamespacePrefix,
               pageNameMode,
+              null,
             )
           } else {
-            await syncRenderedPage(book, effectiveNamespacePrefix)
+            await syncRenderedPage(
+              book,
+              effectiveNamespacePrefix,
+              syncLogPrefix,
+              null,
+            )
           }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err)
+          syncErrorsForRun.push({ book: book.title, message: msg })
           setErrors((prev) => [...prev, { book: book.title, message: msg }])
         }
       }
@@ -894,18 +1039,29 @@ export const ReadwiseContainer = () => {
         allBooks,
         checkpointBeforeRun?.updatedAfter ?? null,
       )
+      const hasSyncErrors = syncErrorsForRun.length > 0
 
       if (
         activeFormalTestSession ||
         syncLimitMaxBooks != null ||
         ignoreCheckpoint
       ) {
-        console.info('[Readwise Sync] skipping checkpoint save in debug mode', {
+        console.info(`${syncLogPrefix} skipping checkpoint save`, {
           formalTestSessionId: activeFormalTestSession?.sessionId ?? null,
           syncLimitMaxBooks,
           nextUpdatedAfter,
           ignoreCheckpoint,
+          errorCount: syncErrorsForRun.length,
         })
+      } else if (hasSyncErrors) {
+        console.warn(
+          `${syncLogPrefix} skipping checkpoint save because page sync errors occurred`,
+          {
+            nextUpdatedAfter,
+            errorCount: syncErrorsForRun.length,
+            errors: syncErrorsForRun,
+          },
+        )
       } else if (nextUpdatedAfter != null) {
         const checkpointSource: GraphCheckpointSourceV1 =
           checkpointBeforeRun?.updatedAfter == null
@@ -917,14 +1073,14 @@ export const ReadwiseContainer = () => {
           committedAt: new Date().toISOString(),
           source: checkpointSource,
         }
-        console.info('[Readwise Sync] saving graph checkpoint', checkpointToSave)
+        console.info(`${syncLogPrefix} saving graph checkpoint`, checkpointToSave)
         await saveGraphCheckpointStateV1({
           schemaVersion: 1,
           updatedAfter: nextUpdatedAfter,
           committedAt: checkpointToSave.committedAt,
           source: checkpointToSave.source,
         })
-        console.info('[Readwise Sync] saved graph checkpoint', checkpointToSave)
+        console.info(`${syncLogPrefix} saved graph checkpoint`, checkpointToSave)
       }
 
       setStatus('completed')
@@ -935,18 +1091,21 @@ export const ReadwiseContainer = () => {
             ? `Debug sync complete. ${allBooks.length} book(s) processed${effectiveNamespacePrefix ? ` in ${effectiveNamespacePrefix}` : ''}. Checkpoint was not advanced.`
           : syncLimitMaxBooks != null
             ? `Limited sync complete. ${allBooks.length} test book(s) processed in ${effectiveNamespacePrefix}. Checkpoint was not advanced.`
+          : hasSyncErrors
+            ? `Sync completed with ${syncErrorsForRun.length} error(s). Checkpoint was not advanced.`
           : `Sync complete. ${allBooks.length} book(s) processed.`,
       )
-      console.info('[Readwise Sync] sync completed', {
+      console.info(`${syncLogPrefix} sync completed`, {
         processedBooks: allBooks.length,
         formalTestSessionId: activeFormalTestSession?.sessionId ?? null,
         nextUpdatedAfter,
         syncLimitMaxBooks,
         ignoreCheckpoint,
+        errorCount: syncErrorsForRun.length,
         namespacePrefix: effectiveNamespacePrefix,
       })
     } catch (err: unknown) {
-      console.error('[Readwise Sync] sync failed', err)
+      console.error(`${syncLogPrefix} sync failed`, err)
       setStatus('error')
       setStatusMessage(
         `Sync failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -955,7 +1114,44 @@ export const ReadwiseContainer = () => {
   }
 
   const handleSync = async () => {
-    await runSync()
+    const conflicts = await detectFormalSyncConflicts()
+    if (conflicts != null) {
+      const summary = formatManagedPageConflictSummary(conflicts)
+      console.warn(
+        `${formalSyncLogPrefix} blocked formal sync because conflicting managed pages still exist`,
+        {
+          conflicts: conflicts.map((conflict) => ({
+            label: conflict.label,
+            clearAction: conflict.clearAction,
+            count: conflict.pages.length,
+            sampleTitles: conflict.pages.slice(0, 5).map((page) => page.pageTitle),
+          })),
+        },
+      )
+      setErrors(
+        conflicts.flatMap((conflict) =>
+          conflict.pages.slice(0, 3).map((page) => ({
+            book: page.pageTitle,
+            message: `Formal sync blocked until ${conflict.label} pages are cleared via ${conflict.clearAction}.`,
+          })),
+        ),
+      )
+      setStatus('error')
+      setCurrent(0)
+      setTotal(0)
+      setCurrentBook('')
+      setStatusMessage(
+        `Formal sync blocked to avoid duplicate block UUIDs. ${summary}.`,
+      )
+      return
+    }
+
+    await runReaderFullScanSync({
+      namespacePrefix: formalNamespaceRoot,
+      logPrefix: formalSyncLogPrefix,
+      statusPrefix: 'Formal sync',
+      syncHeaderMode: 'formal',
+    })
   }
 
   const handleLimitedSync = async () => {
@@ -995,13 +1191,278 @@ export const ReadwiseContainer = () => {
     })
   }
 
+  const runReaderFullScanSync = async ({
+    namespacePrefix,
+    logPrefix,
+    statusPrefix,
+    syncHeaderMode,
+  }: {
+    namespacePrefix: string
+    logPrefix: string
+    statusPrefix: string
+    syncHeaderMode: 'formal' | 'preview'
+  }) => {
+    const token = logseq.settings?.apiToken as string
+    if (!token) {
+      setStatus('error')
+      setStatusMessage('No API token configured. Set it in plugin settings.')
+      return
+    }
+
+    cancelledRef.current = false
+    setErrors([])
+    setPageDiffResult(null)
+    setCurrent(0)
+    setTotal(readerPreviewMaxBooksLimit)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage(
+      `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${readerPreviewMaxBooksLimit} target document(s))...`,
+    )
+
+    const client = createReadwiseClient(token)
+    const syncErrorsForRun: Array<{ book: string; message: string }> = []
+
+    try {
+      const previewBooks = await loadReaderPreviewBooks(client, {
+        maxDocuments: readerPreviewMaxBooksLimit,
+        mode: 'full-library-scan',
+        onProgress: (progress) => {
+          if (cancelledRef.current) return
+
+          if (progress.phase === 'fetch-highlights') {
+            const uniqueParents = progress.uniqueParents ?? 0
+            setStatus('fetching')
+            setCurrent(0)
+            setTotal(uniqueParents)
+            setCurrentBook('')
+            setStatusMessage(
+              `${statusPrefix}: ${uniqueParents} parent document(s) identified from ${progress.totalHighlights ?? 0} highlight(s) across ${progress.pageNumber ?? 0} page(s).`,
+            )
+            return
+          }
+
+          setStatus('syncing')
+          setCurrent(progress.completed ?? 0)
+          setTotal(progress.total ?? readerPreviewMaxBooksLimit)
+          setCurrentBook(progress.pageTitle ?? '')
+          setStatusMessage(
+            `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? readerPreviewMaxBooksLimit}.`,
+          )
+        },
+      })
+
+      if (cancelledRef.current) return
+
+      if (previewBooks.length === 0) {
+        setStatus('completed')
+        setStatusMessage(`${statusPrefix}: no Reader pages were available.`)
+        console.info(`${logPrefix} no pages available`)
+        return
+      }
+
+      setCurrent(0)
+      setTotal(previewBooks.length)
+      setCurrentBook('')
+      setStatusMessage(
+        `${statusPrefix}: syncing ${previewBooks.length} Reader page(s) from full-library highlight groups into ${namespacePrefix}...`,
+      )
+
+      for (let index = 0; index < previewBooks.length; index += 1) {
+        if (cancelledRef.current) return
+
+        const previewBook = previewBooks[index]!
+        const pageTitle = previewBook.document.title ?? previewBook.document.id
+        setCurrent(index + 1)
+        setCurrentBook(pageTitle)
+
+        try {
+          await syncRenderedReaderPreviewPage(
+            previewBook,
+            namespacePrefix,
+            logPrefix,
+            {
+              syncHeaderText:
+                syncHeaderMode === 'preview'
+                  ? `Reader v3 preview synced by [[Readwise]] [[${format(new Date(), 'yyyy-MM-dd')}]]`
+                  : undefined,
+            },
+          )
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err)
+          syncErrorsForRun.push({ book: pageTitle, message })
+          setErrors((prev) => [...prev, { book: pageTitle, message }])
+        }
+      }
+
+      setStatus('completed')
+      setStatusMessage(
+        syncErrorsForRun.length > 0
+          ? `${statusPrefix}: completed with ${syncErrorsForRun.length} error(s).`
+          : `${statusPrefix}: complete. ${previewBooks.length} page(s) written to ${namespacePrefix}.`,
+      )
+      console.info(`${logPrefix} sync completed`, {
+        namespacePrefix,
+        processedBooks: previewBooks.length,
+        errorCount: syncErrorsForRun.length,
+      })
+    } catch (err: unknown) {
+      console.error(`${logPrefix} sync failed`, err)
+      setStatus('error')
+      setStatusMessage(
+        `${statusPrefix} failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  const detectFormalSyncConflicts = async () => {
+    const [readerPreviewPages, debugPages, sessionTestPages] = await Promise.all([
+      listManagedPagesByNamespacePrefix(readerPreviewNamespaceRoot),
+      listManagedPagesByNamespacePrefix(debugNamespaceRoot),
+      listManagedPagesBySessionNamespaceRoot(formalNamespaceRoot),
+    ])
+
+    const conflicts = [
+      {
+        label: 'Reader preview',
+        clearAction: 'Clear Reader Preview Pages',
+        pages: readerPreviewPages,
+      },
+      {
+        label: 'debug',
+        clearAction: 'Clear Debug Pages',
+        pages: debugPages,
+      },
+      {
+        label: 'session test',
+        clearAction: 'Clear Session Test Pages',
+        pages: sessionTestPages,
+      },
+    ].filter((entry) => entry.pages.length > 0)
+
+    if (conflicts.length === 0) {
+      return null
+    }
+
+    return conflicts
+  }
+
+  const handleReaderPreviewSync = async () => {
+    const previewNamespacePrefix = `${readerPreviewNamespaceRoot}/${format(
+      new Date(),
+      'yyyyMMdd-HHmmss',
+    )}`
+
+    await runReaderFullScanSync({
+      namespacePrefix: previewNamespacePrefix,
+      logPrefix: readerPreviewLogPrefix,
+      statusPrefix: 'Reader v3 preview',
+      syncHeaderMode: 'preview',
+    })
+  }
+
+  const handleClearReaderPreviewPages = async () => {
+    setErrors([])
+    setPageDiffResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage(`Deleting ${readerPreviewNamespaceRoot} pages...`)
+
+    try {
+      const result = await clearManagedPagesByNamespacePrefix(readerPreviewNamespaceRoot, {
+        onProgress: ({ phase, total, completed, pageTitle }) => {
+          if (phase === 'start') {
+            setStatus('syncing')
+            setCurrent(0)
+            setTotal(total)
+            setCurrentBook('')
+            setStatusMessage(
+              total > 0
+                ? `Deleting ${total} Reader preview page(s)...`
+                : `Deleting ${readerPreviewNamespaceRoot} pages...`,
+            )
+            return
+          }
+
+          setStatus('syncing')
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageTitle ?? '')
+          setStatusMessage(
+            total > 0
+              ? `Deleting ${completed} / ${total} Reader preview page(s)...`
+              : `Deleting ${readerPreviewNamespaceRoot} pages...`,
+          )
+        },
+      })
+
+      if (result.skippedPages.length > 0) {
+        setErrors(
+          result.skippedPages.map((pageTitle) => ({
+            book: pageTitle,
+            message: 'Delete failed for this Reader preview page.',
+          })),
+        )
+      }
+
+      setStatus('completed')
+      setStatusMessage(`Deleted ${result.touchedPages} Reader preview page(s).`)
+      console.info(`${readerPreviewLogPrefix} cleared preview pages`, {
+        namespacePrefix: readerPreviewNamespaceRoot,
+        matchedPages: result.matchedPages,
+        deletedPages: result.touchedPages,
+        skippedPages: result.skippedPages,
+      })
+    } catch (err: unknown) {
+      console.error(`${readerPreviewLogPrefix} failed to clear preview pages`, err)
+      setStatus('error')
+      setStatusMessage(
+        `Failed to clear Reader preview pages: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
   const progressPct = total > 0 ? Math.round((current / total) * 100) : 0
+  const syncElapsedMs =
+    status === 'syncing' &&
+    current > 0 &&
+    total > current &&
+    syncPhaseStartedAtRef.current != null
+      ? Math.max(
+          0,
+          (etaTick || Date.now()) - syncPhaseStartedAtRef.current,
+        )
+      : null
+  const estimatedRemainingMs =
+    syncElapsedMs != null && current > 0
+      ? Math.max(0, (syncElapsedMs / current) * (total - current))
+      : null
   const isBusy = status === 'fetching' || status === 'syncing'
   const configuredSyncMaxBooks =
     resolveConfiguredSyncMaxBooks() ?? debugSyncMaxBooksLimit
   const sessionTestSyncCount =
     activeFormalTestSessionCount ?? configuredSyncMaxBooks
   const sessionTestSyncLabel = `Start Sync (session test: ${sessionTestSyncCount})`
+  const formatManagedPageConflictSummary = (
+    conflicts: Array<{
+      label: string
+      clearAction: string
+      pages: Array<{ pageTitle: string }>
+    }>,
+  ) =>
+    conflicts
+      .map((conflict) => {
+        const sampleTitles = conflict.pages
+          .slice(0, 2)
+          .map((page) => page.pageTitle)
+          .filter((title) => title.length > 0)
+        const sampleText =
+          sampleTitles.length > 0 ? ` e.g. ${sampleTitles.join(', ')}` : ''
+        return `${conflict.label} ${conflict.pages.length} page(s)${sampleText}; clear via ${conflict.clearAction}`
+      })
+      .join(' | ')
   const handleClose = () => {
     if (!isBusy) {
       resetUiState()
@@ -1039,7 +1500,9 @@ export const ReadwiseContainer = () => {
             <>
               <div className="rw-current-book">
                 {status === 'syncing' && currentBook}
-                {status === 'fetching' && 'Fetching data from Readwise API...'}
+                {status === 'fetching' &&
+                  statusMessage === 'Fetching highlights from Readwise...' &&
+                  'Fetching data from Readwise API...'}
               </div>
               <div className="rw-progress-track">
                 <div
@@ -1053,7 +1516,7 @@ export const ReadwiseContainer = () => {
               <div className="rw-progress-label">
                 {status === 'fetching'
                   ? `${total} book(s) fetched`
-                  : `${current} / ${total} (${progressPct}%)`}
+                  : `${current} / ${total} (${progressPct}%)${estimatedRemainingMs != null ? ` · ETA ${formatDuration(estimatedRemainingMs)}` : ''}`}
               </div>
             </>
           )}
@@ -1183,11 +1646,16 @@ export const ReadwiseContainer = () => {
                     Close
                   </button>
                 </div>
+                <div className="rw-action-note">
+                  Uses Reader v3 full-library highlight scan, groups by
+                  parent_id, then rewrites managed pages in
+                  `ReadwiseHighlights/&lt;title&gt;`.
+                </div>
               </div>
 
               <div className="rw-action-group">
                 <div className="rw-action-group-label">
-                  Real UUID Test
+                  Legacy Export Tools
                 </div>
                 <div className="rw-action-row">
                   <button className="rw-btn" onClick={handleLimitedSync}>
@@ -1208,6 +1676,10 @@ export const ReadwiseContainer = () => {
                     </button>
                   )}
                 </div>
+                <div className="rw-action-note">
+                  Old export/checkpoint-based path kept temporarily for rollback
+                  and comparison. It is no longer the primary sync route.
+                </div>
               </div>
 
               <div className="rw-action-group">
@@ -1221,6 +1693,24 @@ export const ReadwiseContainer = () => {
                   <button className="rw-btn" onClick={handleClearDebugPages}>
                     Clear Debug Pages
                   </button>
+                </div>
+              </div>
+
+              <div className="rw-action-group">
+                <div className="rw-action-group-label">
+                  Reader Preview Namespace
+                </div>
+                <div className="rw-action-row">
+                  <button className="rw-btn" onClick={handleReaderPreviewSync}>
+                    Start Reader Preview (20, full scan)
+                  </button>
+                  <button className="rw-btn" onClick={handleClearReaderPreviewPages}>
+                    Clear Reader Preview Pages
+                  </button>
+                </div>
+                <div className="rw-action-note">
+                  Same Reader v3 full-scan engine as formal sync, but writes into
+                  a separate preview namespace for non-destructive validation.
                 </div>
               </div>
 

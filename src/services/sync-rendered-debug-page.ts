@@ -155,8 +155,9 @@ export const syncRenderedDebugPage = async (
   book: ExportedBook,
   namespacePrefix = 'ReadwiseDebug',
   pageNameMode: 'flat' | 'namespace' = 'flat',
+  readerDocumentUrl: string | null = null,
 ) => {
-  const normalizedBook = normalizeBookExport(book)
+  const normalizedBook = normalizeBookExport(book, { readerDocumentUrl })
   const pageName = buildDebugManagedPageName(
     book.title,
     book.user_book_id,

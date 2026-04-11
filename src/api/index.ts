@@ -2,12 +2,41 @@ import wretch from 'wretch'
 import QueryStringAddon from 'wretch/addons/queryString'
 import { retry } from 'wretch/middlewares'
 
-import type { ExportParams, ExportResponse } from '../types'
+import type {
+  ExportParams,
+  ExportResponse,
+  ReaderListParams,
+  ReaderListResponse,
+} from '../types'
 
 const BASE_URL = 'https://readwise.io/api/v2'
+const READER_BASE_URL = 'https://readwise.io/api/v3'
 
 export const createReadwiseClient = (token: string) => {
   const api = wretch(BASE_URL)
+    .addon(QueryStringAddon)
+    .headers({
+      Authorization: `Token ${token}`,
+      'Content-Type': 'application/json',
+    })
+    .middlewares([
+      retry({
+        delayTimer: 1000,
+        delayRamp: (delay, attempts) => delay * 2 ** (attempts - 1),
+        maxAttempts: 5,
+        until: (response) => response != null && response.status !== 429,
+        onRetry: async ({ response }) => {
+          if (response?.status === 429) {
+            const retryAfter = response.headers.get('Retry-After')
+            if (retryAfter) {
+              await new Promise((r) => setTimeout(r, Number(retryAfter) * 1000))
+            }
+          }
+          return {}
+        },
+      }),
+    ])
+  const readerApi = wretch(READER_BASE_URL)
     .addon(QueryStringAddon)
     .headers({
       Authorization: `Token ${token}`,
@@ -49,8 +78,27 @@ export const createReadwiseClient = (token: string) => {
 
       return api.url('/export/').query(query).get().json<ExportResponse>()
     },
+
+    listReaderDocuments: (
+      params: ReaderListParams = {},
+    ): Promise<ReaderListResponse> => {
+      const query: Record<string, string | number | boolean> = {}
+      if (params.id) query.id = params.id
+      if (params.updatedAfter) query.updatedAfter = params.updatedAfter
+      if (params.location) query.location = params.location
+      if (params.category) query.category = params.category
+      if (params.limit) query.limit = params.limit
+      if (params.pageCursor) query.pageCursor = params.pageCursor
+      if (params.withHtmlContent !== undefined) {
+        query.withHtmlContent = params.withHtmlContent
+      }
+
+      return readerApi.url('/list/').query(query).get().json<ReaderListResponse>()
+    },
   }
 }
 
 export type ReadwiseClient = ReturnType<typeof createReadwiseClient>
 export * from './load-all-exported-books'
+export * from './load-reader-document-urls'
+export * from './load-reader-preview-books'

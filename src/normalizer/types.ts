@@ -33,6 +33,7 @@ export interface NormalizedBookExport {
   sourceUrl: string | null
   uniqueUrl: string | null
   readwiseUrl: string
+  readerDocumentUrl: string | null
   coverImageUrl: string | null
   documentTags: string[]
   documentNote: string | null

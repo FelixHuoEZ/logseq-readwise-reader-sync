@@ -7,6 +7,7 @@ export interface SetupPropsResult {
 
 const readwisePageProps: ReadwisePageProp[] = [
   { key: 'rw-id', schema: { type: 'number' } },
+  { key: 'rw-reader-id', schema: { type: 'default' } },
   { key: 'rw-author', schema: { type: 'node', cardinality: 'many' } },
   { key: 'rw-readable-title', schema: { type: 'default' } },
   { key: 'rw-category', schema: { type: 'node' } },

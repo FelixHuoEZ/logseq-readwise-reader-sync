@@ -186,3 +186,20 @@ export const saveGraphCheckpointStateV1 = async (
 
   return preferredState
 }
+
+export const openGraphCheckpointStatePageV1 = async (): Promise<PageEntity> => {
+  const currentState = await loadGraphCheckpointStateV1()
+
+  if (currentState == null) {
+    await saveGraphCheckpointStateV1({
+      schemaVersion: 1,
+      updatedAfter: null,
+      committedAt: new Date().toISOString(),
+      source: 'full_sync',
+    })
+  }
+
+  const page = await ensureCheckpointPage()
+  logseq.App.pushState('page', { name: GRAPH_CHECKPOINT_PAGE_NAME_V1 })
+  return page
+}

@@ -13,6 +13,8 @@
     "dev": "vite",
     "build": "vite build",
     "diag:page-snapshot": "node scripts/raw-page-snapshot.mjs",
+    "diag:reader-highlights": "node scripts/reader-highlight-dump.mjs",
+    "diag:reader-v3-feasibility": "node scripts/reader-v3-feasibility.mjs",
     "prepare": "husky",
     "lint:precommit": "echo \"Running biome\" && biome check . --write && echo \"Running tsc\" && tsc --noEmit"
   },

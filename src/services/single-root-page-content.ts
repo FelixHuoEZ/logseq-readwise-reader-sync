@@ -18,6 +18,7 @@ const stabilizeInsertedRootBlock = async (
   page: PageEntity,
   pageName: string,
   content: string,
+  logPrefix = '[Readwise Sync]',
 ) => {
   // Best-effort rewrite only. Raw file diffs still show Logseq may later insert
   // one blank line after `#+END_NOTE` during its own canonical serialization.
@@ -33,7 +34,7 @@ const stabilizeInsertedRootBlock = async (
   await logseq.Editor.updateBlock(refreshedRoot.uuid, content)
   await delay(INSERTED_ROOT_POST_UPDATE_DELAY_MS)
 
-  console.info('[Readwise Sync] stabilized inserted root block', {
+  console.info(`${logPrefix} stabilized inserted root block`, {
     pageName,
     rootBlockUuid: refreshedRoot.uuid,
     topLevelBlockCountAfterInsert: refreshedTree?.length ?? null,
@@ -44,6 +45,7 @@ const stabilizeInsertedRootBlock = async (
 
 export const createManagedPageV1 = async (
   pageName: string,
+  logPrefix = '[Readwise Sync]',
 ): Promise<PageEntity> => {
   const created = await logseq.Editor.createPage(
     pageName,
@@ -67,10 +69,11 @@ export const writeSingleRootPageContentV1 = async (
   page: PageEntity,
   pageName: string,
   content: string,
+  logPrefix = '[Readwise Sync]',
 ): Promise<'created' | 'updated' | 'unchanged'> => {
   const pageBlocksTree = await logseq.Editor.getPageBlocksTree(page.name)
 
-  console.info('[Readwise Sync] rendered page state', {
+  console.info(`${logPrefix} rendered page state`, {
     pageName,
     topLevelBlockCount: pageBlocksTree?.length ?? null,
     firstExistingBlockContent: pageBlocksTree?.[0]?.content ?? null,
@@ -90,12 +93,12 @@ export const writeSingleRootPageContentV1 = async (
       throw new Error(`Failed to insert rendered content for "${pageName}"`)
     }
 
-    console.info('[Readwise Sync] rendered page branch', {
+    console.info(`${logPrefix} rendered page branch`, {
       pageName,
       branch: 'insert-first-block',
     })
 
-    await stabilizeInsertedRootBlock(page, pageName, content)
+    await stabilizeInsertedRootBlock(page, pageName, content, logPrefix)
     return 'created'
   }
 
@@ -109,14 +112,14 @@ export const writeSingleRootPageContentV1 = async (
   const needsContentUpdate = rootBlock.content !== content
 
   if (!needsContentUpdate && !hasDirectChildren && extraTopLevelBlocks.length === 0) {
-    console.info('[Readwise Sync] rendered page branch', {
+    console.info(`${logPrefix} rendered page branch`, {
       pageName,
       branch: 'unchanged',
     })
     return 'unchanged'
   }
 
-  console.info('[Readwise Sync] rendered page branch', {
+  console.info(`${logPrefix} rendered page branch`, {
     pageName,
     branch:
       extraTopLevelBlocks.length > 0 || hasDirectChildren
@@ -144,7 +147,10 @@ export const writeSingleRootPageContentV1 = async (
 export const upsertSingleRootPageContentV1 = async (
   pageName: string,
   content: string,
+  logPrefix = '[Readwise Sync]',
 ): Promise<'created' | 'updated' | 'unchanged'> => {
-  const page = (await logseq.Editor.getPage(pageName)) ?? (await createManagedPageV1(pageName))
-  return writeSingleRootPageContentV1(page, pageName, content)
+  const page =
+    (await logseq.Editor.getPage(pageName)) ??
+    (await createManagedPageV1(pageName, logPrefix))
+  return writeSingleRootPageContentV1(page, pageName, content, logPrefix)
 }

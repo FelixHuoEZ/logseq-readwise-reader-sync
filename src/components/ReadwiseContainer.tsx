@@ -23,7 +23,10 @@ import {
   saveGraphCheckpointStateV1,
   saveGraphReaderSyncStateV1,
 } from '../graph'
-import { createGraphReaderSyncCacheV1 } from '../cache'
+import {
+  createGraphReaderSyncCacheV1,
+  type ReaderSyncCacheSummaryV1,
+} from '../cache'
 import {
   auditManagedReaderPagesV1,
   backupFormalTestPages,
@@ -152,6 +155,8 @@ export const ReadwiseContainer = () => {
     useState<RunIssueBundleContext | null>(null)
   const [pageDiffResult, setPageDiffResult] =
     useState<CurrentPageDiffResult | null>(null)
+  const [cacheSummaryResult, setCacheSummaryResult] =
+    useState<ReaderSyncCacheSummaryV1 | null>(null)
   const [etaTick, setEtaTick] = useState(0)
   const [etaSnapshot, setEtaSnapshot] = useState<ReaderSyncEtaSnapshot | null>(null)
   const [showMaintenanceTools, setShowMaintenanceTools] = useState(false)
@@ -251,6 +256,7 @@ export const ReadwiseContainer = () => {
     setErrors([])
     setRunIssueContext(null)
     setPageDiffResult(null)
+    setCacheSummaryResult(null)
   }
 
   const beginReaderSyncEtaPhase = (
@@ -347,6 +353,33 @@ export const ReadwiseContainer = () => {
         `Copy failed: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
+  }
+
+  const formatTimestampForUi = (value: string | null | undefined) => {
+    if (!value) return 'Not available'
+
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return value
+
+    return format(parsed, 'yyyy-MM-dd HH:mm:ss')
+  }
+
+  const buildCacheSummaryBundle = (summary: ReaderSyncCacheSummaryV1) => {
+    const state = summary.state
+
+    return [
+      'Reader Sync Cache Summary',
+      `Database: ${summary.databaseName}`,
+      `Graph ID: ${summary.graphId}`,
+      `Parent documents cached: ${summary.parentDocumentCount}`,
+      `Highlights cached: ${summary.highlightCount}`,
+      `cache_state present: ${state ? 'yes' : 'no'}`,
+      `State latestHighlightUpdatedAt: ${state?.latestHighlightUpdatedAt ?? 'null'}`,
+      `State cachedAt: ${state?.cachedAt ?? 'null'}`,
+      `State hasFullLibrarySnapshot: ${state?.hasFullLibrarySnapshot ?? 'null'}`,
+      `State staleDeletionRisk: ${state?.staleDeletionRisk ?? 'null'}`,
+      `State highlightCount: ${state?.highlightCount ?? 'null'}`,
+    ].join('\n')
   }
 
   const uniqueStrings = (values: string[]) =>
@@ -1435,6 +1468,7 @@ export const ReadwiseContainer = () => {
   const handleCaptureCurrentPageSnapshot = async () => {
     clearRunIssues()
     setPageDiffResult(null)
+    setCacheSummaryResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -1459,6 +1493,7 @@ export const ReadwiseContainer = () => {
   const handleDiffCurrentPageSnapshot = async () => {
     clearRunIssues()
     setPageDiffResult(null)
+    setCacheSummaryResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -1512,6 +1547,7 @@ export const ReadwiseContainer = () => {
     retryActionRef.current = null
     clearRunIssues()
     setPageDiffResult(null)
+    setCacheSummaryResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -1782,6 +1818,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleSync = async () => {
+    setCacheSummaryResult(null)
     const conflicts = await detectFormalSyncConflicts()
     if (conflicts != null) {
       setShowMaintenanceTools(true)
@@ -1839,6 +1876,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleCachedFullRebuild = async () => {
+    setCacheSummaryResult(null)
     const conflicts = await detectFormalSyncConflicts()
     if (conflicts != null) {
       setShowMaintenanceTools(true)
@@ -1883,6 +1921,7 @@ export const ReadwiseContainer = () => {
   }
 
   const handleFullReconcile = async () => {
+    setCacheSummaryResult(null)
     const conflicts = await detectFormalSyncConflicts()
     if (conflicts != null) {
       setShowMaintenanceTools(true)
@@ -1930,6 +1969,7 @@ export const ReadwiseContainer = () => {
   const handleAuditManagedIds = async () => {
     clearRunIssues()
     setPageDiffResult(null)
+    setCacheSummaryResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -2040,6 +2080,70 @@ export const ReadwiseContainer = () => {
     }
   }
 
+  const handleInspectCacheSummary = async () => {
+    clearRunIssues()
+    setPageDiffResult(null)
+    setCacheSummaryResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Cache summary',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    setStatusMessage('Inspecting Reader sync cache...')
+
+    try {
+      const graphContext = await loadCurrentGraphContextV1()
+      const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
+      const summary = await previewCache.inspectCacheSummary()
+
+      setCacheSummaryResult(summary)
+      setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: summary.parentDocumentCount + summary.highlightCount,
+              issuesCount: 0,
+              stats: {
+                pagesProcessed: summary.parentDocumentCount,
+                highlightsScanned: summary.highlightCount,
+              },
+            },
+      )
+      setStatusMessage(
+        `Loaded cache summary for graph ${summary.graphId}. ${summary.parentDocumentCount} parent document(s) and ${summary.highlightCount} highlight(s) cached.`,
+      )
+    } catch (err: unknown) {
+      logReadwiseError(formalSyncLogPrefix, 'cache summary failed', err)
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+            },
+      )
+      setStatusMessage(
+        `Cache summary failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
   const handleRepairManagedPages = async () => {
     const token = logseq.settings?.apiToken as string
     if (!token) {
@@ -2050,6 +2154,7 @@ export const ReadwiseContainer = () => {
 
     clearRunIssues()
     setPageDiffResult(null)
+    setCacheSummaryResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -2317,6 +2422,7 @@ export const ReadwiseContainer = () => {
     }
     clearRunIssues()
     setPageDiffResult(null)
+    setCacheSummaryResult(null)
     setCurrent(0)
     setTotal(1)
     setCurrentBook('')
@@ -3205,6 +3311,8 @@ export const ReadwiseContainer = () => {
       'yyyyMMdd-HHmmss',
     )}`
 
+    setCacheSummaryResult(null)
+
     await runReaderManagedSync({
       namespacePrefix: previewNamespacePrefix,
       logPrefix: readerPreviewLogPrefix,
@@ -3704,6 +3812,82 @@ export const ReadwiseContainer = () => {
             </div>
           )}
 
+          {cacheSummaryResult && (
+            <div className="rw-feedback-block rw-cache-panel">
+              <div className="rw-section-header">
+                <div>
+                  <div className="rw-section-title">Cache Summary</div>
+                  <div className="rw-section-meta">
+                    {cacheSummaryResult.databaseName}
+                  </div>
+                </div>
+                <button
+                  className="rw-btn rw-btn-small"
+                  onClick={() =>
+                    void copyText(
+                      buildCacheSummaryBundle(cacheSummaryResult),
+                      'Cache summary',
+                    )
+                  }
+                >
+                  Copy
+                </button>
+              </div>
+              <div className="rw-cache-grid">
+                <div className="rw-cache-item">
+                  <span className="rw-cache-key">Graph ID</span>
+                  <strong>{cacheSummaryResult.graphId}</strong>
+                </div>
+                <div className="rw-cache-item">
+                  <span className="rw-cache-key">Parent documents</span>
+                  <strong>{cacheSummaryResult.parentDocumentCount}</strong>
+                </div>
+                <div className="rw-cache-item">
+                  <span className="rw-cache-key">Highlights</span>
+                  <strong>{cacheSummaryResult.highlightCount}</strong>
+                </div>
+                <div className="rw-cache-item">
+                  <span className="rw-cache-key">cache_state</span>
+                  <strong>{cacheSummaryResult.state ? 'Present' : 'Missing'}</strong>
+                </div>
+                <div className="rw-cache-item">
+                  <span className="rw-cache-key">Latest updatedAt</span>
+                  <strong>
+                    {formatTimestampForUi(
+                      cacheSummaryResult.state?.latestHighlightUpdatedAt,
+                    )}
+                  </strong>
+                </div>
+                <div className="rw-cache-item">
+                  <span className="rw-cache-key">Cached at</span>
+                  <strong>
+                    {formatTimestampForUi(cacheSummaryResult.state?.cachedAt)}
+                  </strong>
+                </div>
+                <div className="rw-cache-item">
+                  <span className="rw-cache-key">Full library snapshot</span>
+                  <strong>
+                    {cacheSummaryResult.state == null
+                      ? 'Unknown'
+                      : cacheSummaryResult.state.hasFullLibrarySnapshot
+                        ? 'Yes'
+                        : 'No'}
+                  </strong>
+                </div>
+                <div className="rw-cache-item">
+                  <span className="rw-cache-key">Stale deletion risk</span>
+                  <strong>
+                    {cacheSummaryResult.state == null
+                      ? 'Unknown'
+                      : cacheSummaryResult.state.staleDeletionRisk
+                        ? 'Yes'
+                        : 'No'}
+                  </strong>
+                </div>
+              </div>
+            </div>
+          )}
+
           {pageDiffResult && (
             <div className="rw-feedback-block rw-diff-panel">
               <div className="rw-diff-header">
@@ -3880,6 +4064,9 @@ export const ReadwiseContainer = () => {
                     <div className="rw-action-row">
                       <button className="rw-btn" onClick={handleLimitedSync}>
                         {sessionTestSyncLabel}
+                      </button>
+                      <button className="rw-btn" onClick={handleInspectCacheSummary}>
+                        Inspect Cache Summary
                       </button>
                       <button className="rw-btn" onClick={handleAuditManagedIds}>
                         Audit Managed IDs

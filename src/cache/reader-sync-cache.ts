@@ -1,7 +1,12 @@
 import type { ReaderDocument } from '../types'
+import {
+  logReadwiseError,
+  logReadwiseInfo,
+} from '../logging'
 
 const DATABASE_NAME_PREFIX = 'readwise-reader-sync-cache'
 const DATABASE_VERSION = 1
+const CACHE_LOG_PREFIX = '[Readwise Cache]'
 
 const PARENT_DOCUMENT_STORE = 'parent_documents'
 const HIGHLIGHT_STORE = 'highlights'
@@ -16,6 +21,15 @@ export interface ReaderSyncHighlightCacheStateV1 {
   hasFullLibrarySnapshot: boolean
   staleDeletionRisk: boolean
   highlightCount: number
+}
+
+export interface ReaderSyncCacheSummaryV1 {
+  schemaVersion: 1
+  graphId: string
+  databaseName: string
+  parentDocumentCount: number
+  highlightCount: number
+  state: ReaderSyncHighlightCacheStateV1 | null
 }
 
 export interface GraphReaderSyncCacheV1 {
@@ -35,6 +49,7 @@ export interface GraphReaderSyncCacheV1 {
     latestHighlightUpdatedAt: string | null,
   ): Promise<void>
   getHighlightCacheState(): Promise<ReaderSyncHighlightCacheStateV1 | null>
+  inspectCacheSummary(): Promise<ReaderSyncCacheSummaryV1>
 }
 
 interface ParentDocumentRecord {
@@ -292,19 +307,36 @@ class ReaderSyncCacheImplV1 implements GraphReaderSyncCacheV1 {
     const uniqueDocuments = uniqueReaderDocumentsById(documents)
     if (!uniqueDocuments.length) return
 
-    const db = await this.getDatabase()
-    const tx = db.transaction([PARENT_DOCUMENT_STORE], 'readwrite')
-    const store = tx.objectStore(PARENT_DOCUMENT_STORE)
+    try {
+      const db = await this.getDatabase()
+      const tx = db.transaction([PARENT_DOCUMENT_STORE], 'readwrite')
+      const store = tx.objectStore(PARENT_DOCUMENT_STORE)
 
-    for (const document of uniqueDocuments) {
-      const record: ParentDocumentRecord = {
-        id: document.id,
-        document,
+      for (const document of uniqueDocuments) {
+        const record: ParentDocumentRecord = {
+          id: document.id,
+          document,
+        }
+        store.put(record)
       }
-      store.put(record)
-    }
 
-    await txToPromise(tx)
+      await txToPromise(tx)
+      logReadwiseInfo(CACHE_LOG_PREFIX, 'wrote parent documents to IndexedDB', {
+        graphId: this.graphId,
+        databaseName: db.name,
+        store: PARENT_DOCUMENT_STORE,
+        documentCount: uniqueDocuments.length,
+        sampleParentIds: uniqueDocuments.slice(0, 5).map((document) => document.id),
+      })
+    } catch (error: unknown) {
+      logReadwiseError(CACHE_LOG_PREFIX, 'failed to write parent documents to IndexedDB', {
+        graphId: this.graphId,
+        store: PARENT_DOCUMENT_STORE,
+        documentCount: uniqueDocuments.length,
+        error,
+      })
+      throw error
+    }
   }
 
   async loadGroupedHighlightsByParent(
@@ -352,20 +384,39 @@ class ReaderSyncCacheImplV1 implements GraphReaderSyncCacheV1 {
     latestHighlightUpdatedAt: string | null,
   ): Promise<void> {
     const uniqueHighlights = uniqueReaderDocumentsById(highlights)
-    const db = await this.getDatabase()
+    try {
+      const db = await this.getDatabase()
 
-    await clearAndReplaceHighlights(db, uniqueHighlights)
+      await clearAndReplaceHighlights(db, uniqueHighlights)
 
-    const currentState = await this.readState()
-    await this.writeState({
-      ...buildNextState(this.graphId, currentState, {
-        latestHighlightUpdatedAt,
-        cachedAt: new Date().toISOString(),
-        hasFullLibrarySnapshot: true,
-        staleDeletionRisk: false,
+      const currentState = await this.readState()
+      await this.writeState({
+        ...buildNextState(this.graphId, currentState, {
+          latestHighlightUpdatedAt,
+          cachedAt: new Date().toISOString(),
+          hasFullLibrarySnapshot: true,
+          staleDeletionRisk: false,
+          highlightCount: uniqueHighlights.length,
+        }),
+      })
+      logReadwiseInfo(CACHE_LOG_PREFIX, 'replaced highlight snapshot in IndexedDB', {
+        graphId: this.graphId,
+        databaseName: db.name,
+        store: HIGHLIGHT_STORE,
         highlightCount: uniqueHighlights.length,
-      }),
-    })
+        latestHighlightUpdatedAt,
+        hasFullLibrarySnapshot: true,
+      })
+    } catch (error: unknown) {
+      logReadwiseError(CACHE_LOG_PREFIX, 'failed to replace highlight snapshot in IndexedDB', {
+        graphId: this.graphId,
+        store: HIGHLIGHT_STORE,
+        highlightCount: uniqueHighlights.length,
+        latestHighlightUpdatedAt,
+        error,
+      })
+      throw error
+    }
   }
 
   async upsertHighlightsFromIncremental(
@@ -373,25 +424,76 @@ class ReaderSyncCacheImplV1 implements GraphReaderSyncCacheV1 {
     latestHighlightUpdatedAt: string | null,
   ): Promise<void> {
     const uniqueHighlights = uniqueReaderDocumentsById(highlights)
-    const db = await this.getDatabase()
+    try {
+      const db = await this.getDatabase()
 
-    const highlightCount = await upsertHighlights(db, uniqueHighlights)
+      const highlightCount = await upsertHighlights(db, uniqueHighlights)
 
-    const currentState = await this.readState()
-    await this.writeState({
-      ...buildNextState(this.graphId, currentState, {
+      const currentState = await this.readState()
+      await this.writeState({
+        ...buildNextState(this.graphId, currentState, {
+          latestHighlightUpdatedAt,
+          cachedAt: new Date().toISOString(),
+          hasFullLibrarySnapshot: currentState?.hasFullLibrarySnapshot ?? false,
+          staleDeletionRisk: true,
+          highlightCount,
+        }),
+      })
+      logReadwiseInfo(CACHE_LOG_PREFIX, 'upserted incremental highlights into IndexedDB', {
+        graphId: this.graphId,
+        databaseName: db.name,
+        store: HIGHLIGHT_STORE,
+        incomingHighlightCount: uniqueHighlights.length,
+        totalHighlightCount: highlightCount,
         latestHighlightUpdatedAt,
-        cachedAt: new Date().toISOString(),
-        hasFullLibrarySnapshot: currentState?.hasFullLibrarySnapshot ?? false,
         staleDeletionRisk: true,
-        highlightCount,
-      }),
-    })
+      })
+    } catch (error: unknown) {
+      logReadwiseError(CACHE_LOG_PREFIX, 'failed to upsert incremental highlights into IndexedDB', {
+        graphId: this.graphId,
+        store: HIGHLIGHT_STORE,
+        incomingHighlightCount: uniqueHighlights.length,
+        latestHighlightUpdatedAt,
+        error,
+      })
+      throw error
+    }
   }
 
   async getHighlightCacheState(): Promise<ReaderSyncHighlightCacheStateV1 | null> {
     const db = await this.getDatabase()
     return await loadStateFromDb(db, this.graphId)
+  }
+
+  async inspectCacheSummary(): Promise<ReaderSyncCacheSummaryV1> {
+    const db = await this.getDatabase()
+    const tx = db.transaction(
+      [PARENT_DOCUMENT_STORE, HIGHLIGHT_STORE, STATE_STORE],
+      'readonly',
+    )
+    const parentStore = tx.objectStore(PARENT_DOCUMENT_STORE)
+    const highlightStore = tx.objectStore(HIGHLIGHT_STORE)
+    const stateStore = tx.objectStore(STATE_STORE)
+
+    const [parentDocumentCount, highlightCount, stateRecord] = await Promise.all([
+      requestToPromise<number>(parentStore.count()),
+      requestToPromise<number>(highlightStore.count()),
+      requestToPromise<CacheStateRecord | undefined>(stateStore.get(STATE_KEY)),
+    ])
+
+    await txToPromise(tx)
+
+    return {
+      schemaVersion: 1,
+      graphId: this.graphId,
+      databaseName: db.name,
+      parentDocumentCount,
+      highlightCount,
+      state:
+        stateRecord && stateRecord.state.graphId === this.graphId
+          ? stateRecord.state
+          : null,
+    }
   }
 
   private async readState(): Promise<ReaderSyncHighlightCacheStateV1 | null> {
@@ -408,6 +510,12 @@ class ReaderSyncCacheImplV1 implements GraphReaderSyncCacheV1 {
 
     const db = await this.getDatabase()
     await writeStateToDb(db, state)
+    logReadwiseInfo(CACHE_LOG_PREFIX, 'wrote cache_state to IndexedDB', {
+      graphId: this.graphId,
+      databaseName: db.name,
+      store: STATE_STORE,
+      state,
+    })
   }
 }
 

@@ -6,5 +6,6 @@ export {
 
 export type {
   GraphReaderSyncCacheV1,
+  ReaderSyncCacheSummaryV1,
   ReaderSyncHighlightCacheStateV1,
 } from './reader-sync-cache'

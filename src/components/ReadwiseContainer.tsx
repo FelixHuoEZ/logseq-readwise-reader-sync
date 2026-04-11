@@ -1420,7 +1420,7 @@ export const ReadwiseContainer = () => {
     try {
       beginReaderSyncEtaPhase('fetch-highlights', 'highlight scan')
       const previewLoadResult = await loadReaderPreviewBooks(client, {
-        maxDocuments: targetDocuments ?? undefined,
+        maxDocuments: targetDocuments,
         mode: 'full-library-scan',
         maxHighlightPages: debugHighlightPageLimit ?? undefined,
         logPrefix,

@@ -42,7 +42,7 @@ export interface LoadReaderPreviewBooksProgress {
 }
 
 export interface LoadReaderPreviewBooksOptions {
-  maxDocuments?: number
+  maxDocuments?: number | null
   mode?: 'full-library-scan' | 'recent-window'
   maxHighlightPages?: number
   logPrefix?: string
@@ -137,7 +137,9 @@ export const loadReaderPreviewBooks = async (
 ): Promise<ReaderPreviewLoadResult> => {
   const mode = options.mode ?? 'full-library-scan'
   const maxDocuments =
-    typeof options.maxDocuments === 'number' && Number.isFinite(options.maxDocuments)
+    options.maxDocuments === null
+      ? null
+      : typeof options.maxDocuments === 'number' && Number.isFinite(options.maxDocuments)
       ? options.maxDocuments > 0
         ? Math.floor(options.maxDocuments)
         : null

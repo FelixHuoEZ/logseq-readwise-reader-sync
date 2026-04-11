@@ -27,7 +27,7 @@ Formal sync currently scans the Reader highlight library before grouping by pare
 
 ## Install From Release
 
-1. Download the latest `logseq-readwise-sync-fork.zip` from [Releases](https://github.com/FelixHuoEZ/logseq-readwise-plugin-fork/releases).
+1. Download the latest `logseq-readwise-sync-fork.zip` from [Releases](https://github.com/FelixHuoEZ/logseq-readwise-reader-sync/releases).
 2. Extract the archive. It should produce a `logseq-readwise-sync-fork/` folder.
 3. In Logseq, open `Plugins`.
 4. Choose `Load unpacked plugin`.

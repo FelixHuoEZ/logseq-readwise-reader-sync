@@ -11,6 +11,10 @@ import {
 } from '../renderer'
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import { buildFormalManagedPageName } from './readwise-page-names'
+import {
+  renameManagedReaderPageIfNeededV1,
+  resolveManagedReaderPageV1,
+} from './resolve-managed-reader-page'
 import { createManagedPageV1, writeSingleRootPageContentV1 } from './single-root-page-content'
 
 const toYmd = (value: string | null | undefined) => {
@@ -114,12 +118,27 @@ const logRenderedContentDiagnostics = (
   })
 }
 
+export interface SyncRenderedReaderPageResult {
+  readerDocumentId: string
+  pageName: string
+  pageMatchKind: 'rw-reader-id' | 'managed_title' | 'none'
+  pageRenamed: boolean
+  previousPageName: string | null
+  result: 'created' | 'updated' | 'unchanged'
+  renderHash: string
+  highlightCount: number
+  highlightCoverage: ReaderPreviewBook['highlightCoverage']
+  isNewPage: boolean
+}
+
 export const syncRenderedReaderPreviewPage = async (
   previewBook: ReaderPreviewBook,
   namespacePrefix = 'ReadwiseReaderPreview',
   logPrefix = '[Readwise Reader Preview]',
   options: {
     syncHeaderText?: string
+    pageResolveMode?: 'title_only' | 'reader_id_then_title'
+    identityNamespaceRoot?: string
   } = {},
 ) => {
   const pageName = buildFormalManagedPageName(
@@ -129,7 +148,30 @@ export const syncRenderedReaderPreviewPage = async (
     namespacePrefix,
   )
   const syncDate = format(new Date(), 'yyyy-MM-dd')
-  const existingPage = await logseq.Editor.getPage(pageName)
+  const pageResolution =
+    options.pageResolveMode === 'reader_id_then_title'
+      ? await resolveManagedReaderPageV1({
+          readerDocumentId: previewBook.document.id,
+          expectedPageName: pageName,
+          namespaceRoot: options.identityNamespaceRoot ?? namespacePrefix,
+        })
+      : {
+          page: await logseq.Editor.getPage(pageName),
+          matchKind: 'managed_title' as const,
+        }
+  const resolvedExistingPage =
+    pageResolution.page && options.pageResolveMode === 'reader_id_then_title'
+      ? await renameManagedReaderPageIfNeededV1({
+          page: pageResolution.page,
+          expectedPageName: pageName,
+          logPrefix,
+        })
+      : {
+          page: pageResolution.page,
+          renamed: false,
+          previousPageName: null,
+        }
+  const existingPage = resolvedExistingPage.page
   const syncHeaderText =
     options.syncHeaderText ??
     (existingPage == null
@@ -155,13 +197,19 @@ export const syncRenderedReaderPreviewPage = async (
     logPrefix,
   )
 
-  console.info(`${logPrefix} synced rendered page`, {
+  const summary: SyncRenderedReaderPageResult = {
     readerDocumentId: previewBook.document.id,
     pageName,
+    pageMatchKind: pageResolution.matchKind,
+    pageRenamed: resolvedExistingPage.renamed,
+    previousPageName: resolvedExistingPage.previousPageName,
     result,
     renderHash,
     highlightCount: previewBook.highlights.length,
     highlightCoverage: previewBook.highlightCoverage,
     isNewPage: existingPage == null,
-  })
+  }
+
+  console.info(`${logPrefix} synced rendered page`, summary)
+  return summary
 }

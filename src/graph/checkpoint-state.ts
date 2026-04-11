@@ -9,6 +9,28 @@ export interface GraphCheckpointStateV1 {
   source: GraphCheckpointSourceV1
 }
 
+export interface GraphLastFormalSyncSummaryV1 {
+  schemaVersion: 1
+  runKind: 'reader_full_scan'
+  status: 'success' | 'partial_error' | 'failed'
+  completedAt: string
+  highlightPagesScanned: number
+  highlightsScanned: number
+  parentDocumentsIdentified: number
+  pagesTargeted: number
+  pagesProcessed: number
+  createdCount: number
+  updatedCount: number
+  unchangedCount: number
+  renamedCount: number
+  errorCount: number
+  totalDurationMs: number
+  fetchHighlightsDurationMs: number
+  fetchDocumentsDurationMs: number
+  writePagesDurationMs: number
+  failureSummary: string | null
+}
+
 export const GRAPH_CHECKPOINT_PAGE_NAME_V1 = 'Readwise Sync State'
 
 const CHECKPOINT_PROPERTY_KEYS = {
@@ -16,6 +38,28 @@ const CHECKPOINT_PROPERTY_KEYS = {
   updatedAfter: 'rw-checkpoint-updated-after',
   committedAt: 'rw-checkpoint-committed-at',
   source: 'rw-checkpoint-source',
+} as const
+
+const LAST_FORMAL_SYNC_PROPERTY_KEYS = {
+  schemaVersion: 'rw-last-formal-sync-schema',
+  runKind: 'rw-last-formal-sync-kind',
+  status: 'rw-last-formal-sync-status',
+  completedAt: 'rw-last-formal-sync-completed-at',
+  highlightPagesScanned: 'rw-last-formal-sync-highlight-pages-scanned',
+  highlightsScanned: 'rw-last-formal-sync-highlights-scanned',
+  parentDocumentsIdentified: 'rw-last-formal-sync-parent-documents-identified',
+  pagesTargeted: 'rw-last-formal-sync-pages-targeted',
+  pagesProcessed: 'rw-last-formal-sync-pages-processed',
+  createdCount: 'rw-last-formal-sync-created',
+  updatedCount: 'rw-last-formal-sync-updated',
+  unchangedCount: 'rw-last-formal-sync-unchanged',
+  renamedCount: 'rw-last-formal-sync-renamed',
+  errorCount: 'rw-last-formal-sync-errors',
+  totalDurationMs: 'rw-last-formal-sync-total-duration-ms',
+  fetchHighlightsDurationMs: 'rw-last-formal-sync-fetch-highlights-duration-ms',
+  fetchDocumentsDurationMs: 'rw-last-formal-sync-fetch-documents-duration-ms',
+  writePagesDurationMs: 'rw-last-formal-sync-write-pages-duration-ms',
+  failureSummary: 'rw-last-formal-sync-failure-summary',
 } as const
 
 const normalizePropertyKey = (value: string): string =>
@@ -56,6 +100,14 @@ const extractStringValue = (value: unknown): string | null => {
   }
 
   return null
+}
+
+const extractNumberValue = (value: unknown): number | null => {
+  const stringValue = extractStringValue(value)
+  if (!stringValue) return null
+
+  const parsed = Number(stringValue)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 const parseSchemaVersion = (page: PageEntity): 1 | null => {
@@ -202,4 +254,170 @@ export const openGraphCheckpointStatePageV1 = async (): Promise<PageEntity> => {
   const page = await ensureCheckpointPage()
   logseq.App.pushState('page', { name: GRAPH_CHECKPOINT_PAGE_NAME_V1 })
   return page
+}
+
+export const loadGraphLastFormalSyncSummaryV1 =
+  async (): Promise<GraphLastFormalSyncSummaryV1 | null> => {
+    const page = await logseq.Editor.getPage(GRAPH_CHECKPOINT_PAGE_NAME_V1)
+    if (!page) return null
+
+    const schemaVersion = extractNumberValue(
+      readPropertyValue(page.properties, LAST_FORMAL_SYNC_PROPERTY_KEYS.schemaVersion),
+    )
+    const runKind = extractStringValue(
+      readPropertyValue(page.properties, LAST_FORMAL_SYNC_PROPERTY_KEYS.runKind),
+    )
+    const status = extractStringValue(
+      readPropertyValue(page.properties, LAST_FORMAL_SYNC_PROPERTY_KEYS.status),
+    )
+    const completedAt = extractStringValue(
+      readPropertyValue(page.properties, LAST_FORMAL_SYNC_PROPERTY_KEYS.completedAt),
+    )
+
+    if (
+      schemaVersion !== 1 ||
+      runKind !== 'reader_full_scan' ||
+      (status !== 'success' && status !== 'partial_error' && status !== 'failed') ||
+      completedAt == null
+    ) {
+      return null
+    }
+
+    const numberOrZero = (key: (typeof LAST_FORMAL_SYNC_PROPERTY_KEYS)[keyof typeof LAST_FORMAL_SYNC_PROPERTY_KEYS]) =>
+      extractNumberValue(readPropertyValue(page.properties, key)) ?? 0
+
+    return {
+      schemaVersion: 1,
+      runKind: 'reader_full_scan',
+      status,
+      completedAt,
+      highlightPagesScanned: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightPagesScanned),
+      highlightsScanned: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightsScanned),
+      parentDocumentsIdentified: numberOrZero(
+        LAST_FORMAL_SYNC_PROPERTY_KEYS.parentDocumentsIdentified,
+      ),
+      pagesTargeted: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.pagesTargeted),
+      pagesProcessed: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.pagesProcessed),
+      createdCount: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.createdCount),
+      updatedCount: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.updatedCount),
+      unchangedCount: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.unchangedCount),
+      renamedCount: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.renamedCount),
+      errorCount: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.errorCount),
+      totalDurationMs: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.totalDurationMs),
+      fetchHighlightsDurationMs: numberOrZero(
+        LAST_FORMAL_SYNC_PROPERTY_KEYS.fetchHighlightsDurationMs,
+      ),
+      fetchDocumentsDurationMs: numberOrZero(
+        LAST_FORMAL_SYNC_PROPERTY_KEYS.fetchDocumentsDurationMs,
+      ),
+      writePagesDurationMs: numberOrZero(LAST_FORMAL_SYNC_PROPERTY_KEYS.writePagesDurationMs),
+      failureSummary:
+        extractStringValue(
+          readPropertyValue(page.properties, LAST_FORMAL_SYNC_PROPERTY_KEYS.failureSummary),
+        ) ?? null,
+    }
+  }
+
+export const saveGraphLastFormalSyncSummaryV1 = async (
+  summary: GraphLastFormalSyncSummaryV1,
+): Promise<GraphLastFormalSyncSummaryV1> => {
+  const page = await ensureCheckpointPage()
+
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.schemaVersion,
+    summary.schemaVersion,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.runKind,
+    summary.runKind,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.status,
+    summary.status,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.completedAt,
+    summary.completedAt,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightPagesScanned,
+    summary.highlightPagesScanned,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.highlightsScanned,
+    summary.highlightsScanned,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.parentDocumentsIdentified,
+    summary.parentDocumentsIdentified,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.pagesTargeted,
+    summary.pagesTargeted,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.pagesProcessed,
+    summary.pagesProcessed,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.createdCount,
+    summary.createdCount,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.updatedCount,
+    summary.updatedCount,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.unchangedCount,
+    summary.unchangedCount,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.renamedCount,
+    summary.renamedCount,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.errorCount,
+    summary.errorCount,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.totalDurationMs,
+    summary.totalDurationMs,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.fetchHighlightsDurationMs,
+    summary.fetchHighlightsDurationMs,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.fetchDocumentsDurationMs,
+    summary.fetchDocumentsDurationMs,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.writePagesDurationMs,
+    summary.writePagesDurationMs,
+  )
+  await logseq.Editor.upsertBlockProperty(
+    page.uuid,
+    LAST_FORMAL_SYNC_PROPERTY_KEYS.failureSummary,
+    summary.failureSummary ?? '',
+  )
+
+  return summary
 }

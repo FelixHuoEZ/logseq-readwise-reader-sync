@@ -5,8 +5,10 @@ import { format } from 'date-fns'
 
 import { createReadwiseClient, loadReaderPreviewBooks } from '../api'
 import {
+  type GraphLastFormalSyncSummaryV1,
   type GraphCheckpointSourceV1,
   loadGraphCheckpointStateV1,
+  saveGraphLastFormalSyncSummaryV1,
   saveGraphCheckpointStateV1,
 } from '../graph'
 import {
@@ -77,7 +79,7 @@ export const ReadwiseContainer = () => {
   }, [])
 
   useEffect(() => {
-    if (status !== 'syncing') {
+    if (status !== 'fetching' && status !== 'syncing') {
       syncPhaseStartedAtRef.current = null
       return
     }
@@ -88,7 +90,11 @@ export const ReadwiseContainer = () => {
   }, [status, current, total])
 
   useEffect(() => {
-    if (status !== 'syncing' || current <= 0 || total <= current) {
+    if (
+      (status !== 'fetching' && status !== 'syncing') ||
+      current <= 0 ||
+      total <= current
+    ) {
       return
     }
 
@@ -1222,9 +1228,24 @@ export const ReadwiseContainer = () => {
 
     const client = createReadwiseClient(token)
     const syncErrorsForRun: Array<{ book: string; message: string }> = []
+    const runStartedAt = Date.now()
+    let loadStats = {
+      highlightPagesScanned: 0,
+      highlightsScanned: 0,
+      parentDocumentsIdentified: 0,
+      pagesTargeted: 0,
+      pagesProcessed: 0,
+      fetchHighlightsDurationMs: 0,
+      fetchDocumentsDurationMs: 0,
+    }
+    let writePagesDurationMs = 0
+    let createdCount = 0
+    let updatedCount = 0
+    let unchangedCount = 0
+    let renamedCount = 0
 
     try {
-      const previewBooks = await loadReaderPreviewBooks(client, {
+      const previewLoadResult = await loadReaderPreviewBooks(client, {
         maxDocuments: readerPreviewMaxBooksLimit,
         mode: 'full-library-scan',
         onProgress: (progress) => {
@@ -1232,12 +1253,13 @@ export const ReadwiseContainer = () => {
 
           if (progress.phase === 'fetch-highlights') {
             const uniqueParents = progress.uniqueParents ?? 0
+            const totalPages = progress.totalPages ?? progress.pageNumber ?? 0
             setStatus('fetching')
-            setCurrent(0)
-            setTotal(uniqueParents)
+            setCurrent(progress.pageNumber ?? 0)
+            setTotal(totalPages)
             setCurrentBook('')
             setStatusMessage(
-              `${statusPrefix}: ${uniqueParents} parent document(s) identified from ${progress.totalHighlights ?? 0} highlight(s) across ${progress.pageNumber ?? 0} page(s).`,
+              `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`,
             )
             return
           }
@@ -1251,6 +1273,8 @@ export const ReadwiseContainer = () => {
           )
         },
       })
+      const previewBooks = previewLoadResult.books
+      loadStats = previewLoadResult.stats
 
       if (cancelledRef.current) return
 
@@ -1267,17 +1291,19 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         `${statusPrefix}: syncing ${previewBooks.length} Reader page(s) from full-library highlight groups into ${namespacePrefix}...`,
       )
+      const writePagesStartedAt = Date.now()
 
       for (let index = 0; index < previewBooks.length; index += 1) {
         if (cancelledRef.current) return
 
         const previewBook = previewBooks[index]!
         const pageTitle = previewBook.document.title ?? previewBook.document.id
+        loadStats.pagesProcessed += 1
         setCurrent(index + 1)
         setCurrentBook(pageTitle)
 
         try {
-          await syncRenderedReaderPreviewPage(
+          const pageSyncResult = await syncRenderedReaderPreviewPage(
             previewBook,
             namespacePrefix,
             logPrefix,
@@ -1286,13 +1312,55 @@ export const ReadwiseContainer = () => {
                 syncHeaderMode === 'preview'
                   ? `Reader v3 preview synced by [[Readwise]] [[${format(new Date(), 'yyyy-MM-dd')}]]`
                   : undefined,
+              pageResolveMode:
+                syncHeaderMode === 'formal'
+                  ? 'reader_id_then_title'
+                  : 'title_only',
+              identityNamespaceRoot:
+                syncHeaderMode === 'formal'
+                  ? formalNamespaceRoot
+                  : namespacePrefix,
             },
           )
+          if (pageSyncResult.result === 'created') createdCount += 1
+          if (pageSyncResult.result === 'updated') updatedCount += 1
+          if (pageSyncResult.result === 'unchanged') unchangedCount += 1
+          if (pageSyncResult.pageRenamed) renamedCount += 1
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err)
           syncErrorsForRun.push({ book: pageTitle, message })
           setErrors((prev) => [...prev, { book: pageTitle, message }])
         }
+      }
+      writePagesDurationMs = Date.now() - writePagesStartedAt
+
+      if (syncHeaderMode === 'formal') {
+        const summary: GraphLastFormalSyncSummaryV1 = {
+          schemaVersion: 1,
+          runKind: 'reader_full_scan',
+          status: syncErrorsForRun.length > 0 ? 'partial_error' : 'success',
+          completedAt: new Date().toISOString(),
+          highlightPagesScanned: loadStats.highlightPagesScanned,
+          highlightsScanned: loadStats.highlightsScanned,
+          parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+          pagesTargeted: loadStats.pagesTargeted,
+          pagesProcessed: loadStats.pagesProcessed,
+          createdCount,
+          updatedCount,
+          unchangedCount,
+          renamedCount,
+          errorCount: syncErrorsForRun.length,
+          totalDurationMs: Date.now() - runStartedAt,
+          fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+          fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+          writePagesDurationMs,
+          failureSummary:
+            syncErrorsForRun.length > 0
+              ? `${syncErrorsForRun.length} page(s) failed during formal Reader sync.`
+              : null,
+        }
+        await saveGraphLastFormalSyncSummaryV1(summary)
+        console.info(`${logPrefix} saved graph formal sync summary`, summary)
       }
 
       setStatus('completed')
@@ -1307,6 +1375,32 @@ export const ReadwiseContainer = () => {
         errorCount: syncErrorsForRun.length,
       })
     } catch (err: unknown) {
+      if (syncHeaderMode === 'formal') {
+        const message = err instanceof Error ? err.message : String(err)
+        const summary: GraphLastFormalSyncSummaryV1 = {
+          schemaVersion: 1,
+          runKind: 'reader_full_scan',
+          status: 'failed',
+          completedAt: new Date().toISOString(),
+          highlightPagesScanned: loadStats.highlightPagesScanned,
+          highlightsScanned: loadStats.highlightsScanned,
+          parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+          pagesTargeted: loadStats.pagesTargeted,
+          pagesProcessed: loadStats.pagesProcessed,
+          createdCount,
+          updatedCount,
+          unchangedCount,
+          renamedCount,
+          errorCount: syncErrorsForRun.length + 1,
+          totalDurationMs: Date.now() - runStartedAt,
+          fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+          fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+          writePagesDurationMs,
+          failureSummary: message,
+        }
+        await saveGraphLastFormalSyncSummaryV1(summary)
+        console.info(`${logPrefix} saved graph formal sync summary`, summary)
+      }
       console.error(`${logPrefix} sync failed`, err)
       setStatus('error')
       setStatusMessage(
@@ -1426,7 +1520,7 @@ export const ReadwiseContainer = () => {
 
   const progressPct = total > 0 ? Math.round((current / total) * 100) : 0
   const syncElapsedMs =
-    status === 'syncing' &&
+    (status === 'fetching' || status === 'syncing') &&
     current > 0 &&
     total > current &&
     syncPhaseStartedAtRef.current != null
@@ -1508,14 +1602,17 @@ export const ReadwiseContainer = () => {
                 <div
                   className={`rw-progress-bar ${status}`}
                   style={{
-                    width: status === 'fetching' ? '100%' : `${progressPct}%`,
+                    width:
+                      status === 'fetching' && total === 0
+                        ? '100%'
+                        : `${progressPct}%`,
                     opacity: status === 'fetching' ? 0.4 : 1,
                   }}
                 />
               </div>
               <div className="rw-progress-label">
                 {status === 'fetching'
-                  ? `${total} book(s) fetched`
+                  ? `${current} / ${total} (${progressPct}%)${estimatedRemainingMs != null ? ` · ETA ${formatDuration(estimatedRemainingMs)}` : ''}`
                   : `${current} / ${total} (${progressPct}%)${estimatedRemainingMs != null ? ` · ETA ${formatDuration(estimatedRemainingMs)}` : ''}`}
               </div>
             </>

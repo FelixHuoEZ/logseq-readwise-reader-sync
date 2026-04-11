@@ -7,9 +7,26 @@ export interface ReaderPreviewBook {
   highlightCoverage: 'full-library-scan' | 'recent-window'
 }
 
+export interface ReaderPreviewLoadStats {
+  highlightPagesScanned: number
+  highlightsScanned: number
+  parentDocumentsIdentified: number
+  pagesTargeted: number
+  pagesProcessed: number
+  fetchHighlightsDurationMs: number
+  fetchDocumentsDurationMs: number
+}
+
+export interface ReaderPreviewLoadResult {
+  books: ReaderPreviewBook[]
+  stats: ReaderPreviewLoadStats
+}
+
 export interface LoadReaderPreviewBooksProgress {
   phase: 'fetch-highlights' | 'fetch-documents'
   pageNumber?: number
+  totalPages?: number
+  totalResults?: number
   uniqueParents?: number
   totalHighlights?: number
   completed?: number
@@ -36,7 +53,7 @@ const getHighlightText = (document: ReaderDocument) =>
 export const loadReaderPreviewBooks = async (
   client: ReadwiseClient,
   options: LoadReaderPreviewBooksOptions = {},
-): Promise<ReaderPreviewBook[]> => {
+): Promise<ReaderPreviewLoadResult> => {
   const mode = options.mode ?? 'full-library-scan'
   const maxDocuments =
     typeof options.maxDocuments === 'number' && options.maxDocuments > 0
@@ -54,6 +71,9 @@ export const loadReaderPreviewBooks = async (
   let totalHighlights = 0
   let pageNumber = 0
   let pageCursor: string | undefined
+  let initialTotalPages: number | null = null
+  let initialTotalResults: number | null = null
+  const fetchHighlightsStartedAt = Date.now()
 
   while (true) {
     if (mode === 'recent-window' && pageNumber >= maxHighlightPages) {
@@ -66,6 +86,17 @@ export const loadReaderPreviewBooks = async (
       limit: 100,
       pageCursor,
     })
+
+    if (initialTotalPages == null) {
+      initialTotalPages =
+        typeof response.count === 'number' && response.count > 0
+          ? Math.ceil(response.count / 100)
+          : null
+      initialTotalResults =
+        typeof response.count === 'number' && response.count > 0
+          ? response.count
+          : null
+    }
 
     for (const highlight of response.results) {
       const parentId =
@@ -98,6 +129,8 @@ export const loadReaderPreviewBooks = async (
     options.onProgress?.({
       phase: 'fetch-highlights',
       pageNumber,
+      totalPages: Math.max(initialTotalPages ?? 0, pageNumber) || undefined,
+      totalResults: initialTotalResults ?? undefined,
       uniqueParents: targetParentIds.length,
       totalHighlights,
     })
@@ -111,6 +144,8 @@ export const loadReaderPreviewBooks = async (
 
     pageCursor = response.nextPageCursor
   }
+
+  const fetchHighlightsDurationMs = Date.now() - fetchHighlightsStartedAt
 
   const previewBooks: ReaderPreviewBook[] = []
   const selectedParentIds =
@@ -126,6 +161,7 @@ export const loadReaderPreviewBooks = async (
           })
           .slice(0, maxDocuments)
       : targetParentIds.slice(0, maxDocuments)
+  const fetchDocumentsStartedAt = Date.now()
 
   for (let index = 0; index < selectedParentIds.length; index += 1) {
     const parentId = selectedParentIds[index]!
@@ -153,5 +189,16 @@ export const loadReaderPreviewBooks = async (
     })
   }
 
-  return previewBooks
+  return {
+    books: previewBooks,
+    stats: {
+      highlightPagesScanned: pageNumber,
+      highlightsScanned: totalHighlights,
+      parentDocumentsIdentified: targetParentIds.length,
+      pagesTargeted: selectedParentIds.length,
+      pagesProcessed: previewBooks.length,
+      fetchHighlightsDurationMs,
+      fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
+    },
+  }
 }

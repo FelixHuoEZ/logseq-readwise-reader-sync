@@ -47,6 +47,7 @@ export const normalizeBookExport = (
     documentNote: book.document_note,
     summary: book.summary,
     publishedDate: null,
+    savedDate: null,
     updatedAt: pickMostRecentTimestamp(book),
     highlights: highlights.map((highlight) =>
       normalizeHighlight(book.user_book_id, highlight),

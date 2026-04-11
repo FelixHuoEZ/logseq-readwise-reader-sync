@@ -52,6 +52,7 @@ const emitMetadataText = (page: SemanticPage) => {
   const tags = getMetadataValue(page, 'TAGS')
   const date = getMetadataValue(page, 'DATE')
   const published = getMetadataValue(page, 'PUBLISHED')
+  const saved = getMetadataValue(page, 'SAVED')
   const reservedKeys = new Set([
     'rw-id',
     'rw-reader-id',
@@ -61,6 +62,7 @@ const emitMetadataText = (page: SemanticPage) => {
     'TAGS',
     'DATE',
     'PUBLISHED',
+    'SAVED',
   ])
   const extraMetadataLines = page.metadata
     .filter((entry) => !reservedKeys.has(entry.key))
@@ -85,6 +87,7 @@ const emitMetadataText = (page: SemanticPage) => {
     emitPropertyLine('TAGS', tags),
     emitPropertyLine('DATE', date, wrapWikiLink),
     emitPropertyLine('PUBLISHED', published, wrapWikiLink),
+    emitPropertyLine('SAVED', saved, wrapWikiLink),
     ...extraMetadataLines,
     ':END:',
     ...noteSection,

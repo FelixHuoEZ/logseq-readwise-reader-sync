@@ -39,6 +39,7 @@ export interface NormalizedBookExport {
   documentNote: string | null
   summary: string | null
   publishedDate: string | null
+  savedDate: string | null
   updatedAt: string
   highlights: NormalizedHighlight[]
 }

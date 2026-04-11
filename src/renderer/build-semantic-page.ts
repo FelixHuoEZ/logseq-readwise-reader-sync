@@ -37,6 +37,7 @@ const buildMetadataEntries = (
     },
     { key: 'DATE', value: toYmd(runtime.syncDate) },
     { key: 'PUBLISHED', value: toYmd(book.publishedDate) },
+    { key: 'SAVED', value: toYmd(book.savedDate) },
   ]
 }
 

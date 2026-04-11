@@ -1,3 +1,4 @@
+import type { PageEntity } from '@logseq/libs/dist/LSPlugin'
 import './ReadwiseContainer.css'
 
 import { useEffect, useRef, useState } from 'react'
@@ -265,6 +266,96 @@ export const ReadwiseContainer = () => {
   const uniqueStrings = (values: string[]) =>
     values.filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
 
+  const normalizePropertyKey = (value: string): string =>
+    value.toLowerCase().replace(/[^a-z0-9]/g, '')
+
+  const readPropertyValue = (
+    properties: Record<string, unknown> | undefined,
+    expectedKey: string,
+  ): unknown => {
+    if (!properties) return null
+
+    const normalizedExpected = normalizePropertyKey(expectedKey)
+
+    for (const [key, value] of Object.entries(properties)) {
+      if (normalizePropertyKey(key) === normalizedExpected) {
+        return value
+      }
+    }
+
+    return null
+  }
+
+  const extractStringValue = (value: unknown): string | null => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim()
+      return trimmed.length > 0 ? trimmed : null
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value)
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const extracted = extractStringValue(item)
+        if (extracted) return extracted
+      }
+    }
+
+    return null
+  }
+
+  const sortReaderDocumentsByCreatedAtAscending = (
+    left: { created_at: string },
+    right: { created_at: string },
+  ) => left.created_at.localeCompare(right.created_at)
+
+  const isManagedFormalPageName = (pageName: string) =>
+    pageName === formalNamespaceRoot || pageName.startsWith(`${formalNamespaceRoot}/`)
+
+  const resolveCurrentManagedReaderPage = async (): Promise<{
+    page: PageEntity
+    pageName: string
+    readerDocumentId: string
+  }> => {
+    const currentPage = await logseq.Editor.getCurrentPage()
+    if (!currentPage) {
+      throw new Error('No current page is open.')
+    }
+
+    const pageName = uniqueStrings([
+      typeof currentPage.originalName === 'string' ? currentPage.originalName : '',
+      typeof currentPage.title === 'string' ? currentPage.title : '',
+      typeof currentPage.name === 'string' ? currentPage.name : '',
+    ])[0]
+
+    if (!pageName) {
+      throw new Error('Failed to resolve the current page name.')
+    }
+
+    if (!isManagedFormalPageName(pageName)) {
+      throw new Error(`Current page is not a managed ${formalNamespaceRoot} page.`)
+    }
+
+    const readerDocumentId = extractStringValue(
+      readPropertyValue(
+        currentPage.properties as Record<string, unknown> | undefined,
+        'rw-reader-id',
+      ),
+    )
+
+    if (!readerDocumentId) {
+      throw new Error('Current page does not contain rw-reader-id.')
+    }
+
+    return {
+      page: currentPage as PageEntity,
+      pageName,
+      readerDocumentId,
+    }
+  }
+
   const resolveCurrentPageNameForExternalDiff = async () => {
     const currentPage = await logseq.Editor.getCurrentPage()
     if (!currentPage) {
@@ -380,8 +471,8 @@ export const ReadwiseContainer = () => {
     setPropsReady(true)
     setStatusMessage(
       result.compatibilityMode
-        ? 'Setup completed in compatibility mode. Start Sync is available now.'
-        : 'Schema setup completed. Start Sync is available now.',
+        ? 'Setup completed in compatibility mode. Incremental Sync is available now.'
+        : 'Schema setup completed. Incremental Sync is available now.',
     )
   }
 
@@ -397,6 +488,59 @@ export const ReadwiseContainer = () => {
     new Promise<void>((resolve) => {
       window.setTimeout(resolve, ms)
     })
+
+  const isRetriableReaderListError = (error: unknown) => {
+    const message = describeUnknownError(error)
+
+    return (
+      error instanceof TypeError ||
+      /Failed to fetch|NetworkError|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_NETWORK_CHANGED|ERR_INTERNET_DISCONNECTED|fetch/i.test(
+        message,
+      )
+    )
+  }
+
+  const loadReaderParentDocumentByIdWithRetry = async (
+    client: ReturnType<typeof createReadwiseClient>,
+    parentId: string,
+    logPrefix: string,
+  ) => {
+    let lastError: unknown = null
+    const totalAttempts = 3
+
+    for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+      try {
+        const response = await client.listReaderDocuments({
+          id: parentId,
+          limit: 1,
+        })
+        return response.results[0] ?? null
+      } catch (error) {
+        lastError = error
+
+        if (!isRetriableReaderListError(error) || attempt === totalAttempts - 1) {
+          break
+        }
+
+        logReadwiseWarn(
+          logPrefix,
+          'current page parent metadata fetch failed; retrying',
+          {
+            parentId,
+            attempt: attempt + 1,
+            totalAttempts,
+            formattedError: describeUnknownError(error),
+          },
+        )
+
+        await sleep(1000 * (attempt + 1))
+      }
+    }
+
+    throw new Error(
+      `Reader parent document fetch for ${parentId} failed after ${totalAttempts} attempt(s). ${describeUnknownError(lastError)}`,
+    )
+  }
 
   const formatDuration = (milliseconds: number) => {
     const totalSeconds = Math.max(0, Math.round(milliseconds / 1000))
@@ -1351,7 +1495,7 @@ export const ReadwiseContainer = () => {
         conflicts.flatMap((conflict) =>
           conflict.pages.slice(0, 3).map((page) => ({
             book: page.pageTitle,
-            message: `Formal sync blocked until ${conflict.label} pages are cleared via ${conflict.clearAction}.`,
+            message: `Incremental sync blocked until ${conflict.label} pages are cleared via ${conflict.clearAction}.`,
           })),
         ),
       )
@@ -1360,7 +1504,7 @@ export const ReadwiseContainer = () => {
       setTotal(0)
       setCurrentBook('')
       setStatusMessage(
-        `Formal sync blocked to avoid duplicate block UUIDs. ${summary}.`,
+        `Incremental sync blocked to avoid duplicate block UUIDs. ${summary}.`,
       )
       return
     }
@@ -1368,7 +1512,7 @@ export const ReadwiseContainer = () => {
     await runReaderManagedSync({
       namespacePrefix: formalNamespaceRoot,
       logPrefix: formalSyncLogPrefix,
-      statusPrefix: 'Formal sync',
+      statusPrefix: 'Incremental sync',
       syncHeaderMode: 'formal',
       mode: 'incremental-window',
     })
@@ -1415,7 +1559,7 @@ export const ReadwiseContainer = () => {
         conflicts.flatMap((conflict) =>
           conflict.pages.slice(0, 3).map((page) => ({
             book: page.pageTitle,
-            message: `Full reconcile blocked until ${conflict.label} pages are cleared via ${conflict.clearAction}.`,
+            message: `Full refresh blocked until ${conflict.label} pages are cleared via ${conflict.clearAction}.`,
           })),
         ),
       )
@@ -1424,7 +1568,7 @@ export const ReadwiseContainer = () => {
       setTotal(0)
       setCurrentBook('')
       setStatusMessage(
-        `Full reconcile blocked to avoid duplicate block UUIDs. ${summary}.`,
+        `Full refresh blocked to avoid duplicate block UUIDs. ${summary}.`,
       )
       return
     }
@@ -1432,9 +1576,146 @@ export const ReadwiseContainer = () => {
     await runReaderManagedSync({
       namespacePrefix: formalNamespaceRoot,
       logPrefix: formalSyncLogPrefix,
-      statusPrefix: 'Full reconcile',
+      statusPrefix: 'Full refresh',
       syncHeaderMode: 'formal',
       mode: 'full-library-scan',
+    })
+  }
+
+  const runCurrentPageReaderAction = async ({
+    action,
+    statusPrefix,
+  }: {
+    action: 'rebuild-from-cache' | 'refresh-metadata'
+    statusPrefix: string
+  }) => {
+    const token = logseq.settings?.apiToken as string
+    if (!token) {
+      setStatus('error')
+      setStatusMessage('No API token configured. Set it in plugin settings.')
+      return
+    }
+
+    cancelledRef.current = false
+    retryActionRef.current = {
+      kind: 'formal',
+      label: statusPrefix,
+      run: () => runCurrentPageReaderAction({ action, statusPrefix }),
+    }
+    setErrors([])
+    setPageDiffResult(null)
+    setCurrent(0)
+    setTotal(1)
+    setCurrentBook('')
+    setStatus('fetching')
+    setStatusMessage(`${statusPrefix}: resolving the current managed page...`)
+
+    try {
+      const graphContext = await loadCurrentGraphContextV1()
+      const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
+      const client = createReadwiseClient(token)
+      const currentManagedPage = await resolveCurrentManagedReaderPage()
+      const { pageName, readerDocumentId } = currentManagedPage
+
+      beginReaderSyncEtaPhase('fetch-highlights', 'cached highlight snapshot')
+      setCurrentBook(pageName)
+      setStatusMessage(
+        `${statusPrefix}: loading cached highlights for ${pageName}...`,
+      )
+      const highlightsByParent = await previewCache.loadGroupedHighlightsByParent([
+        readerDocumentId,
+      ])
+      const highlights = [
+        ...(highlightsByParent.get(readerDocumentId) ?? []),
+      ].sort(sortReaderDocumentsByCreatedAtAscending)
+      setCurrent(1)
+      updateReaderSyncEta('fetch-highlights', 'cached highlight snapshot', 1, 1)
+
+      if (highlights.length === 0) {
+        throw new Error(
+          'No cached highlights were found for the current page. Run Full Refresh first.',
+        )
+      }
+
+      beginReaderSyncEtaPhase('fetch-documents', 'parent document fetch')
+      setCurrent(0)
+      setStatusMessage(
+        action === 'refresh-metadata'
+          ? `${statusPrefix}: refreshing parent metadata for ${pageName}...`
+          : `${statusPrefix}: resolving parent metadata for ${pageName}...`,
+      )
+
+      let document =
+        action === 'rebuild-from-cache'
+          ? (await previewCache.getCachedParentDocuments([readerDocumentId])).get(
+              readerDocumentId,
+            ) ?? null
+          : null
+
+      if (!document) {
+        document = await loadReaderParentDocumentByIdWithRetry(
+          client,
+          readerDocumentId,
+          formalSyncLogPrefix,
+        )
+
+        if (!document) {
+          throw new Error(
+            `Readwise did not return a parent document for rw-reader-id=${readerDocumentId}.`,
+          )
+        }
+
+        await previewCache.putParentDocuments([document])
+      }
+
+      setCurrent(1)
+      updateReaderSyncEta('fetch-documents', 'parent document fetch', 1, 1)
+
+      beginReaderSyncEtaPhase('write-pages', 'page writes')
+      setStatus('syncing')
+      setCurrent(0)
+      setStatusMessage(`${statusPrefix}: rebuilding ${pageName}...`)
+
+      const pageSyncResult = await syncRenderedReaderPreviewPage(
+        {
+          document,
+          highlights,
+          highlightCoverage: 'cached-full-rebuild',
+        },
+        formalNamespaceRoot,
+        formalSyncLogPrefix,
+        {
+          pageResolveMode: 'reader_id_then_title',
+          identityNamespaceRoot: formalNamespaceRoot,
+        },
+      )
+
+      setCurrent(1)
+      updateReaderSyncEta('write-pages', 'page writes', 1, 1)
+      setStatus('completed')
+      setStatusMessage(
+        pageSyncResult.pageRenamed
+          ? `${statusPrefix}: rebuilt ${pageSyncResult.pageName} and renamed it from ${pageSyncResult.previousPageName}.`
+          : `${statusPrefix}: rebuilt ${pageSyncResult.pageName}.`,
+      )
+    } catch (err: unknown) {
+      logReadwiseError(formalSyncLogPrefix, 'current page Reader action failed', err)
+      setStatus('error')
+      setStatusMessage(`${statusPrefix} failed: ${describeUnknownError(err)}`)
+    }
+  }
+
+  const handleRebuildCurrentPageFromCache = async () => {
+    await runCurrentPageReaderAction({
+      action: 'rebuild-from-cache',
+      statusPrefix: 'Rebuild current page from cache',
+    })
+  }
+
+  const handleRefreshCurrentPageMetadata = async () => {
+    await runCurrentPageReaderAction({
+      action: 'refresh-metadata',
+      statusPrefix: 'Refresh current page metadata',
     })
   }
 
@@ -1929,7 +2210,7 @@ export const ReadwiseContainer = () => {
 
       const staleDeletionSuffix =
         mode === 'cached-full-rebuild' && loadStats.staleHighlightDeletionRisk
-          ? ' Cached snapshot may still include deleted highlights until Full Reconcile runs again.'
+          ? ' Cached snapshot may still include deleted highlights until Full Refresh runs again.'
           : ''
       const incompleteSnapshotSuffix =
         mode === 'full-library-scan' && !loadStats.completeHighlightSnapshotRefreshed
@@ -2189,7 +2470,7 @@ export const ReadwiseContainer = () => {
     resolveConfiguredReaderDebugHighlightPageLimit() ?? 0
   const sessionTestSyncCount =
     activeFormalTestSessionCount ?? configuredSyncMaxBooks
-  const sessionTestSyncLabel = `Start Sync (session test: ${sessionTestSyncCount})`
+  const sessionTestSyncLabel = `Incremental Sync (session test: ${sessionTestSyncCount})`
   const statusLabel =
     status === 'completed' && errors.length > 0
       ? 'warning'
@@ -2206,8 +2487,8 @@ export const ReadwiseContainer = () => {
           : status === 'completed' && errors.length > 0
             ? 'Completed with issues'
             : status === 'completed'
-              ? 'Formal sync completed'
-              : 'Formal sync stopped'
+              ? 'Reader sync completed'
+              : 'Reader sync stopped'
   const statusPhaseLabel =
     etaSnapshot?.label ??
     (status === 'fetching'
@@ -2224,11 +2505,11 @@ export const ReadwiseContainer = () => {
         ? 'Scanning Reader highlight pages and grouping by parent document.'
         : ''
   const formalSyncScopeLabel =
-    'Default: incremental sync · Manual full reconcile and cached rebuild available'
+    'Global sync plus current-page maintenance for managed Reader pages'
   const highlightScanDetailLabel =
     configuredReaderDebugHighlightPageLimit > 0
-      ? `Debug cap active for any remote Reader highlight scan. Roughly 100 highlights per page; Full Reconcile stays intentionally incomplete while the cap is on, and a truncated run will not refresh the local cached snapshot.`
-      : 'No debug cap. Start Sync scans changed Reader highlights only; Full Reconcile scans the full Reader highlight library; Cached Rebuild skips remote highlight scan and reuses the local snapshot.'
+      ? `Debug cap active for any remote Reader highlight scan. Roughly 100 highlights per page; Full Refresh stays intentionally incomplete while the cap is on, and a truncated run will not refresh the local cached snapshot.`
+      : 'No debug cap. Incremental Sync scans changed Reader highlights only; Full Refresh scans the full Reader highlight library.'
   const progressLabel =
     total > 0
       ? `${current} / ${total} (${progressPct}%)${etaSuffix}`
@@ -2300,7 +2581,7 @@ export const ReadwiseContainer = () => {
       <div className="rw-card">
         <div className="rw-header">
           <div className="rw-header-copy">
-            <div className="rw-kicker">Reader v3 managed sync</div>
+            <div className="rw-kicker">Reader sync modes</div>
             <h2>Readwise Reader Sync</h2>
             <div className="rw-header-subtitle">{formalSyncScopeLabel}</div>
           </div>
@@ -2309,7 +2590,7 @@ export const ReadwiseContainer = () => {
             <span className="rw-scope-chip">
               {configuredReaderDebugHighlightPageLimit > 0
                 ? 'debug scope'
-                : 'incremental default'}
+                : 'global sync'}
             </span>
           </div>
         </div>
@@ -2332,8 +2613,8 @@ export const ReadwiseContainer = () => {
               </div>
               <div className="rw-summary-note">
                 {configuredReaderTargetDocuments == null
-                  ? 'Full Reconcile and Cached Rebuild write every matched parent document in this run.'
-                  : 'Full Reconcile and Cached Rebuild target pages per run.'}
+                  ? 'Full Refresh writes every matched parent document in this run.'
+                  : 'Full Refresh targets this many managed pages per run.'}
               </div>
             </div>
             <div className="rw-summary-card">
@@ -2509,40 +2790,60 @@ export const ReadwiseContainer = () => {
             <div className="rw-action-groups">
               <div className="rw-action-group">
                 <div className="rw-action-group-label">
-                  Formal Sync
+                  Global Sync
                 </div>
                 <div className="rw-action-row">
                   <button className="rw-btn rw-btn-primary" onClick={handleSync}>
-                    Start Sync
-                  </button>
-                  <button className="rw-btn" onClick={handleCachedFullRebuild}>
-                    Cached Rebuild
+                    Incremental Sync
                   </button>
                   <button className="rw-btn" onClick={handleFullReconcile}>
-                    Full Reconcile
+                    Full Refresh
                   </button>
                   <button className="rw-btn" onClick={handleClose}>
                     Close
                   </button>
                 </div>
                 <div className="rw-action-note">
-                  Start Sync uses Reader v3 incremental highlight updates,
-                  groups by `parent_id`, then rewrites managed pages in
+                  Incremental Sync pulls changed Reader highlights, refreshes
+                  parent metadata for matched documents, and rewrites managed
+                  pages in
                   `ReadwiseHighlights/&lt;title&gt;`.
                 </div>
                 <div className="rw-action-note">
-                  Cached Rebuild reuses the local highlight snapshot, skips the
-                  remote highlight scan, then refreshes parent metadata before
-                  rewriting the cached parent pages selected for this run. It
-                  may still include
-                  deleted highlights until Full Reconcile runs again.
+                  Full Refresh rescans the full Reader highlight library,
+                  refreshes parent metadata, and replaces the local full-library
+                  snapshot used for future rebuilds and deletion calibration.
                 </div>
                 <div className="rw-action-note">
-                  Full Reconcile uses the Debug settings. Lower "Reader Full
+                  Full Refresh uses the Debug settings. Lower "Reader Full
                   Scan Target Documents" and set "Reader Full Scan Debug
                   Highlight Page Limit" for short test runs. Set both back to 0
-                  if you want a true all-documents full reconcile. A truncated
+                  if you want a true all-documents full refresh. A truncated
                   highlight scan does not refresh the local cached snapshot.
+                </div>
+              </div>
+
+              <div className="rw-action-group">
+                <div className="rw-action-group-label">
+                  Current Page
+                </div>
+                <div className="rw-action-row">
+                  <button className="rw-btn" onClick={handleRebuildCurrentPageFromCache}>
+                    Rebuild Current Page From Cache
+                  </button>
+                  <button className="rw-btn" onClick={handleRefreshCurrentPageMetadata}>
+                    Refresh Current Page Metadata
+                  </button>
+                </div>
+                <div className="rw-action-note">
+                  Rebuild Current Page From Cache uses `rw-reader-id`, reads the
+                  cached highlight snapshot for that parent, and rewrites only
+                  the current managed page.
+                </div>
+                <div className="rw-action-note">
+                  Refresh Current Page Metadata re-fetches the current page's
+                  parent metadata from Reader, combines it with cached
+                  highlights, and rewrites only the current managed page.
                 </div>
               </div>
 
@@ -2564,6 +2865,9 @@ export const ReadwiseContainer = () => {
                       </button>
                       <button className="rw-btn" onClick={handleClearSessionTestPages}>
                         Clear Session Test Pages
+                      </button>
+                      <button className="rw-btn" onClick={handleCachedFullRebuild}>
+                        Cached Rebuild (All Pages)
                       </button>
                       {showAdvancedFormalTestActions && (
                         <button className="rw-btn" onClick={handleClearFormalTestPages}>

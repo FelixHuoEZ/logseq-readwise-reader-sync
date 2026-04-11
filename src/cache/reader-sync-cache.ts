@@ -23,7 +23,9 @@ export interface GraphReaderSyncCacheV1 {
     parentIds: string[],
   ): Promise<Map<string, ReaderDocument>>
   putParentDocuments(documents: ReaderDocument[]): Promise<void>
-  loadGroupedHighlightsByParent(): Promise<Map<string, ReaderDocument[]>>
+  loadGroupedHighlightsByParent(
+    parentIds?: readonly string[],
+  ): Promise<Map<string, ReaderDocument[]>>
   replaceHighlightsFromFullScan(
     highlights: ReaderDocument[],
     latestHighlightUpdatedAt: string | null,

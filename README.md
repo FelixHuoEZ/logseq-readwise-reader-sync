@@ -15,8 +15,8 @@ This fork is published as an independent plugin release line. If it is published
 ## Features
 
 - Reader v3 incremental sync with explicit progress, ETA, and structured logging
-- Manual `Cached Rebuild` using the local Reader highlight snapshot
-- Manual `Full Reconcile` for whole-library rebuilds
+- Manual `Full Refresh` for whole-library rebuilds
+- Current-page tools for `Rebuild Current Page From Cache` and `Refresh Current Page Metadata`
 - Managed page identity tracking through `rw-reader-id`
 - Automatic page retargeting when a managed page title changes
 - Hidden maintenance tools for debug, preview, and recovery flows
@@ -25,7 +25,7 @@ This fork is published as an independent plugin release line. If it is published
 
 ## Known Tradeoff
 
-`Start Sync` uses the saved Reader cursor and only scans changed highlights. `Cached Rebuild` reuses the local highlight snapshot, which can still contain deleted highlights until `Full Reconcile` refreshes it. `Full Reconcile` still scans the full Reader highlight library and can take minutes on large libraries. If a debug highlight-page cap truncates that scan, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
+`Incremental Sync` uses the saved Reader cursor and only scans changed highlights. `Full Refresh` still scans the full Reader highlight library and can take minutes on large libraries. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates `Full Refresh`, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
 
 ## Install From Release
 
@@ -49,11 +49,11 @@ Do not run this fork and another Readwise Logseq plugin against the same graph a
 ## Use
 
 1. Open the plugin panel.
-2. Click `Start Sync` for the normal incremental path.
-3. Use `Cached Rebuild` when you want to rewrite all cached pages without another remote highlight scan.
-4. Use `Full Reconcile` when you need a fresh whole-library rebuild.
-   - `Cached Rebuild` is only as complete as the latest uncapped `Full Reconcile`.
-5. Wait for the plugin to:
+2. Click `Incremental Sync` for the normal day-to-day path.
+3. Use `Full Refresh` when you need a fresh whole-library rebuild.
+4. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
+5. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
+6. Wait for the plugin to:
    - scan Reader highlights or load the cached highlight snapshot
    - group them by parent document
    - fetch the target parent documents
@@ -80,13 +80,13 @@ The panel hides maintenance tools during normal use. They appear when formal syn
 Debug settings affect different phases:
 
 - `Reader Full Scan Target Documents`
-  - limits how many managed pages `Full Reconcile` and `Cached Rebuild` rewrite
+  - limits how many managed pages `Full Refresh` rewrites
   - mainly reduces parent-document fetch and page-write time
 - `Reader Full Scan Debug Highlight Page Limit`
-  - limits how many Reader highlight pages `Start Sync` and `Full Reconcile` scan
+  - limits how many Reader highlight pages `Incremental Sync` and `Full Refresh` scan
   - mainly reduces highlight-scan time
   - roughly `100` highlights per page
-  - if it truncates `Full Reconcile`, the local cached highlight snapshot is not refreshed
+  - if it truncates `Full Refresh`, the local cached highlight snapshot is not refreshed
 
 Use the highlight page limit only for short debug runs. Set it back to `0` for real formal sync.
 

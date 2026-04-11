@@ -31,7 +31,7 @@ export const settingsSchema: SettingSchemaDesc[] = [
     type: 'number',
     title: 'Reader Full Scan Target Documents',
     description:
-      'How many managed Reader documents Full Reconcile should write. Default 20. Set 0 to sync all matched documents. Normally leave unchanged.',
+      'How many managed Reader documents Full Refresh should write. Default 20. Set 0 to sync all matched documents. Normally leave unchanged.',
     default: 20,
   },
   {

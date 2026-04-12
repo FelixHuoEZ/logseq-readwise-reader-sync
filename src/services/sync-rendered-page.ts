@@ -13,6 +13,7 @@ import {
 } from './resolve-managed-reader-page'
 import {
   createManagedPageV1,
+  ensureManagedPageFileContentV1,
   writeSingleRootPageContentV1,
 } from './single-root-page-content'
 import { syncManagedPagePropertiesV1 } from './sync-managed-page-properties'
@@ -128,6 +129,9 @@ export const syncRenderedPage = async (
     content,
     logPrefix,
   )
+  if (repairedPage.rebuilt && writeResult !== 'unchanged') {
+    await ensureManagedPageFileContentV1(page, pageName, content, logPrefix)
+  }
   const result =
     repairedPage.rebuilt && writeResult === 'created' ? 'updated' : writeResult
 

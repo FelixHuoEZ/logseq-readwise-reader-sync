@@ -14,6 +14,9 @@ const READWISE_HIGHLIGHT_URL_IN_BLOCK_PATTERN =
   /\[\[(https:\/\/read\.readwise\.io\/read\/[0-9a-z]+)\]\[View Highlight\]\]/i
 const READWISE_HIGHLIGHT_URL_GLOBAL_PATTERN =
   /\[\[(https:\/\/read\.readwise\.io\/read\/[0-9a-z]+)\]\[View Highlight\]\]/gi
+const READWISE_SYNC_HEADER_PATTERN =
+  /^\* Highlights (?:first synced|refreshed) by \[\[Readwise\]\]/m
+const READWISE_HIGHLIGHT_BLOCK_START_PATTERN = /^\*\* /m
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
@@ -86,6 +89,21 @@ export const collectManagedPageAliasesV1 = (page: PageEntity): string[] =>
     typeof page.name === 'string' ? page.name : '',
   ])
 
+export const resolveManagedPageFilePathV1 = async (
+  page: PageEntity,
+): Promise<string | null> => {
+  const aliases = collectManagedPageAliasesV1(page)
+  return (
+    (page.file &&
+    typeof page.file === 'object' &&
+    'path' in page.file &&
+    typeof page.file.path === 'string' &&
+    page.file.path.length > 0
+      ? page.file.path
+      : null) ?? (await resolveManagedPageFilePathViaQueryV1(page, aliases))
+  )
+}
+
 const resolveManagedPageFilePathViaQueryV1 = async (
   page: PageEntity,
   aliases: string[],
@@ -123,15 +141,7 @@ const resolveManagedPageFilePathViaQueryV1 = async (
 const loadManagedPageSourceContentV1 = async (
   page: PageEntity,
 ): Promise<string | null> => {
-  const aliases = collectManagedPageAliasesV1(page)
-  const relativeFilePath =
-    (page.file &&
-    typeof page.file === 'object' &&
-    'path' in page.file &&
-    typeof page.file.path === 'string' &&
-    page.file.path.length > 0
-      ? page.file.path
-      : null) ?? (await resolveManagedPageFilePathViaQueryV1(page, aliases))
+  const relativeFilePath = await resolveManagedPageFilePathV1(page)
 
   if (!relativeFilePath) return null
 
@@ -153,10 +163,28 @@ const loadManagedPageSourceContentV1 = async (
   }
 }
 
+const extractPageLevelPreludeV1 = (rootContent: string) => {
+  const lines = rootContent.split('\n')
+  const prelude: string[] = []
+
+  for (const line of lines) {
+    if (
+      READWISE_SYNC_HEADER_PATTERN.test(line) ||
+      READWISE_HIGHLIGHT_BLOCK_START_PATTERN.test(line)
+    ) {
+      break
+    }
+    prelude.push(line)
+  }
+
+  return prelude.join('\n')
+}
+
 export const detectLegacyManagedPageRepairSignaturesV1 = (rootContent: string) => {
   const signatures: string[] = []
-  const propertiesBlocks = (rootContent.match(/^:PROPERTIES:$/gm) ?? []).length
-  const noteBlocks = (rootContent.match(/^#\+BEGIN_NOTE$/gm) ?? []).length
+  const pagePrelude = extractPageLevelPreludeV1(rootContent)
+  const propertiesBlocks = (pagePrelude.match(/^:PROPERTIES:$/gm) ?? []).length
+  const noteBlocks = (pagePrelude.match(/^#\+BEGIN_NOTE$/gm) ?? []).length
   const syncHeaders = (
     rootContent.match(/^\* Highlights (?:first synced|refreshed) by \[\[Readwise\]\]/gm) ??
     []

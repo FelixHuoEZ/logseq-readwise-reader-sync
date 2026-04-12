@@ -1,5 +1,6 @@
 import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
 import { logReadwiseDebug } from '../logging'
+import { resolveManagedPageFilePathV1 } from './managed-page-integrity'
 import { assertManagedPageFileNameWithinLimits } from './readwise-page-names'
 
 const delay = async (ms: number) =>
@@ -146,6 +147,45 @@ export const writeSingleRootPageContentV1 = async (
   }
 
   return 'updated'
+}
+
+export const ensureManagedPageFileContentV1 = async (
+  page: PageEntity,
+  pageName: string,
+  content: string,
+  logPrefix = '[Readwise Sync]',
+) => {
+  const relativeFilePath = await resolveManagedPageFilePathV1(page)
+  if (!relativeFilePath) return
+
+  await delay(300)
+
+  let currentContent: string | null = null
+  try {
+    const nextContent = await logseq.DB.getFileContent(relativeFilePath)
+    currentContent = typeof nextContent === 'string' ? nextContent : null
+  } catch {
+    currentContent = null
+  }
+
+  if (currentContent === content) {
+    return
+  }
+
+  logReadwiseDebug(logPrefix, 'forcing exact managed page file rewrite', {
+    pageName,
+    relativeFilePath,
+    currentLength: currentContent?.length ?? null,
+    expectedLength: content.length,
+  })
+
+  await logseq.DB.setFileContent(relativeFilePath, content)
+  await delay(400)
+
+  const confirmedContent = await logseq.DB.getFileContent(relativeFilePath)
+  if (confirmedContent !== content) {
+    throw new Error(`Failed to stabilize managed page file content for "${pageName}"`)
+  }
 }
 
 export const upsertSingleRootPageContentV1 = async (

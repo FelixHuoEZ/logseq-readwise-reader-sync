@@ -19,9 +19,12 @@ import {
   type GraphReaderSyncStateV1,
   loadGraphCheckpointStateV1,
   loadCurrentGraphContextV1,
+  loadGraphReaderRetryFallbackEntriesV1,
   loadGraphReaderSyncStateV1,
+  removeGraphReaderRetryFallbackEntriesV1,
   saveGraphLastFormalSyncSummaryV1,
   saveGraphCheckpointStateV1,
+  saveGraphReaderRetryFallbackEntriesV1,
   saveGraphReaderSyncStateV1,
 } from '../graph'
 import {
@@ -2750,6 +2753,24 @@ export const ReadwiseContainer = () => {
           formattedError: describeUnknownError(error),
         })
       }
+
+      try {
+        const graphFallbackEntries = await loadGraphReaderRetryFallbackEntriesV1()
+
+        for (const entry of graphFallbackEntries) {
+          if (!queuedRetryEntriesByDocumentId.has(entry.readerDocumentId)) {
+            queuedRetryEntriesByDocumentId.set(entry.readerDocumentId, entry)
+          }
+        }
+      } catch (error) {
+        logReadwiseWarn(
+          logPrefix,
+          'failed to load graph fallback Reader retry pages',
+          {
+            formattedError: describeUnknownError(error),
+          },
+        )
+      }
     }
 
     try {
@@ -3147,6 +3168,21 @@ export const ReadwiseContainer = () => {
               },
             )
           }
+
+          try {
+            await removeGraphReaderRetryFallbackEntriesV1([
+              ...resolvedRetryReaderDocumentIds,
+            ])
+          } catch (error) {
+            logReadwiseWarn(
+              logPrefix,
+              'failed to clear resolved Reader retry pages from graph fallback page',
+              {
+                resolvedRetryReaderDocumentIds: [...resolvedRetryReaderDocumentIds],
+                formattedError: describeUnknownError(error),
+              },
+            )
+          }
         }
 
         if (queuedRetryEntriesToUpsert.size > 0) {
@@ -3154,11 +3190,27 @@ export const ReadwiseContainer = () => {
             await previewCache.queueRetryPages([
               ...queuedRetryEntriesToUpsert.values(),
             ])
+
+            try {
+              await removeGraphReaderRetryFallbackEntriesV1([
+                ...queuedRetryEntriesToUpsert.keys(),
+              ])
+            } catch (error) {
+              logReadwiseWarn(
+                logPrefix,
+                'failed to clear queued Reader retry pages from graph fallback page after IndexedDB persistence',
+                {
+                  queuedRetryReaderDocumentIds: [
+                    ...queuedRetryEntriesToUpsert.keys(),
+                  ],
+                  formattedError: describeUnknownError(error),
+                },
+              )
+            }
           } catch (error) {
-            retryQueueUpdateFailed = true
             logReadwiseWarn(
               logPrefix,
-              'failed to persist queued Reader retry pages',
+              'failed to persist queued Reader retry pages in IndexedDB; falling back to graph state page',
               {
                 queuedRetryReaderDocumentIds: [
                   ...queuedRetryEntriesToUpsert.keys(),
@@ -3166,6 +3218,39 @@ export const ReadwiseContainer = () => {
                 formattedError: describeUnknownError(error),
               },
             )
+
+            const fallbackEntriesByDocumentId = new Map<
+              string,
+              ReaderSyncRetryPageEntryV1
+            >()
+
+            for (const [readerDocumentId, entry] of queuedRetryEntriesByDocumentId) {
+              if (!resolvedRetryReaderDocumentIds.has(readerDocumentId)) {
+                fallbackEntriesByDocumentId.set(readerDocumentId, entry)
+              }
+            }
+
+            for (const entry of queuedRetryEntriesToUpsert.values()) {
+              fallbackEntriesByDocumentId.set(entry.readerDocumentId, entry)
+            }
+
+            try {
+              await saveGraphReaderRetryFallbackEntriesV1([
+                ...fallbackEntriesByDocumentId.values(),
+              ])
+            } catch (fallbackError) {
+              retryQueueUpdateFailed = true
+              logReadwiseWarn(
+                logPrefix,
+                'failed to persist queued Reader retry pages to graph fallback page',
+                {
+                  queuedRetryReaderDocumentIds: [
+                    ...fallbackEntriesByDocumentId.keys(),
+                  ],
+                  formattedError: describeUnknownError(fallbackError),
+                },
+              )
+            }
           }
         }
       }

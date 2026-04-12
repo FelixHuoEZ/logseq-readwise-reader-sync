@@ -4,7 +4,11 @@ import { normalizeBookExport } from '../normalizer'
 import { buildPageRenderContext, renderPage } from '../renderer'
 import type { ExportedBook } from '../types'
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
-import { buildFormalManagedPageName } from './readwise-page-names'
+import { buildManagedPageNamePlanV1 } from './readwise-page-names'
+import {
+  renameManagedPageIfNeededV1,
+  resolveManagedReadwisePageV1,
+} from './resolve-managed-reader-page'
 import {
   createManagedPageV1,
   writeSingleRootPageContentV1,
@@ -54,8 +58,31 @@ export const syncRenderedPage = async (
     return
   }
 
-  const pageName = buildFormalManagedPageName(book.title, namespacePrefix)
-  const existingPage = await logseq.Editor.getPage(pageName)
+  const pageNamePlan = buildManagedPageNamePlanV1({
+    pageTitle: book.title,
+    namespacePrefix,
+    managedId: book.user_book_id,
+    format: 'org',
+  })
+  const pageResolution = await resolveManagedReadwisePageV1({
+    readwiseBookId: book.user_book_id,
+    preferredPageName: pageNamePlan.preferredPageName,
+    disambiguatedPageName: pageNamePlan.disambiguatedPageName,
+    namespaceRoot: namespacePrefix,
+  })
+  const resolvedExistingPage = pageResolution.page
+    ? await renameManagedPageIfNeededV1({
+        page: pageResolution.page,
+        expectedPageName: pageResolution.resolvedPageName,
+        logPrefix,
+      })
+    : {
+        page: null,
+        renamed: false,
+        previousPageName: null,
+      }
+  const pageName = pageResolution.resolvedPageName
+  const existingPage = resolvedExistingPage.page
   const normalizedBook = normalizeBookExport(book, { readerDocumentUrl })
   const startedAt = new Date()
   const renderRuntime = {
@@ -87,6 +114,9 @@ export const syncRenderedPage = async (
   console.info(`${logPrefix} synced rendered page`, {
     userBookId: book.user_book_id,
     pageName,
+    pageMatchKind: pageResolution.matchKind,
+    pageRenamed: resolvedExistingPage.renamed,
+    previousPageName: resolvedExistingPage.previousPageName,
     result,
     renderHash: renderedPage.renderHash,
     isNewPage: renderRuntime.isNewPage,

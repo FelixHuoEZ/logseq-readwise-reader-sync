@@ -3,8 +3,8 @@ import { format } from 'date-fns'
 
 import type { ExportedBookIdentity } from '../types'
 import {
-  buildFormalManagedPageName,
   buildManagedPageFileStem,
+  buildManagedPageNamePlanV1,
 } from './readwise-page-names'
 import { upsertSingleRootPageContentV1 } from './single-root-page-content'
 
@@ -75,7 +75,9 @@ const buildFormalTestSessionKey = (sessionId: string) =>
   `formal-test-sessions/${sessionId}.json`
 
 const uniqueValues = (values: string[]): string[] =>
-  values.filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
+  values.filter(
+    (value, index, array) => value.length > 0 && array.indexOf(value) === index,
+  )
 
 const collectPageAliases = (page: PageEntity | null): string[] => {
   if (!page) return []
@@ -91,7 +93,18 @@ const findPageByExpectedName = (
   expectedPageName: string,
   pages: PageEntity[],
 ): PageEntity | null =>
-  pages.find((page) => collectPageAliases(page).includes(expectedPageName)) ?? null
+  pages.find((page) => collectPageAliases(page).includes(expectedPageName)) ??
+  null
+
+const findPageByExpectedNames = (
+  expectedPageNames: string[],
+  pages: PageEntity[],
+): PageEntity | null =>
+  expectedPageNames.reduce<PageEntity | null>(
+    (matchedPage, expectedPageName) =>
+      matchedPage ?? findPageByExpectedName(expectedPageName, pages),
+    null,
+  )
 
 const resolvePageFilePath = async (
   pageName: string,
@@ -103,13 +116,17 @@ const resolvePageFilePath = async (
     expectedFormat === 'markdown' ? ['md', 'org'] : ['org', 'md']
 
   for (const extension of preferredExtensions) {
-    const exact = assets.find((asset) => asset.path === `${expectedStem}.${extension}`)
+    const exact = assets.find(
+      (asset) => asset.path === `${expectedStem}.${extension}`,
+    )
     if (exact) {
       return exact.path
     }
   }
 
-  const fallback = assets.find((asset) => asset.path.startsWith(`${expectedStem}.`))
+  const fallback = assets.find((asset) =>
+    asset.path.startsWith(`${expectedStem}.`),
+  )
   return fallback?.path ?? null
 }
 
@@ -125,9 +142,6 @@ const deletePageByAliases = async (aliases: string[]): Promise<boolean> => {
 
   return false
 }
-
-const uniqueStrings = (values: string[]) =>
-  values.filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
 
 const buildBackupStoragePrefix = () =>
   `formal-page-backups/${format(new Date(), 'yyyyMMdd-HHmmss')}`
@@ -159,19 +173,26 @@ const restoreFormalPageBackupWithRetry = async (
 ) => {
   let lastError: unknown = null
 
-  for (let attempt = 0; attempt <= RESTORE_RETRY_DELAYS_MS.length; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt <= RESTORE_RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
     try {
       await upsertSingleRootPageContentV1(pageName, content, RESTORE_LOG_PREFIX)
       return
     } catch (err: unknown) {
       lastError = err
       const message = err instanceof Error ? err.message : String(err)
-      console.warn(`${RESTORE_LOG_PREFIX} failed to restore formal test page attempt`, {
-        pageName,
-        attempt: attempt + 1,
-        totalAttempts: RESTORE_RETRY_DELAYS_MS.length + 1,
-        message,
-      })
+      console.warn(
+        `${RESTORE_LOG_PREFIX} failed to restore formal test page attempt`,
+        {
+          pageName,
+          attempt: attempt + 1,
+          totalAttempts: RESTORE_RETRY_DELAYS_MS.length + 1,
+          message,
+        },
+      )
 
       if (attempt < RESTORE_RETRY_DELAYS_MS.length) {
         await delay(RESTORE_RETRY_DELAYS_MS[attempt]!)
@@ -191,14 +212,16 @@ export const listManagedPagesByNamespacePrefix = async (
   for (const page of pages) {
     const aliases = collectPageAliases(page)
     const isMatch = aliases.some(
-      (alias) => alias === namespacePrefix || alias.startsWith(`${namespacePrefix}/`),
+      (alias) =>
+        alias === namespacePrefix || alias.startsWith(`${namespacePrefix}/`),
     )
 
     if (!isMatch) continue
 
     matchedTargets.push({
       aliases,
-      pageTitle: aliases[0] ?? page.originalName ?? page.name ?? page.title ?? '',
+      pageTitle:
+        aliases[0] ?? page.originalName ?? page.name ?? page.title ?? '',
     })
   }
 
@@ -222,7 +245,8 @@ export const listManagedPagesBySessionNamespaceRoot = async (
 
     matchedTargets.push({
       aliases,
-      pageTitle: aliases[0] ?? page.originalName ?? page.name ?? page.title ?? '',
+      pageTitle:
+        aliases[0] ?? page.originalName ?? page.name ?? page.title ?? '',
     })
   }
 
@@ -249,7 +273,11 @@ export const loadActiveFormalTestSessionManifestV1 =
     if (manifest.schemaVersion !== 1) return null
 
     const graph = await logseq.App.getCurrentGraph()
-    if (manifest.graphPath && graph?.path && manifest.graphPath !== graph.path) {
+    if (
+      manifest.graphPath &&
+      graph?.path &&
+      manifest.graphPath !== graph.path
+    ) {
       return null
     }
 
@@ -257,7 +285,9 @@ export const loadActiveFormalTestSessionManifestV1 =
   }
 
 export const clearActiveFormalTestSessionManifestV1 = async () => {
-  const exists = await logseq.FileStorage.hasItem(ACTIVE_FORMAL_TEST_SESSION_KEY)
+  const exists = await logseq.FileStorage.hasItem(
+    ACTIVE_FORMAL_TEST_SESSION_KEY,
+  )
   if (exists) {
     await logseq.FileStorage.removeItem(ACTIVE_FORMAL_TEST_SESSION_KEY)
   }
@@ -268,7 +298,8 @@ export const rotateActiveFormalTestSessionNamespaceV1 =
     const activeSession = await loadActiveFormalTestSessionManifestV1()
     if (!activeSession) return null
 
-    const namespaceRoot = activeSession.namespacePrefix.split('/')[0] || 'ReadwiseHighlights'
+    const namespaceRoot =
+      activeSession.namespacePrefix.split('/')[0] || 'ReadwiseHighlights'
     const nextSessionIdCandidate = format(new Date(), 'yyyyMMdd-HHmmss')
     const nextSessionId =
       nextSessionIdCandidate === activeSession.sessionId
@@ -346,10 +377,22 @@ export const backupFormalTestPages = async (
   })
 
   for (const [index, book] of books.entries()) {
-    const pageName = buildFormalManagedPageName(book.title, namespacePrefix)
+    const pageNamePlan = buildManagedPageNamePlanV1({
+      pageTitle: book.title,
+      namespacePrefix,
+      managedId: book.user_book_id,
+      format: 'org',
+    })
+    const pageName = pageNamePlan.preferredPageName
     const page =
       (await logseq.Editor.getPage(pageName)) ??
-      findPageByExpectedName(pageName, allPages)
+      (pageNamePlan.disambiguatedPageName !== pageName
+        ? await logseq.Editor.getPage(pageNamePlan.disambiguatedPageName)
+        : null) ??
+      findPageByExpectedNames(
+        [pageName, pageNamePlan.disambiguatedPageName],
+        allPages,
+      )
     const aliases = collectPageAliases(page)
 
     if (!page || aliases.length === 0) {
@@ -364,7 +407,10 @@ export const backupFormalTestPages = async (
 
     matchedPages += 1
 
-    const relativeFilePath = await resolvePageFilePath(pageName, page.format ?? null)
+    const relativeFilePath = await resolvePageFilePath(
+      pageName,
+      page.format ?? null,
+    )
     const backupPayload = await captureFormalPageBackup(
       pageName,
       aliases,
@@ -434,10 +480,22 @@ export const clearFormalTestPages = async (
   })
 
   for (const [index, book] of books.entries()) {
-    const pageName = buildFormalManagedPageName(book.title, namespacePrefix)
+    const pageNamePlan = buildManagedPageNamePlanV1({
+      pageTitle: book.title,
+      namespacePrefix,
+      managedId: book.user_book_id,
+      format: 'org',
+    })
+    const pageName = pageNamePlan.preferredPageName
     const page =
       (await logseq.Editor.getPage(pageName)) ??
-      findPageByExpectedName(pageName, allPages)
+      (pageNamePlan.disambiguatedPageName !== pageName
+        ? await logseq.Editor.getPage(pageNamePlan.disambiguatedPageName)
+        : null) ??
+      findPageByExpectedNames(
+        [pageName, pageNamePlan.disambiguatedPageName],
+        allPages,
+      )
     const aliases = collectPageAliases(page)
 
     if (!page || aliases.length === 0) {
@@ -490,7 +548,8 @@ export const clearManagedPagesByNamespacePrefix = async (
   } = {},
 ): Promise<FormalTestPageActionResult> => {
   const skippedPages: string[] = []
-  const matchedTargets = await listManagedPagesByNamespacePrefix(namespacePrefix)
+  const matchedTargets =
+    await listManagedPagesByNamespacePrefix(namespacePrefix)
   let deletedPages = 0
 
   options.onProgress?.({
@@ -539,7 +598,8 @@ export const clearManagedPagesBySessionNamespaceRoot = async (
   } = {},
 ): Promise<FormalTestPageActionResult> => {
   const skippedPages: string[] = []
-  const matchedTargets = await listManagedPagesBySessionNamespaceRoot(namespaceRoot)
+  const matchedTargets =
+    await listManagedPagesBySessionNamespaceRoot(namespaceRoot)
   let deletedPages = 0
 
   options.onProgress?.({
@@ -581,7 +641,9 @@ export const clearManagedPagesBySessionNamespaceRoot = async (
   }
 }
 
-const flattenBlockTreeToText = (blocks: BlockEntity[] | null | undefined): string => {
+const flattenBlockTreeToText = (
+  blocks: BlockEntity[] | null | undefined,
+): string => {
   if (!Array.isArray(blocks) || blocks.length === 0) return ''
 
   const parts: string[] = []
@@ -605,9 +667,7 @@ const flattenBlockTreeToText = (blocks: BlockEntity[] | null | undefined): strin
 }
 
 export const restoreLatestFormalTestPageBackup = async (
-  options: {
-    onProgress?: (progress: BatchPageActionProgress) => void
-  } = {},
+  options: { onProgress?: (progress: BatchPageActionProgress) => void } = {},
 ): Promise<FormalTestPageActionResult> => {
   const activeSession = await loadActiveFormalTestSessionManifestV1()
 
@@ -623,7 +683,8 @@ export const restoreLatestFormalTestPageBackup = async (
   }
 
   const latestTimestamp =
-    activeSession.backupStoragePrefix.split('/').at(-1) ?? activeSession.sessionId
+    activeSession.backupStoragePrefix.split('/').at(-1) ??
+    activeSession.sessionId
   const allKeys = await logseq.FileStorage.allKeys()
   const latestKeys = allKeys.filter((key) =>
     key.startsWith(`${activeSession.backupStoragePrefix}/`),
@@ -661,7 +722,7 @@ export const restoreLatestFormalTestPageBackup = async (
 
     const restoreContent =
       parsed.captureMode === 'raw_file'
-        ? parsed.rawContent ?? ''
+        ? (parsed.rawContent ?? '')
         : flattenBlockTreeToText(parsed.pageTree)
 
     if (restoreContent.length === 0) {
@@ -684,11 +745,14 @@ export const restoreLatestFormalTestPageBackup = async (
         pageTitle: parsed.pageName,
         message,
       })
-      console.error(`${RESTORE_LOG_PREFIX} failed to restore formal test page`, {
-        pageName: parsed.pageName,
-        key,
-        message,
-      })
+      console.error(
+        `${RESTORE_LOG_PREFIX} failed to restore formal test page`,
+        {
+          pageName: parsed.pageName,
+          key,
+          message,
+        },
+      )
     }
 
     options.onProgress?.({
@@ -702,12 +766,15 @@ export const restoreLatestFormalTestPageBackup = async (
   if (failedPages.length === 0 && latestKeys.length > 0) {
     await clearActiveFormalTestSessionManifestV1()
   } else {
-    console.warn(`${RESTORE_LOG_PREFIX} retained active formal test session after restore`, {
-      sessionId: activeSession.sessionId,
-      backupStoragePrefix: activeSession.backupStoragePrefix,
-      targetedBackups: latestKeys.length,
-      failedPages,
-    })
+    console.warn(
+      `${RESTORE_LOG_PREFIX} retained active formal test session after restore`,
+      {
+        sessionId: activeSession.sessionId,
+        backupStoragePrefix: activeSession.backupStoragePrefix,
+        targetedBackups: latestKeys.length,
+        failedPages,
+      },
+    )
   }
 
   return {

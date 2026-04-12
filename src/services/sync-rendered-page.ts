@@ -6,7 +6,11 @@ import type { ExportedBook } from '../types'
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import { rebuildManagedPageIfDamagedV1 } from './managed-page-integrity'
 import { withManagedSyncTimestampPagePropertiesV1 } from './managed-page-sync-timestamps'
-import { buildFormalManagedPageName } from './readwise-page-names'
+import { buildManagedPageNamePlanV1 } from './readwise-page-names'
+import {
+  renameManagedPageIfNeededV1,
+  resolveManagedReadwisePageV1,
+} from './resolve-managed-reader-page'
 import {
   createManagedPageV1,
   writeSingleRootPageContentV1,
@@ -56,8 +60,31 @@ export const syncRenderedPage = async (
     return
   }
 
-  const pageName = buildFormalManagedPageName(book.title, namespacePrefix)
-  const pageBeforeRepair = await logseq.Editor.getPage(pageName)
+  const pageNamePlan = buildManagedPageNamePlanV1({
+    pageTitle: book.title,
+    namespacePrefix,
+    managedId: book.user_book_id,
+    format: 'org',
+  })
+  const pageResolution = await resolveManagedReadwisePageV1({
+    readwiseBookId: book.user_book_id,
+    preferredPageName: pageNamePlan.preferredPageName,
+    disambiguatedPageName: pageNamePlan.disambiguatedPageName,
+    namespaceRoot: namespacePrefix,
+  })
+  const resolvedExistingPage = pageResolution.page
+    ? await renameManagedPageIfNeededV1({
+        page: pageResolution.page,
+        expectedPageName: pageResolution.resolvedPageName,
+        logPrefix,
+      })
+    : {
+        page: null,
+        renamed: false,
+        previousPageName: null,
+      }
+  const pageName = pageResolution.resolvedPageName
+  const pageBeforeRepair = resolvedExistingPage.page
   const repairedPage =
     pageBeforeRepair == null
       ? {
@@ -94,11 +121,7 @@ export const syncRenderedPage = async (
     syncDate: renderRuntime.syncDate,
     fallbackFirstSyncedAt: repairedPage.legacyFirstSyncedOn,
   })
-  await syncManagedPagePropertiesV1(
-    page,
-    pageProperties,
-    logPrefix,
-  )
+  await syncManagedPagePropertiesV1(page, pageProperties, logPrefix)
   const writeResult = await writeSingleRootPageContentV1(
     page,
     pageName,
@@ -111,6 +134,9 @@ export const syncRenderedPage = async (
   console.info(`${logPrefix} synced rendered page`, {
     userBookId: book.user_book_id,
     pageName,
+    pageMatchKind: pageResolution.matchKind,
+    pageRenamed: resolvedExistingPage.renamed,
+    previousPageName: resolvedExistingPage.previousPageName,
     result,
     renderHash: renderedPage.renderHash,
     isNewPage: pageBeforeRepair == null,

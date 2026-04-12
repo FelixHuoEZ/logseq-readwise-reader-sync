@@ -13,9 +13,9 @@ import {
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import { rebuildManagedPageIfDamagedV1 } from './managed-page-integrity'
 import { withManagedSyncTimestampPagePropertiesV1 } from './managed-page-sync-timestamps'
-import { buildFormalManagedPageName } from './readwise-page-names'
+import { buildManagedPageNamePlanV1 } from './readwise-page-names'
 import {
-  renameManagedReaderPageIfNeededV1,
+  renameManagedPageIfNeededV1,
   resolveManagedReaderPageV1,
 } from './resolve-managed-reader-page'
 import {
@@ -126,7 +126,11 @@ const logRenderedContentDiagnostics = (
 export interface SyncRenderedReaderPageResult {
   readerDocumentId: string
   pageName: string
-  pageMatchKind: 'rw-reader-id' | 'managed_title' | 'none'
+  pageMatchKind:
+    | 'rw-reader-id'
+    | 'managed_title'
+    | 'disambiguated_title'
+    | 'none'
   pageRenamed: boolean
   previousPageName: string | null
   result: 'created' | 'updated' | 'unchanged'
@@ -146,43 +150,66 @@ export const syncRenderedReaderPreviewPage = async (
     identityNamespaceRoot?: string
   } = {},
 ) => {
-  const pageName = buildFormalManagedPageName(
-    previewBook.document.title?.trim().length
-      ? previewBook.document.title
-      : previewBook.document.id,
+  const sourcePageTitle = previewBook.document.title?.trim().length
+    ? previewBook.document.title
+    : previewBook.document.id
+  const pageNamePlan = buildManagedPageNamePlanV1({
+    pageTitle: sourcePageTitle,
     namespacePrefix,
-  )
+    managedId: previewBook.document.id,
+    format: 'org',
+  })
+  const preferredPageName = pageNamePlan.preferredPageName
+  const disambiguatedPageName = pageNamePlan.disambiguatedPageName
   logReadwiseDebug(logPrefix, 'preparing rendered Reader page', {
     readerDocumentId: previewBook.document.id,
-    pageName,
+    preferredPageName,
+    disambiguatedPageName,
     namespacePrefix,
     pageResolveMode: options.pageResolveMode ?? 'title_only',
     highlightCount: previewBook.highlights.length,
   })
   const syncDate = format(new Date(), 'yyyy-MM-dd')
+  const preferredPage =
+    options.pageResolveMode === 'title_only'
+      ? await logseq.Editor.getPage(preferredPageName)
+      : null
+  const disambiguatedPage =
+    options.pageResolveMode === 'title_only' &&
+    disambiguatedPageName !== preferredPageName
+      ? await logseq.Editor.getPage(disambiguatedPageName)
+      : null
   const pageResolution =
     options.pageResolveMode === 'reader_id_then_title'
       ? await resolveManagedReaderPageV1({
           readerDocumentId: previewBook.document.id,
-          expectedPageName: pageName,
+          preferredPageName,
+          disambiguatedPageName,
           namespaceRoot: options.identityNamespaceRoot ?? namespacePrefix,
         })
       : {
-          page: await logseq.Editor.getPage(pageName),
-          matchKind: 'managed_title' as const,
+          page: preferredPage ?? disambiguatedPage,
+          matchKind:
+            preferredPage == null && disambiguatedPage != null
+              ? ('disambiguated_title' as const)
+              : ('managed_title' as const),
+          resolvedPageName:
+            preferredPage == null && disambiguatedPage != null
+              ? disambiguatedPageName
+              : preferredPageName,
         }
-  const resolvedExistingPage =
-    pageResolution.page && options.pageResolveMode === 'reader_id_then_title'
-      ? await renameManagedReaderPageIfNeededV1({
-          page: pageResolution.page,
-          expectedPageName: pageName,
-          logPrefix,
-        })
-      : {
-          page: pageResolution.page,
-          renamed: false,
-          previousPageName: null,
-        }
+  const resolvedExistingPage = pageResolution.page
+    ? await renameManagedPageIfNeededV1({
+        page: pageResolution.page,
+        expectedPageName: pageResolution.resolvedPageName,
+        logPrefix,
+      })
+    : {
+        page: pageResolution.page,
+        renamed: false,
+        previousPageName: null,
+      }
+  const pageName = pageResolution.resolvedPageName
   const pageBeforeRepair = resolvedExistingPage.page
   const repairedPage =
     pageBeforeRepair == null

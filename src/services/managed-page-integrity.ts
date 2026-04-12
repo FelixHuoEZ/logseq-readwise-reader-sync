@@ -1,4 +1,4 @@
-import type { PageEntity } from '@logseq/libs/dist/LSPlugin'
+import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
 
 import { logReadwiseInfo } from '../logging'
 
@@ -6,6 +6,9 @@ const uniqueStrings = (values: string[]) =>
   values.filter(
     (value, index, array) => value.length > 0 && array.indexOf(value) === index,
   )
+
+const ACCEPTED_BLOCK_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
@@ -27,6 +30,19 @@ export const detectLegacyManagedPageRepairSignaturesV1 = (rootContent: string) =
     rootContent.match(/^\* Highlights (?:first synced|refreshed) by \[\[Readwise\]\]/gm) ??
     []
   ).length
+  const invalidLegacyBlockIds = [
+    ...rootContent.matchAll(
+      /^:id:\s+([0-9a-f]{8}-[0-9a-f]{4}-([0-9a-f])[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12})$/gim,
+    ),
+  ]
+    .map((match) => ({
+      uuid: match[1] ?? '',
+      versionChar: (match[2] ?? '').toLowerCase(),
+    }))
+    .filter(
+      ({ uuid, versionChar }) =>
+        uuid.length > 0 && !/^[1-5]$/.test(versionChar),
+    )
 
   if (propertiesBlocks > 1) {
     signatures.push('duplicate properties block')
@@ -40,7 +56,41 @@ export const detectLegacyManagedPageRepairSignaturesV1 = (rootContent: string) =
     signatures.push('duplicate sync header')
   }
 
+  if (invalidLegacyBlockIds.length > 0) {
+    signatures.push('legacy invalid block id')
+  }
+
   return signatures
+}
+
+const collectLegacyInvalidBlockIdsFromTreeV1 = (
+  blocks: Array<BlockEntity | [unknown, string]>,
+): string[] => {
+  const invalid: string[] = []
+
+  const visit = (node: BlockEntity | [unknown, string]) => {
+    if (Array.isArray(node)) {
+      const uuid = typeof node[1] === 'string' ? node[1] : ''
+      if (uuid.length > 0 && !ACCEPTED_BLOCK_UUID_PATTERN.test(uuid)) {
+        invalid.push(uuid)
+      }
+      return
+    }
+
+    if (typeof node.uuid === 'string' && !ACCEPTED_BLOCK_UUID_PATTERN.test(node.uuid)) {
+      invalid.push(node.uuid)
+    }
+
+    for (const child of node.children ?? []) {
+      visit(child as BlockEntity | [unknown, string])
+    }
+  }
+
+  for (const block of blocks) {
+    visit(block)
+  }
+
+  return uniqueStrings(invalid)
 }
 
 const extractLegacyFirstSyncedOnV1 = (rootContent: string): string | null => {
@@ -54,10 +104,19 @@ const extractLegacyFirstSyncedOnV1 = (rootContent: string): string | null => {
 export const inspectManagedPageIntegrityV1 = async (page: PageEntity) => {
   const pageBlocksTree = await logseq.Editor.getPageBlocksTree(page.name)
   const rootContent = pageBlocksTree?.[0]?.content ?? ''
+  const invalidTreeBlockIds = collectLegacyInvalidBlockIdsFromTreeV1(
+    pageBlocksTree ?? [],
+  )
+  const signatures = detectLegacyManagedPageRepairSignaturesV1(rootContent)
+
+  if (invalidTreeBlockIds.length > 0) {
+    signatures.push('legacy invalid block id')
+  }
 
   return {
     rootContent,
-    signatures: detectLegacyManagedPageRepairSignaturesV1(rootContent),
+    signatures: uniqueStrings(signatures),
+    invalidTreeBlockIds,
     legacyFirstSyncedOn: extractLegacyFirstSyncedOnV1(rootContent),
   }
 }
@@ -74,6 +133,7 @@ export const rebuildManagedPageIfDamagedV1 = async ({
   page: PageEntity | null
   rebuilt: boolean
   signatures: string[]
+  invalidTreeBlockIds: string[]
   legacyFirstSyncedOn: string | null
 }> => {
   const inspection = await inspectManagedPageIntegrityV1(page)
@@ -83,6 +143,7 @@ export const rebuildManagedPageIfDamagedV1 = async ({
       page,
       rebuilt: false,
       signatures: [],
+      invalidTreeBlockIds: [],
       legacyFirstSyncedOn: inspection.legacyFirstSyncedOn,
     }
   }
@@ -115,12 +176,14 @@ export const rebuildManagedPageIfDamagedV1 = async ({
     expectedPageName,
     aliases,
     signatures: inspection.signatures,
+    invalidTreeBlockIds: inspection.invalidTreeBlockIds,
   })
 
   return {
     page: null,
     rebuilt: true,
     signatures: inspection.signatures,
+    invalidTreeBlockIds: inspection.invalidTreeBlockIds,
     legacyFirstSyncedOn: inspection.legacyFirstSyncedOn,
   }
 }

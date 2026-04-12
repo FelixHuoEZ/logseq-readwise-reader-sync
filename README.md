@@ -2,7 +2,7 @@
 
 Unofficial Logseq plugin for syncing Readwise Reader highlights into managed Logseq pages.
 
-This fork is published as an independent plugin release line. If it is published to the Logseq marketplace, it should be labeled `Unofficial` to avoid confusion with upstream community plugins and Readwise's official implementation.
+This project is published as an independent plugin release line. If it is published to the Logseq marketplace, it should be labeled `Unofficial` to avoid confusion with upstream community plugins and Readwise's official implementation.
 
 ## Current Status
 
@@ -27,6 +27,12 @@ This fork is published as an independent plugin release line. If it is published
 
 `Incremental Sync` uses the saved Reader cursor and only scans changed highlights. `Full Refresh` still scans the full Reader highlight library and can take minutes on large libraries. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates `Full Refresh`, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
 
+## Sync Scope Difference From The Official Plugin
+
+- Readwise's official Logseq plugin syncs all tweets by default, even when a tweet has no highlight.
+- This project currently syncs parent documents only when they have at least one Reader highlight.
+- That rule applies across document types, including `article`, `book`, `tweet`, and `video`.
+
 ## Install From Release
 
 1. Download the latest `logseq-readwise-reader-sync.zip` from [Releases](https://github.com/FelixHuoEZ/logseq-readwise-reader-sync/releases).
@@ -44,7 +50,7 @@ This fork is published as an independent plugin release line. If it is published
    - `Reader Full Scan Target Documents = 20`
    - `Reader Full Scan Debug Highlight Page Limit = 0`
 
-Do not run this fork and another Readwise Logseq plugin against the same graph at the same time. They share managed page namespaces and properties even though the plugin package id is distinct.
+Do not run this project and another Readwise Logseq plugin against the same graph at the same time. They share managed page namespaces and properties even though the plugin package id is distinct.
 
 ## Use
 
@@ -112,18 +118,18 @@ This command creates `logseq-readwise-reader-sync.zip` in the repository root.
 
 ## References
 
-This fork builds on work from and explicitly references ideas from:
+This project builds on work from and explicitly references ideas from:
 
 - [hkgnp/logseq-readwise-plugin](https://github.com/hkgnp/logseq-readwise-plugin), for the original community plugin line
-- [benjypng/logseq-readwise-plugin](https://github.com/benjypng/logseq-readwise-plugin), for the local-first fork base and sync architecture direction
+- [benjypng/logseq-readwise-plugin](https://github.com/benjypng/logseq-readwise-plugin), for the local-first base and sync architecture direction
 - [readwiseio/logseq-readwise-official-plugin](https://github.com/readwiseio/logseq-readwise-official-plugin), for output compatibility targets and export integration ideas
 
 ## Thanks
 
 - Thanks to the original community maintainers and contributors for the earlier plugin lines.
-- Thanks to Readwise for the official plugin implementation and export behavior that informed compatibility work in this fork.
+- Thanks to Readwise for the official plugin implementation and export behavior that informed compatibility work in this project.
 
-This fork does not claim affiliation with Readwise or the original community maintainers. It is a separately maintained release line.
+This project does not claim affiliation with Readwise or the original community maintainers. It is a separately maintained release line.
 
 ## License
 

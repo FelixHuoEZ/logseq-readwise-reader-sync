@@ -4658,8 +4658,44 @@ export const ReadwiseContainer = () => {
       mode === 'cached-full-rebuild'
         ? null
         : resolveConfiguredReaderDebugHighlightPageLimit()
-    const readerSyncStateBeforeRun =
+    let readerSyncStateBeforeRun =
       syncHeaderMode === 'formal' ? await loadGraphReaderSyncStateV1() : null
+    if (
+      syncHeaderMode === 'formal' &&
+      mode === 'incremental-window' &&
+      readerSyncStateBeforeRun?.updatedAfter == null
+    ) {
+      try {
+        const cacheState = await previewCache.getHighlightCacheState()
+        if (cacheState?.latestHighlightUpdatedAt) {
+          readerSyncStateBeforeRun = {
+            schemaVersion: 1,
+            updatedAfter: cacheState.latestHighlightUpdatedAt,
+            committedAt: cacheState.cachedAt,
+            source: 'incremental_sync',
+          }
+          logReadwiseInfo(
+            logPrefix,
+            'using IndexedDB highlight cache timestamp as incremental cursor fallback',
+            {
+              latestHighlightUpdatedAt: cacheState.latestHighlightUpdatedAt,
+              cachedAt: cacheState.cachedAt,
+              staleDeletionRisk: cacheState.staleDeletionRisk,
+              hasFullLibrarySnapshot: cacheState.hasFullLibrarySnapshot,
+              highlightCount: cacheState.highlightCount,
+            },
+          )
+        }
+      } catch (error) {
+        logReadwiseWarn(
+          logPrefix,
+          'failed to load IndexedDB highlight cache state for incremental cursor fallback',
+          {
+            formattedError: describeUnknownError(error),
+          },
+        )
+      }
+    }
     const readerSyncUpdatedAfter =
       mode === 'incremental-window'
         ? readerSyncStateBeforeRun?.updatedAfter ?? null

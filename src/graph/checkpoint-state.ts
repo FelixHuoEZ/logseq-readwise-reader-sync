@@ -81,6 +81,8 @@ const READER_SYNC_PROPERTY_KEYS = {
 
 const LAST_FORMAL_SYNC_SUMMARY_BLOCK_UUID =
   'c2ddfe13-67d1-42df-9f0b-cd8684f16f61'
+const READER_SYNC_STATE_BLOCK_UUID =
+  '0ff7bc8e-6638-4d39-a5d3-89b8b2a12eb1'
 
 const normalizePropertyKey = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -317,6 +319,91 @@ const upsertLastFormalSyncSummaryBlock = async (
   }
 }
 
+const buildReaderSyncStateBlockContent = (state: GraphReaderSyncStateV1) =>
+  [
+    'Readwise Reader Sync State',
+    '',
+    `- ${READER_SYNC_PROPERTY_KEYS.schemaVersion}: ${state.schemaVersion}`,
+    `- ${READER_SYNC_PROPERTY_KEYS.updatedAfter}: ${state.updatedAfter ?? ''}`,
+    `- ${READER_SYNC_PROPERTY_KEYS.committedAt}: ${state.committedAt}`,
+    `- ${READER_SYNC_PROPERTY_KEYS.source}: ${state.source}`,
+  ].join('\n')
+
+const parseStateBlockPropertyLines = (
+  content: string | null | undefined,
+): Record<string, string> => {
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    return {}
+  }
+
+  const parsed = new Map<string, string>()
+  const lines = content.split(/\r?\n/)
+
+  for (const line of lines) {
+    const match = line.match(/^\s*-\s+([^:]+):\s*(.*)\s*$/)
+    if (!match) continue
+    parsed.set(normalizePropertyKey(match[1] ?? ''), (match[2] ?? '').trim())
+  }
+
+  return Object.fromEntries(parsed)
+}
+
+const parseReaderSyncStateBlock = (
+  block: { content?: string | null } | null,
+): GraphReaderSyncStateV1 | null => {
+  if (!block?.content) return null
+
+  const properties = parseStateBlockPropertyLines(block.content)
+  const schemaVersion = extractNumberValue(
+    properties[normalizePropertyKey(READER_SYNC_PROPERTY_KEYS.schemaVersion)] ?? null,
+  )
+  const committedAt = extractStringValue(
+    properties[normalizePropertyKey(READER_SYNC_PROPERTY_KEYS.committedAt)] ?? null,
+  )
+  const source = extractStringValue(
+    properties[normalizePropertyKey(READER_SYNC_PROPERTY_KEYS.source)] ?? null,
+  )
+
+  if (
+    schemaVersion !== 1 ||
+    committedAt == null ||
+    (source !== 'incremental_sync' && source !== 'full_reconcile')
+  ) {
+    return null
+  }
+
+  return {
+    schemaVersion: 1,
+    updatedAfter:
+      extractStringValue(
+        properties[normalizePropertyKey(READER_SYNC_PROPERTY_KEYS.updatedAfter)] ?? null,
+      ) ?? null,
+    committedAt,
+    source,
+  }
+}
+
+const upsertReaderSyncStateBlock = async (
+  page: PageEntity,
+  state: GraphReaderSyncStateV1,
+) => {
+  const content = buildReaderSyncStateBlockContent(state)
+  const existing = await logseq.Editor.getBlock(READER_SYNC_STATE_BLOCK_UUID)
+
+  if (existing) {
+    await logseq.Editor.updateBlock(READER_SYNC_STATE_BLOCK_UUID, content)
+    return
+  }
+
+  const created = await logseq.Editor.insertBlock(page.uuid, content, {
+    customUUID: READER_SYNC_STATE_BLOCK_UUID,
+  })
+
+  if (!created) {
+    throw new Error('Failed to create the Reader sync state block.')
+  }
+}
+
 export const loadGraphCheckpointStateV1 =
   async (): Promise<GraphCheckpointStateV1 | null> =>
     parseCheckpointPage(
@@ -324,10 +411,15 @@ export const loadGraphCheckpointStateV1 =
     )
 
 export const loadGraphReaderSyncStateV1 =
-  async (): Promise<GraphReaderSyncStateV1 | null> =>
-    parseReaderSyncPage(
-      await logseq.Editor.getPage(GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1),
+  async (): Promise<GraphReaderSyncStateV1 | null> => {
+    const page = await logseq.Editor.getPage(GRAPH_FORMAL_SYNC_STATE_PAGE_NAME_V1)
+    const pageState = parseReaderSyncPage(page)
+    if (pageState) return pageState
+
+    return parseReaderSyncStateBlock(
+      await logseq.Editor.getBlock(READER_SYNC_STATE_BLOCK_UUID),
     )
+  }
 
 export const pickPreferredCheckpointStateV1 = (
   currentState: GraphCheckpointStateV1 | null,
@@ -387,26 +479,36 @@ export const saveGraphReaderSyncStateV1 = async (
   const preferredState = pickPreferredReaderSyncStateV1(currentState, nextState)
   const page = await ensureFormalSyncStatePage()
 
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    READER_SYNC_PROPERTY_KEYS.schemaVersion,
-    preferredState.schemaVersion,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    READER_SYNC_PROPERTY_KEYS.updatedAfter,
-    preferredState.updatedAfter ?? '',
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    READER_SYNC_PROPERTY_KEYS.committedAt,
-    preferredState.committedAt,
-  )
-  await logseq.Editor.upsertBlockProperty(
-    page.uuid,
-    READER_SYNC_PROPERTY_KEYS.source,
-    preferredState.source,
-  )
+  try {
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      READER_SYNC_PROPERTY_KEYS.schemaVersion,
+      preferredState.schemaVersion,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      READER_SYNC_PROPERTY_KEYS.updatedAfter,
+      preferredState.updatedAfter ?? '',
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      READER_SYNC_PROPERTY_KEYS.committedAt,
+      preferredState.committedAt,
+    )
+    await logseq.Editor.upsertBlockProperty(
+      page.uuid,
+      READER_SYNC_PROPERTY_KEYS.source,
+      preferredState.source,
+    )
+  } catch (error) {
+    logReadwiseWarn(
+      '[Readwise Sync]',
+      'failed to persist Reader sync state as page properties; falling back to managed state block only.',
+      error,
+    )
+  }
+
+  await upsertReaderSyncStateBlock(page, preferredState)
 
   return preferredState
 }

@@ -39,8 +39,8 @@ export const buildPageProperties = (
   )
 
   return [
-    { key: 'rw-id', value: readwiseId },
-    { key: 'rw-reader-id', value: readerId },
+    ...(readwiseId ? [{ key: 'rw-id', value: readwiseId }] : []),
+    ...(readerId ? [{ key: 'rw-reader-id', value: readerId }] : []),
     { key: 'AUTHOR', value: author ? wrapWikiLink(author) : null },
     { key: 'CATEGORIES', value: category },
     { key: 'LINK', value: link },

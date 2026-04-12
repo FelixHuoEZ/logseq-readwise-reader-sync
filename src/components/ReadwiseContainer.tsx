@@ -457,6 +457,25 @@ export const ReadwiseContainer = () => {
       ),
     )
 
+  const extractReaderDocumentIdsFromRootContent = (rootContent: string): string[] => {
+    const readerDocumentIds: string[] = []
+
+    for (const line of rootContent.split('\n')) {
+      const match = line.match(/^:([^:\n]+):\s*(.*?)\s*$/)
+      if (!match) continue
+
+      const [, rawKey = '', rawValue = ''] = match
+      if (normalizePropertyKey(rawKey) !== 'rwreaderid') continue
+
+      const readerDocumentId = extractStringValue(rawValue)
+      if (readerDocumentId) {
+        readerDocumentIds.push(readerDocumentId)
+      }
+    }
+
+    return uniqueStrings(readerDocumentIds)
+  }
+
   const loadReaderDocumentIdFromPage = async (
     page: PageEntity,
   ): Promise<string | null> => {
@@ -465,9 +484,20 @@ export const ReadwiseContainer = () => {
     if (!page.uuid) return null
 
     try {
-      return extractStringValue(
+      const blockPropertyValue = extractStringValue(
         await logseq.Editor.getBlockProperty(page.uuid, 'rw-reader-id'),
       )
+      if (blockPropertyValue) return blockPropertyValue
+    } catch {
+      // Fall through to the legacy content drawer fallback.
+    }
+
+    try {
+      const pageBlocksTree = await logseq.Editor.getPageBlocksTree(page.name)
+      const rootContent = pageBlocksTree?.[0]?.content ?? ''
+      const readerDocumentIds = extractReaderDocumentIdsFromRootContent(rootContent)
+
+      return readerDocumentIds.length === 1 ? readerDocumentIds[0] ?? null : null
     } catch {
       return null
     }
@@ -595,7 +625,7 @@ export const ReadwiseContainer = () => {
       throw new Error(`Current page is not a managed ${formalNamespaceRoot} page.`)
     }
 
-    const readerDocumentId = extractReaderDocumentIdFromPage(
+    const readerDocumentId = await loadReaderDocumentIdFromPage(
       currentPage as PageEntity,
     )
 

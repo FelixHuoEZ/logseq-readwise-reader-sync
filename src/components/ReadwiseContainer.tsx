@@ -87,6 +87,12 @@ import {
 type ReaderSyncEtaPhase = 'fetch-highlights' | 'fetch-documents' | 'write-pages'
 type ReaderSyncMode = ReaderPreviewLoadMode
 
+interface ReaderSyncEtaSample {
+  msPerUnit: number
+  observedAt: number
+  units: number
+}
+
 interface ReaderSyncEtaSnapshot {
   phase: ReaderSyncEtaPhase
   label: string
@@ -110,6 +116,13 @@ interface ReaderDocumentInferenceResult {
   readerDocumentId: string | null
   shouldRetryAfterScan: boolean
   failedHighlightIds: string[]
+}
+
+interface ManagedPageRepairScanEntryResult {
+  pageName: string
+  candidate?: ManagedPageRepairCandidate
+  deferredRetry?: ManagedPageRepairIdentityRetryCandidate
+  issue?: RunIssue
 }
 
 type ReaderSyncHelpPanelId =
@@ -136,6 +149,7 @@ interface ReaderSyncHelpPopoverState {
 export const ReadwiseContainer = () => {
   const defaultReaderFullScanTargetDocuments = 20
   const defaultReaderFullScanDebugHighlightPageLimit = 0
+  const managedPageRepairScanConcurrency = 4
   const maxAutomaticResumeRetries = 10
   const debugSyncMaxBooksLimit = 5
   const debugNamespaceRoot = 'ReadwiseDebug'
@@ -159,13 +173,13 @@ export const ReadwiseContainer = () => {
     label: string
     lastCompleted: number
     lastTimestamp: number | null
-    samplesMs: number[]
+    samples: ReaderSyncEtaSample[]
   }>({
     phase: null,
     label: '',
     lastCompleted: 0,
     lastTimestamp: null,
-    samplesMs: [],
+    samples: [],
   })
   const [propsReady, setPropsReady] = useState(
     () => !!logseq.settings?.propsConfigured,
@@ -285,7 +299,7 @@ export const ReadwiseContainer = () => {
       label: '',
       lastCompleted: 0,
       lastTimestamp: null,
-      samplesMs: [],
+      samples: [],
     }
     setEtaSnapshot(null)
     setStatus('idle')
@@ -308,7 +322,7 @@ export const ReadwiseContainer = () => {
       label,
       lastCompleted: 0,
       lastTimestamp: Date.now(),
-      samplesMs: [],
+      samples: [],
     }
     setEtaSnapshot({
       phase,
@@ -316,6 +330,50 @@ export const ReadwiseContainer = () => {
       etaMs: null,
       observedAt: Date.now(),
     })
+  }
+
+  const getReaderSyncEtaWindowConfig = (
+    phase: ReaderSyncEtaPhase,
+    label: string,
+    rawEtaMs: number | null,
+  ) => {
+    if (phase === 'fetch-highlights' && label === 'repair scan') {
+      const adaptiveHorizonMs =
+        rawEtaMs == null
+          ? 12_000
+          : Math.max(3_000, Math.min(30_000, rawEtaMs))
+      return {
+        maxSamples: 30,
+        horizonMs: adaptiveHorizonMs,
+      }
+    }
+
+    if (phase === 'fetch-highlights') {
+      const adaptiveHorizonMs =
+        rawEtaMs == null
+          ? 10_000
+          : Math.max(3_000, Math.min(30_000, rawEtaMs))
+      return {
+        maxSamples: 16,
+        horizonMs: adaptiveHorizonMs,
+      }
+    }
+
+    if (phase === 'fetch-documents') {
+      const adaptiveHorizonMs =
+        rawEtaMs == null
+          ? 8_000
+          : Math.max(3_000, Math.min(30_000, rawEtaMs))
+      return {
+        maxSamples: 10,
+        horizonMs: adaptiveHorizonMs,
+      }
+    }
+
+    return {
+      maxSamples: 8,
+      horizonMs: 12_000,
+    }
   }
 
   const updateReaderSyncEta = (
@@ -333,7 +391,7 @@ export const ReadwiseContainer = () => {
         label,
         lastCompleted: completed,
         lastTimestamp: now,
-        samplesMs: [],
+        samples: [],
       }
       setEtaSnapshot({
         phase,
@@ -350,18 +408,42 @@ export const ReadwiseContainer = () => {
     ) {
       const deltaUnits = completed - estimator.lastCompleted
       const sampleMs = (now - estimator.lastTimestamp) / deltaUnits
-      const nextSamples = [...estimator.samplesMs, sampleMs].slice(-5)
+      const remainingUnits = Math.max(0, totalUnits - completed)
+      const rawEtaMs = remainingUnits > 0 ? sampleMs * remainingUnits : 0
+      const { maxSamples, horizonMs } = getReaderSyncEtaWindowConfig(
+        phase,
+        label,
+        rawEtaMs,
+      )
+      const nextSamples = [
+        ...estimator.samples,
+        {
+          msPerUnit: sampleMs,
+          observedAt: now,
+          units: deltaUnits,
+        },
+      ]
+        .filter(sample => sample.observedAt >= now - horizonMs)
+        .slice(-maxSamples)
       etaEstimatorRef.current = {
         phase,
         label,
         lastCompleted: completed,
         lastTimestamp: now,
-        samplesMs: nextSamples,
+        samples: nextSamples,
       }
 
+      const totalSampleUnits = nextSamples.reduce(
+        (sum, sample) => sum + sample.units,
+        0,
+      )
       const rollingAverageMs =
-        nextSamples.reduce((sum, value) => sum + value, 0) / nextSamples.length
-      const remainingUnits = Math.max(0, totalUnits - completed)
+        totalSampleUnits > 0
+          ? nextSamples.reduce(
+              (sum, sample) => sum + sample.msPerUnit * sample.units,
+              0,
+            ) / totalSampleUnits
+          : sampleMs
       setEtaSnapshot({
         phase,
         label,
@@ -951,94 +1033,103 @@ export const ReadwiseContainer = () => {
     const deferredIdentityRetries: ManagedPageRepairIdentityRetryCandidate[] = []
     const issues: RunIssue[] = []
 
-    for (let index = 0; index < managedPages.length; index += 1) {
-      throwIfCancelled()
-      const page = managedPages[index]!
-      const pageName =
-        resolvePreferredPageName(page) ??
-        page.originalName ??
-        page.name ??
-        page.title ??
-        ''
+    const scanResults = await mapWithConcurrency(
+      managedPages,
+      managedPageRepairScanConcurrency,
+      async (page): Promise<ManagedPageRepairScanEntryResult> => {
+        throwIfCancelled()
+        const pageName =
+          resolvePreferredPageName(page) ??
+          page.originalName ??
+          page.name ??
+          page.title ??
+          ''
 
-      const inspection = await inspectManagedPageIntegrityV1(page)
-      const signatures = inspection.signatures
+        const inspection = await inspectManagedPageIntegrityV1(page)
+        const signatures = inspection.signatures
 
-      if (signatures.length === 0) {
-        options?.onProgress?.({
-          total: managedPages.length,
-          completed: index + 1,
-          pageName,
-        })
-        continue
-      }
-
-      throwIfCancelled()
-      const pageReaderDocumentId = await loadReaderDocumentIdFromPage(page)
-      const inferredReaderDocument = pageReaderDocumentId
-        ? null
-        : await inferReaderDocumentIdFromHighlights({
-          pageName,
-          rootContent: inspection.searchableContent,
-          previewCache: options?.previewCache,
-          client: options?.client,
-          logPrefix: formalSyncLogPrefix,
-        })
-      const readerDocumentId =
-        pageReaderDocumentId ?? inferredReaderDocument?.readerDocumentId ?? null
-
-      if (!readerDocumentId) {
-        if (inferredReaderDocument?.shouldRetryAfterScan) {
-          deferredIdentityRetries.push({
-            pageName,
-            rootContent: inspection.searchableContent,
-            signatures,
-          })
-          options?.onProgress?.({
-            total: managedPages.length,
-            completed: index + 1,
-            pageName,
-          })
-          continue
+        if (signatures.length === 0) {
+          return { pageName }
         }
 
-        const warningOnly =
-          hasLegacyTweetOnlyLinks(inspection.searchableContent) ||
-          !hasReaderHighlightLinks(inspection.searchableContent)
-        issues.push({
-          book: pageName || 'Managed page',
-          message: `Repair skipped because rw-reader-id is missing for ${pageName}.`,
-          category: warningOnly ? 'warning' : undefined,
-          summary:
-            warningOnly
-              ? 'This legacy page has no Reader highlight links, so the plugin cannot infer a Reader document id for automatic repair.'
-              : 'This page matches the legacy corruption signature, but the plugin cannot map it back to a Reader document.',
-          suggestedAction:
-            warningOnly
-              ? 'Skip automatic repair for this page, or rebuild it later after binding a Reader document id.'
-              : 'Repair rw-reader-id first, or run Full Refresh after restoring the page identity.',
-          debugFacts: [`detectedSignatures=${signatures.join(', ')}`],
-          namespacePrefix: formalNamespaceRoot,
-          pageName: pageName || null,
-        })
+        throwIfCancelled()
+        const pageReaderDocumentId = await loadReaderDocumentIdFromPage(page)
+        const inferredReaderDocument = pageReaderDocumentId
+          ? null
+          : await inferReaderDocumentIdFromHighlights({
+              pageName,
+              rootContent: inspection.searchableContent,
+              previewCache: options?.previewCache,
+              client: options?.client,
+              logPrefix: formalSyncLogPrefix,
+            })
+        const readerDocumentId =
+          pageReaderDocumentId ?? inferredReaderDocument?.readerDocumentId ?? null
+
+        if (!readerDocumentId) {
+          if (inferredReaderDocument?.shouldRetryAfterScan) {
+            return {
+              pageName,
+              deferredRetry: {
+                pageName,
+                rootContent: inspection.searchableContent,
+                signatures,
+              },
+            }
+          }
+
+          const warningOnly =
+            hasLegacyTweetOnlyLinks(inspection.searchableContent) ||
+            !hasReaderHighlightLinks(inspection.searchableContent)
+          return {
+            pageName,
+            issue: {
+              book: pageName || 'Managed page',
+              message: `Repair skipped because rw-reader-id is missing for ${pageName}.`,
+              category: warningOnly ? 'warning' : undefined,
+              summary:
+                warningOnly
+                  ? 'This legacy page has no Reader highlight links, so the plugin cannot infer a Reader document id for automatic repair.'
+                  : 'This page matches the legacy corruption signature, but the plugin cannot map it back to a Reader document.',
+              suggestedAction:
+                warningOnly
+                  ? 'Skip automatic repair for this page, or rebuild it later after binding a Reader document id.'
+                  : 'Repair rw-reader-id first, or run Full Refresh after restoring the page identity.',
+              debugFacts: [`detectedSignatures=${signatures.join(', ')}`],
+              namespacePrefix: formalNamespaceRoot,
+              pageName: pageName || null,
+            },
+          }
+        }
+
+        return {
+          pageName,
+          candidate: {
+            pageName,
+            readerDocumentId,
+            signatures,
+          },
+        }
+      },
+      (result, _index, completed) => {
         options?.onProgress?.({
           total: managedPages.length,
-          completed: index + 1,
-          pageName,
+          completed,
+          pageName: result.pageName,
         })
-        continue
-      }
+      },
+    )
 
-      candidates.push({
-        pageName,
-        readerDocumentId,
-        signatures,
-      })
-      options?.onProgress?.({
-        total: managedPages.length,
-        completed: index + 1,
-        pageName,
-      })
+    for (const result of scanResults) {
+      if (result.candidate) {
+        candidates.push(result.candidate)
+      }
+      if (result.deferredRetry) {
+        deferredIdentityRetries.push(result.deferredRetry)
+      }
+      if (result.issue) {
+        issues.push(result.issue)
+      }
     }
 
     if (deferredIdentityRetries.length > 0) {
@@ -1052,45 +1143,65 @@ export const ReadwiseContainer = () => {
 
       await sleep(5000)
 
-      for (const deferredPage of deferredIdentityRetries) {
-        throwIfCancelled()
+      const deferredResults = await mapWithConcurrency(
+        deferredIdentityRetries,
+        managedPageRepairScanConcurrency,
+        async (
+          deferredPage,
+        ): Promise<ManagedPageRepairScanEntryResult> => {
+          throwIfCancelled()
 
-        const deferredInference = await inferReaderDocumentIdFromHighlights({
-          pageName: deferredPage.pageName,
-          rootContent: deferredPage.rootContent,
-          previewCache: options?.previewCache,
-          client: options?.client,
-          logPrefix: formalSyncLogPrefix,
-        })
-
-        if (deferredInference.readerDocumentId) {
-          candidates.push({
+          const deferredInference = await inferReaderDocumentIdFromHighlights({
             pageName: deferredPage.pageName,
-            readerDocumentId: deferredInference.readerDocumentId,
-            signatures: deferredPage.signatures,
+            rootContent: deferredPage.rootContent,
+            previewCache: options?.previewCache,
+            client: options?.client,
+            logPrefix: formalSyncLogPrefix,
           })
-          continue
-        }
 
-        issues.push({
-          book: deferredPage.pageName || 'Managed page',
-          message: `Repair skipped because rw-reader-id is missing for ${deferredPage.pageName}.`,
-          summary:
-            'Automatic repair retried this page after a transient Reader lookup failure, but still could not map it back to a Reader document.',
-          suggestedAction:
-            'Retry repair later after the network stabilizes, or run Full Refresh after restoring the page identity.',
-          debugFacts: [
-            `detectedSignatures=${deferredPage.signatures.join(', ')}`,
-            `deferredIdentityRetry=yes`,
-            ...(deferredInference.failedHighlightIds.length > 0
-              ? [
-                  `failedHighlightIds=${deferredInference.failedHighlightIds.join(', ')}`,
-                ]
-              : []),
-          ],
-          namespacePrefix: formalNamespaceRoot,
-          pageName: deferredPage.pageName || null,
-        })
+          if (deferredInference.readerDocumentId) {
+            return {
+              pageName: deferredPage.pageName,
+              candidate: {
+                pageName: deferredPage.pageName,
+                readerDocumentId: deferredInference.readerDocumentId,
+                signatures: deferredPage.signatures,
+              },
+            }
+          }
+
+          return {
+            pageName: deferredPage.pageName,
+            issue: {
+              book: deferredPage.pageName || 'Managed page',
+              message: `Repair skipped because rw-reader-id is missing for ${deferredPage.pageName}.`,
+              summary:
+                'Automatic repair retried this page after a transient Reader lookup failure, but still could not map it back to a Reader document.',
+              suggestedAction:
+                'Retry repair later after the network stabilizes, or run Full Refresh after restoring the page identity.',
+              debugFacts: [
+                `detectedSignatures=${deferredPage.signatures.join(', ')}`,
+                `deferredIdentityRetry=yes`,
+                ...(deferredInference.failedHighlightIds.length > 0
+                  ? [
+                      `failedHighlightIds=${deferredInference.failedHighlightIds.join(', ')}`,
+                    ]
+                  : []),
+              ],
+              namespacePrefix: formalNamespaceRoot,
+              pageName: deferredPage.pageName || null,
+            },
+          }
+        },
+      )
+
+      for (const result of deferredResults) {
+        if (result.candidate) {
+          candidates.push(result.candidate)
+        }
+        if (result.issue) {
+          issues.push(result.issue)
+        }
       }
     }
 
@@ -1387,6 +1498,43 @@ export const ReadwiseContainer = () => {
     if (cancelledRef.current) {
       throw createRunCancelledError()
     }
+  }
+
+  const mapWithConcurrency = async <TItem, TResult>(
+    items: TItem[],
+    concurrency: number,
+    mapper: (item: TItem, index: number) => Promise<TResult>,
+    onSettled?: (result: TResult, index: number, completed: number) => void,
+  ) => {
+    const results = new Array<TResult>(items.length)
+    let nextIndex = 0
+    let completed = 0
+
+    const worker = async () => {
+      while (true) {
+        throwIfCancelled()
+        const currentIndex = nextIndex
+        nextIndex += 1
+
+        if (currentIndex >= items.length) {
+          return
+        }
+
+        const result = await mapper(items[currentIndex]!, currentIndex)
+        results[currentIndex] = result
+        completed += 1
+        onSettled?.(result, currentIndex, completed)
+      }
+    }
+
+    await Promise.all(
+      Array.from(
+        { length: Math.max(1, Math.min(concurrency, items.length)) },
+        () => worker(),
+      ),
+    )
+
+    return results
   }
 
   const sleep = (ms: number) =>

@@ -1,43 +1,12 @@
 const HEX_CHARS = '0123456789abcdef'
 const BASE36_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
 const UUID_HEX_LENGTH = 32
-const VERSION_NIBBLE_INDEX = 12
-const VARIANT_NIBBLE_INDEX = 16
-
-const isRfc4122VersionChar = (value: string) => /^[1-5]$/i.test(value)
-const isRfc4122VariantChar = (value: string) => /^[89ab]$/i.test(value)
-
-const normalizeVariantChar = (value: string) => {
-  const parsed = Number.parseInt(value, 16)
-  if (!Number.isFinite(parsed)) return '8'
-
-  return HEX_CHARS[(parsed & 0x3) | 0x8] ?? '8'
-}
-
-const normalizeUuidHex = (uuidHex: string) => {
-  const normalized = uuidHex
-    .slice(0, UUID_HEX_LENGTH)
-    .padEnd(UUID_HEX_LENGTH, '0')
-    .split('')
-
-  const versionChar = normalized[VERSION_NIBBLE_INDEX] ?? '0'
-  if (!isRfc4122VersionChar(versionChar)) {
-    normalized[VERSION_NIBBLE_INDEX] = '4'
-  }
-
-  const variantChar = normalized[VARIANT_NIBBLE_INDEX] ?? '0'
-  if (!isRfc4122VariantChar(variantChar)) {
-    normalized[VARIANT_NIBBLE_INDEX] = normalizeVariantChar(variantChar)
-  }
-
-  return normalized.join('')
-}
 
 const toCompatibleHexChar = (value: number): string =>
   HEX_CHARS[value % HEX_CHARS.length] ?? '0'
 
 const formatUuid = (uuidHex: string): string => {
-  const normalized = normalizeUuidHex(uuidHex)
+  const normalized = uuidHex.slice(0, UUID_HEX_LENGTH)
 
   return [
     normalized.slice(0, 8),
@@ -48,7 +17,7 @@ const formatUuid = (uuidHex: string): string => {
   ].join('-')
 }
 
-export const seedToCompatibleUuid = (seed: string): string => {
+export const seedToLegacyUuid = (seed: string): string => {
   const replacedIndices: number[] = []
   const uuidHexParts: string[] = []
 

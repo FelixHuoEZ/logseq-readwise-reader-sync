@@ -46,6 +46,7 @@ export interface GraphReaderSyncCacheV1 {
   getCachedHighlightsByIds(
     highlightIds: readonly string[],
   ): Promise<Map<string, ReaderDocument>>
+  putHighlights(highlights: ReaderDocument[]): Promise<void>
   getCachedParentDocuments(
     parentIds: string[],
   ): Promise<Map<string, ReaderDocument>>
@@ -372,6 +373,31 @@ class ReaderSyncCacheImplV1 implements GraphReaderSyncCacheV1 {
     }
 
     return documentsById
+  }
+
+  async putHighlights(highlights: ReaderDocument[]): Promise<void> {
+    const uniqueHighlights = uniqueReaderDocumentsById(highlights)
+    if (uniqueHighlights.length === 0) return
+
+    try {
+      const db = await this.getDatabase()
+      await upsertHighlights(db, uniqueHighlights)
+      logReadwiseInfo(CACHE_LOG_PREFIX, 'wrote highlight documents to IndexedDB', {
+        graphId: this.graphId,
+        databaseName: db.name,
+        store: HIGHLIGHT_STORE,
+        highlightCount: uniqueHighlights.length,
+        sampleHighlightIds: uniqueHighlights.slice(0, 5).map((document) => document.id),
+      })
+    } catch (error: unknown) {
+      logReadwiseError(CACHE_LOG_PREFIX, 'failed to write highlight documents to IndexedDB', {
+        graphId: this.graphId,
+        store: HIGHLIGHT_STORE,
+        highlightCount: uniqueHighlights.length,
+        error,
+      })
+      throw error
+    }
   }
 
   async getCachedParentDocuments(

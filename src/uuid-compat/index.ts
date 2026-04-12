@@ -1,3 +1,5 @@
 export * from './compute-compatible-highlight-uuid'
+export * from './compute-legacy-highlight-uuid'
 export * from './extract-uuid-seed'
 export * from './seed-to-compatible-uuid'
+export * from './seed-to-legacy-uuid'

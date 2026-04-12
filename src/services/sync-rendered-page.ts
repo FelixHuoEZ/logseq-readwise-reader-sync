@@ -72,19 +72,8 @@ export const syncRenderedPage = async (
     disambiguatedPageName: pageNamePlan.disambiguatedPageName,
     namespaceRoot: namespacePrefix,
   })
-  const resolvedExistingPage = pageResolution.page
-    ? await renameManagedPageIfNeededV1({
-        page: pageResolution.page,
-        expectedPageName: pageResolution.resolvedPageName,
-        logPrefix,
-      })
-    : {
-        page: null,
-        renamed: false,
-        previousPageName: null,
-      }
   const pageName = pageResolution.resolvedPageName
-  const pageBeforeRepair = resolvedExistingPage.page
+  const pageBeforeRepair = pageResolution.page
   const repairedPage =
     pageBeforeRepair == null
       ? {
@@ -98,6 +87,17 @@ export const syncRenderedPage = async (
           expectedPageName: pageName,
           logPrefix,
         })
+  const resolvedExistingPage = repairedPage.page
+    ? await renameManagedPageIfNeededV1({
+        page: repairedPage.page,
+        expectedPageName: pageResolution.resolvedPageName,
+        logPrefix,
+      })
+    : {
+        page: null,
+        renamed: false,
+        previousPageName: null,
+      }
   const normalizedBook = normalizeBookExport(book, { readerDocumentUrl })
   const startedAt = new Date()
   const renderRuntime = {
@@ -113,7 +113,7 @@ export const syncRenderedPage = async (
   )
   const content = renderedPage.emitResult.outputText
   logRenderedContentDiagnostics(pageName, content, logPrefix)
-  const existingPage = repairedPage.page
+  const existingPage = resolvedExistingPage.page
   const page = existingPage ?? (await createManagedPageV1(pageName, logPrefix))
   const pageProperties = await withManagedSyncTimestampPagePropertiesV1({
     page: pageBeforeRepair,

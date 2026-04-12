@@ -33,8 +33,10 @@ import {
   type ReaderSyncRetryPageEntryV1,
 } from '../cache'
 import {
+  assertManagedPageFileNameWithinLimits,
   auditManagedReaderPagesV1,
   backupFormalTestPages,
+  buildManagedPageNamePlanV1,
   captureCurrentPageFileSnapshotV1,
   clearManagedPagesByNamespacePrefix,
   clearManagedPagesBySessionNamespaceRoot,
@@ -52,6 +54,7 @@ import {
   syncRenderedDebugPage,
   syncRenderedReaderPreviewPage,
   syncRenderedPage,
+  type ManagedReaderPageAuditEntryV1,
 } from '../services'
 import { deriveNextUpdatedAfterV1 } from '../sync'
 import type {
@@ -547,6 +550,145 @@ export const ReadwiseContainer = () => {
       return parentIds.length === 1 ? parentIds[0] ?? null : null
     } catch {
       return null
+    }
+  }
+
+  const isManagedPageTitleOverlong = (pageTitle: string) => {
+    try {
+      assertManagedPageFileNameWithinLimits(pageTitle, 'org')
+      return false
+    } catch {
+      return true
+    }
+  }
+
+  const deleteManagedPageAuditEntry = async (
+    entry: ManagedReaderPageAuditEntryV1,
+  ) => {
+    const aliases = uniqueStrings([entry.pageTitle, ...entry.aliases]).sort(
+      (left, right) => right.length - left.length,
+    )
+
+    for (const alias of aliases) {
+      try {
+        await logseq.Editor.deletePage(alias)
+        await sleep(500)
+        return true
+      } catch {
+        // Keep trying aliases until the runtime accepts one.
+      }
+    }
+
+    return false
+  }
+
+  const resolveSafeDuplicateReaderIdPages = async ({
+    client,
+    previewCache,
+  }: {
+    client: ReturnType<typeof createReadwiseClient>
+    previewCache: ReturnType<typeof createGraphReaderSyncCacheV1>
+  }): Promise<{
+    resolvedGroups: number
+    removedPages: number
+  }> => {
+    const auditResult = await auditManagedReaderPagesV1([formalNamespaceRoot])
+    let resolvedGroups = 0
+    let removedPages = 0
+
+    for (const duplicateGroup of auditResult.duplicateReaderIds) {
+      const uniquePages = [
+        ...new Map(
+          duplicateGroup.pages.map((page) => [page.pageUuid, page] as const),
+        ).values(),
+      ]
+
+      if (uniquePages.length < 2) {
+        continue
+      }
+
+      let document =
+        (
+          await previewCache.getCachedParentDocuments([
+            duplicateGroup.readerDocumentId,
+          ])
+        ).get(duplicateGroup.readerDocumentId) ?? null
+
+      if (!document) {
+        document = await loadReaderParentDocumentByIdWithRetry(
+          client,
+          duplicateGroup.readerDocumentId,
+          formalSyncLogPrefix,
+        )
+
+        if (document) {
+          await previewCache.putParentDocuments([document])
+        }
+      }
+
+      if (!document) {
+        continue
+      }
+
+      const sourcePageTitle = document.title?.trim().length
+        ? document.title
+        : document.id
+      const pageNamePlan = buildManagedPageNamePlanV1({
+        pageTitle: sourcePageTitle,
+        namespacePrefix: formalNamespaceRoot,
+        managedId: duplicateGroup.readerDocumentId,
+        format: 'org',
+      })
+      const canonicalNames = uniqueStrings([
+        pageNamePlan.preferredPageName,
+        pageNamePlan.disambiguatedPageName,
+      ])
+      const canonicalPages = uniquePages.filter((page) =>
+        page.aliases.some((alias) => canonicalNames.includes(alias)) ||
+        canonicalNames.includes(page.pageTitle),
+      )
+      const legacyPages = uniquePages.filter(
+        (page) => !canonicalPages.some((candidate) => candidate.pageUuid === page.pageUuid),
+      )
+
+      if (canonicalPages.length !== 1 || legacyPages.length === 0) {
+        continue
+      }
+
+      if (!legacyPages.every((page) => isManagedPageTitleOverlong(page.pageTitle))) {
+        continue
+      }
+
+      let deletedAllLegacyPages = true
+
+      for (const legacyPage of legacyPages) {
+        const deleted = await deleteManagedPageAuditEntry(legacyPage)
+        if (!deleted) {
+          deletedAllLegacyPages = false
+          break
+        }
+        removedPages += 1
+      }
+
+      if (!deletedAllLegacyPages) {
+        continue
+      }
+
+      resolvedGroups += 1
+      logReadwiseInfo(
+        formalSyncLogPrefix,
+        'auto-resolved duplicate rw-reader-id pages',
+        {
+          readerDocumentId: duplicateGroup.readerDocumentId,
+          keptPage: canonicalPages[0]?.pageTitle ?? null,
+          removedPages: legacyPages.map((page) => page.pageTitle),
+        },
+      )
+    }
+
+    return {
+      resolvedGroups,
+      removedPages,
     }
   }
 
@@ -2251,6 +2393,17 @@ export const ReadwiseContainer = () => {
       const graphContext = await loadCurrentGraphContextV1()
       const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
       const client = createReadwiseClient(token)
+      const duplicateResolution = await resolveSafeDuplicateReaderIdPages({
+        client,
+        previewCache,
+      })
+
+      if (duplicateResolution.resolvedGroups > 0) {
+        setStatusMessage(
+          `Resolved ${duplicateResolution.resolvedGroups} duplicate rw-reader-id group(s); scanning managed pages for repair candidates...`,
+        )
+      }
+
       const scanResult = await scanManagedPagesForRepairCandidates({
         previewCache,
         onProgress: ({ total, completed, pageName }) => {

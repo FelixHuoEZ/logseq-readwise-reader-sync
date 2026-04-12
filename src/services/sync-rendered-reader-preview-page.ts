@@ -198,19 +198,8 @@ export const syncRenderedReaderPreviewPage = async (
               ? disambiguatedPageName
               : preferredPageName,
         }
-  const resolvedExistingPage = pageResolution.page
-    ? await renameManagedPageIfNeededV1({
-        page: pageResolution.page,
-        expectedPageName: pageResolution.resolvedPageName,
-        logPrefix,
-      })
-    : {
-        page: pageResolution.page,
-        renamed: false,
-        previousPageName: null,
-      }
   const pageName = pageResolution.resolvedPageName
-  const pageBeforeRepair = resolvedExistingPage.page
+  const pageBeforeRepair = pageResolution.page
   const repairedPage =
     pageBeforeRepair == null
       ? {
@@ -224,7 +213,18 @@ export const syncRenderedReaderPreviewPage = async (
           expectedPageName: pageName,
           logPrefix,
         })
-  const existingPage = repairedPage.page
+  const resolvedExistingPage = repairedPage.page
+    ? await renameManagedPageIfNeededV1({
+        page: repairedPage.page,
+        expectedPageName: pageResolution.resolvedPageName,
+        logPrefix,
+      })
+    : {
+        page: repairedPage.page,
+        renamed: false,
+        previousPageName: null,
+      }
+  const existingPage = resolvedExistingPage.page
   const syncHeaderText = options.syncHeaderText ?? ''
   const semanticPage = buildReaderPreviewSemanticPage(
     previewBook,

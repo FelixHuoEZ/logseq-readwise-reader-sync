@@ -18,6 +18,29 @@ const delay = async (ms: number) =>
     window.setTimeout(resolve, ms)
   })
 
+const waitForDeletedPageAliasesV1 = async (aliases: string[]) => {
+  const deadline = Date.now() + 4000
+
+  while (Date.now() < deadline) {
+    const survivors = (
+      await Promise.all(
+        aliases.map(async (alias) => {
+          const page = await logseq.Editor.getPage(alias)
+          return page ? alias : null
+        }),
+      )
+    ).filter((alias): alias is string => typeof alias === 'string')
+
+    if (survivors.length === 0) {
+      return
+    }
+
+    await delay(250)
+  }
+
+  await delay(500)
+}
+
 export const collectManagedPageAliasesV1 = (page: PageEntity): string[] =>
   uniqueStrings([
     typeof page.originalName === 'string' ? page.originalName : '',
@@ -239,7 +262,7 @@ export const rebuildManagedPageIfDamagedV1 = async ({
     )
   }
 
-  await delay(500)
+  await waitForDeletedPageAliasesV1(aliases)
 
   logReadwiseInfo(logPrefix, 'deleted damaged managed page before rebuild', {
     expectedPageName,

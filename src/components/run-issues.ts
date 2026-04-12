@@ -21,6 +21,7 @@ export type RunIssueCategory =
   | 'generic'
 
 const NON_BLOCKING_READER_SYNC_RUN_ISSUE_CATEGORIES = new Set<RunIssueCategory>([
+  'invalid-highlight-uuid',
   'managed-page-identity-conflict',
   'duplicate-reader-id',
   'path-too-long',

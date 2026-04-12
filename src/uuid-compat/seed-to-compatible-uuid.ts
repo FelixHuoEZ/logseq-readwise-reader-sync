@@ -1,11 +1,9 @@
 const HEX_CHARS = '0123456789abcdef'
 const BASE36_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
-const RFC4122_VARIANT_CHARS = '89ab'
 const UUID_HEX_LENGTH = 32
 const VERSION_NIBBLE_INDEX = 12
-const VARIANT_NIBBLE_INDEX = 16
 
-const isRfc4122VersionChar = (value: string) => /^[1-8]$/i.test(value)
+const isRfc4122VersionChar = (value: string) => /^[1-5]$/i.test(value)
 
 const normalizeUuidHex = (uuidHex: string) => {
   const normalized = uuidHex
@@ -16,15 +14,6 @@ const normalizeUuidHex = (uuidHex: string) => {
   const versionChar = normalized[VERSION_NIBBLE_INDEX] ?? '0'
   if (!isRfc4122VersionChar(versionChar)) {
     normalized[VERSION_NIBBLE_INDEX] = '4'
-  }
-
-  const variantChar = normalized[VARIANT_NIBBLE_INDEX] ?? '0'
-  if (!RFC4122_VARIANT_CHARS.includes(variantChar)) {
-    const parsed = Number.parseInt(variantChar, 16)
-    normalized[VARIANT_NIBBLE_INDEX] =
-      RFC4122_VARIANT_CHARS[
-        Number.isNaN(parsed) ? 0 : parsed % RFC4122_VARIANT_CHARS.length
-      ] ?? '8'
   }
 
   return normalized.join('')

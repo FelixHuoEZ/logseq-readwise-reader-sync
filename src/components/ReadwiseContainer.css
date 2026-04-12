@@ -422,6 +422,12 @@
   margin-bottom: 0;
 }
 
+.rw-error-item-warning {
+  border-color: rgba(249, 115, 22, 0.18);
+  background: rgba(255, 247, 237, 0.92);
+  color: #9a3412;
+}
+
 .rw-error-item strong {
   display: block;
   margin-bottom: 4px;
@@ -449,6 +455,16 @@
 .rw-error-action {
   margin-top: 6px;
   color: #7c2d12;
+}
+
+.rw-error-item-warning .rw-error-label {
+  color: #b45309;
+}
+
+.rw-error-item-warning .rw-error-summary,
+.rw-error-item-warning .rw-error-message,
+.rw-error-item-warning .rw-error-action {
+  color: #9a3412;
 }
 
 .rw-diff-panel {

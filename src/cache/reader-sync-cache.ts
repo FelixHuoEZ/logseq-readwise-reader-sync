@@ -43,6 +43,9 @@ export interface ReaderSyncRetryPageEntryV1 {
 }
 
 export interface GraphReaderSyncCacheV1 {
+  getCachedHighlightsByIds(
+    highlightIds: readonly string[],
+  ): Promise<Map<string, ReaderDocument>>
   getCachedParentDocuments(
     parentIds: string[],
   ): Promise<Map<string, ReaderDocument>>
@@ -343,6 +346,32 @@ class ReaderSyncCacheImplV1 implements GraphReaderSyncCacheV1 {
     }
 
     return this.dbPromise
+  }
+
+  async getCachedHighlightsByIds(
+    highlightIds: readonly string[],
+  ): Promise<Map<string, ReaderDocument>> {
+    const ids = uniqueStrings(highlightIds)
+    if (ids.length === 0) return new Map()
+
+    const db = await this.getDatabase()
+    const tx = db.transaction([HIGHLIGHT_STORE], 'readonly')
+    const store = tx.objectStore(HIGHLIGHT_STORE)
+
+    const records = await Promise.all(
+      ids.map((id) =>
+        requestToPromise<HighlightRecord | undefined>(store.get(id)),
+      ),
+    )
+    await txToPromise(tx)
+
+    const documentsById = new Map<string, ReaderDocument>()
+    for (const record of records) {
+      if (!record?.document?.id) continue
+      documentsById.set(record.document.id, record.document)
+    }
+
+    return documentsById
   }
 
   async getCachedParentDocuments(

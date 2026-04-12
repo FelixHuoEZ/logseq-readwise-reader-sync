@@ -41,6 +41,7 @@ import {
   clearFormalTestPages,
   type CurrentPageDiffResult,
   diffCurrentPageFileSnapshotV1,
+  inspectManagedPageIntegrityV1,
   listManagedPagesByNamespacePrefix,
   listManagedPagesBySessionNamespaceRoot,
   loadActiveFormalTestSessionManifestV1,
@@ -510,28 +511,43 @@ export const ReadwiseContainer = () => {
     }
   }
 
-  const detectLegacyManagedPageRepairSignatures = (rootContent: string) => {
-    const signatures: string[] = []
-    const propertiesBlocks = (rootContent.match(/^:PROPERTIES:$/gm) ?? []).length
-    const noteBlocks = (rootContent.match(/^#\+BEGIN_NOTE$/gm) ?? []).length
-    const syncHeaders = (
-      rootContent.match(/^\* Highlights (?:first synced|refreshed) by \[\[Readwise\]\]/gm) ??
-      []
-    ).length
+  const extractReaderHighlightIdsFromRootContent = (rootContent: string): string[] =>
+    uniqueStrings(
+      [...rootContent.matchAll(/\[\[https:\/\/read\.readwise\.io\/read\/([0-9a-z]+)\]\[View Highlight\]\]/gi)]
+        .map((match) => match[1] ?? '')
+        .filter((value) => value.length > 0),
+    )
 
-    if (propertiesBlocks > 1) {
-      signatures.push('duplicate properties block')
+  const hasLegacyTweetOnlyLinks = (rootContent: string) =>
+    /\[\[[^\]]+\]\[View Tweet\]\]/i.test(rootContent) &&
+    !/\[\[[^\]]+\]\[View Highlight\]\]/i.test(rootContent)
+
+  const inferReaderDocumentIdFromCachedHighlights = async ({
+    rootContent,
+    previewCache,
+  }: {
+    rootContent: string
+    previewCache?: ReturnType<typeof createGraphReaderSyncCacheV1>
+  }): Promise<string | null> => {
+    if (!previewCache) return null
+
+    const highlightIds = extractReaderHighlightIdsFromRootContent(rootContent)
+    if (highlightIds.length === 0) return null
+
+    try {
+      const cachedHighlights = await previewCache.getCachedHighlightsByIds(
+        highlightIds,
+      )
+      const parentIds = uniqueStrings(
+        [...cachedHighlights.values()]
+          .map((highlight) => highlight.parent_id ?? '')
+          .filter((value) => value.length > 0),
+      )
+
+      return parentIds.length === 1 ? parentIds[0] ?? null : null
+    } catch {
+      return null
     }
-
-    if (noteBlocks > 1) {
-      signatures.push('duplicate note block')
-    }
-
-    if (syncHeaders > 1) {
-      signatures.push('duplicate sync header')
-    }
-
-    return signatures
   }
 
   const scanManagedPagesForRepairCandidates = async (options?: {
@@ -540,6 +556,7 @@ export const ReadwiseContainer = () => {
       completed: number
       pageName: string
     }) => void
+    previewCache?: ReturnType<typeof createGraphReaderSyncCacheV1>
   }): Promise<{
     scannedPages: number
     candidates: ManagedPageRepairCandidate[]
@@ -569,24 +586,34 @@ export const ReadwiseContainer = () => {
         pageName,
       })
 
-      const pageBlocksTree = await logseq.Editor.getPageBlocksTree(page.name)
-      const rootContent = pageBlocksTree?.[0]?.content ?? ''
-      const signatures = detectLegacyManagedPageRepairSignatures(rootContent)
+      const inspection = await inspectManagedPageIntegrityV1(page)
+      const signatures = inspection.signatures
 
       if (signatures.length === 0) {
         continue
       }
 
-      const readerDocumentId = await loadReaderDocumentIdFromPage(page)
+      const readerDocumentId =
+        (await loadReaderDocumentIdFromPage(page)) ??
+        (await inferReaderDocumentIdFromCachedHighlights({
+          rootContent: inspection.rootContent,
+          previewCache: options?.previewCache,
+        }))
 
       if (!readerDocumentId) {
+        const warningOnly = hasLegacyTweetOnlyLinks(inspection.rootContent)
         issues.push({
           book: pageName || 'Managed page',
           message: `Repair skipped because rw-reader-id is missing for ${pageName}.`,
+          category: warningOnly ? 'warning' : undefined,
           summary:
-            'This page matches the legacy corruption signature, but the plugin cannot map it back to a Reader document.',
+            warningOnly
+              ? 'This legacy tweet page has no Reader highlight links, so the plugin cannot infer a Reader document id for automatic repair.'
+              : 'This page matches the legacy corruption signature, but the plugin cannot map it back to a Reader document.',
           suggestedAction:
-            'Repair rw-reader-id first, or run Full Refresh after restoring the page identity.',
+            warningOnly
+              ? 'Skip automatic repair for this page, or rebuild it later after binding a Reader document id.'
+              : 'Repair rw-reader-id first, or run Full Refresh after restoring the page identity.',
           debugFacts: [`detectedSignatures=${signatures.join(', ')}`],
           namespacePrefix: formalNamespaceRoot,
           pageName: pageName || null,
@@ -2225,6 +2252,7 @@ export const ReadwiseContainer = () => {
       const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
       const client = createReadwiseClient(token)
       const scanResult = await scanManagedPagesForRepairCandidates({
+        previewCache,
         onProgress: ({ total, completed, pageName }) => {
           setCurrent(completed)
           setTotal(total)
@@ -4091,7 +4119,14 @@ export const ReadwiseContainer = () => {
                   const diagnosedIssue = diagnoseRunIssue(err)
 
                   return (
-                  <div key={i} className="rw-error-item">
+                  <div
+                    key={i}
+                    className={`rw-error-item ${
+                      diagnosedIssue.category === 'warning'
+                        ? 'rw-error-item-warning'
+                        : ''
+                    }`}
+                  >
                     <strong>{diagnosedIssue.book}</strong>
                     <div className="rw-error-label">
                       {formatRunIssueCategoryLabel(diagnosedIssue.category)}

@@ -1,6 +1,7 @@
 export * from './append-highlights'
 export * from './audit-managed-reader-pages'
 export * from './formal-test-pages'
+export * from './managed-page-integrity'
 export * from './page-file-diff'
 export * from './readwise-page-names'
 export * from './setup-properties'

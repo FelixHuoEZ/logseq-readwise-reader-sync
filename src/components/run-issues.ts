@@ -14,6 +14,7 @@ const basename = (value: string) => {
 }
 
 export type RunIssueCategory =
+  | 'warning'
   | 'invalid-highlight-uuid'
   | 'managed-page-identity-conflict'
   | 'duplicate-reader-id'
@@ -21,6 +22,7 @@ export type RunIssueCategory =
   | 'generic'
 
 const NON_BLOCKING_READER_SYNC_RUN_ISSUE_CATEGORIES = new Set<RunIssueCategory>([
+  'warning',
   'invalid-highlight-uuid',
   'managed-page-identity-conflict',
   'duplicate-reader-id',
@@ -93,6 +95,8 @@ const withContextFacts = (
 
 export const formatRunIssueCategoryLabel = (category: RunIssueCategory) => {
   switch (category) {
+    case 'warning':
+      return 'Warning'
     case 'invalid-highlight-uuid':
       return 'Invalid highlight UUID'
     case 'managed-page-identity-conflict':
@@ -228,6 +232,7 @@ export const summarizeRunIssueCategories = (issues: RunIssue[]) => {
       return accumulator
     },
     {
+      warning: 0,
       'invalid-highlight-uuid': 0,
       'managed-page-identity-conflict': 0,
       'duplicate-reader-id': 0,

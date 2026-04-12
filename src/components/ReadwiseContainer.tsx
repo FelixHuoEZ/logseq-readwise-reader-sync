@@ -164,6 +164,7 @@ export const ReadwiseContainer = () => {
   const [currentBook, setCurrentBook] = useState('')
   const [statusMessage, setStatusMessage] = useState('')
   const [errors, setErrors] = useState<RunIssue[]>([])
+  const [showWarningIssues, setShowWarningIssues] = useState(false)
   const [runIssueContext, setRunIssueContext] =
     useState<RunIssueBundleContext | null>(null)
   const [pageDiffResult, setPageDiffResult] =
@@ -1018,6 +1019,7 @@ export const ReadwiseContainer = () => {
 
   const clearRunIssues = () => {
     setErrors([])
+    setShowWarningIssues(false)
     setRunIssueContext(null)
   }
 
@@ -1048,6 +1050,19 @@ export const ReadwiseContainer = () => {
         context: buildLiveRunIssueContext(),
       }),
       'Run issue bundle',
+    )
+  }
+
+  const handleCopyRunIssueBundleWithoutWarnings = async () => {
+    if (errors.length === 0) return
+
+    await copyText(
+      buildRunIssuesBundle({
+        issues: errors,
+        context: buildLiveRunIssueContext(),
+        includeWarnings: false,
+      }),
+      'Run issue bundle (errors only)',
     )
   }
 
@@ -4086,6 +4101,13 @@ export const ReadwiseContainer = () => {
   const sessionTestSyncLabel = `Incremental Sync (session test: ${sessionTestSyncCount})`
   const issueCategorySummary =
     errors.length > 0 ? summarizeRunIssueCategories(errors) : ''
+  const diagnosedErrors = errors.map((issue) => diagnoseRunIssue(issue))
+  const blockingIssues = diagnosedErrors.filter(
+    (issue) => issue.category !== 'warning',
+  )
+  const warningIssues = diagnosedErrors.filter(
+    (issue) => issue.category === 'warning',
+  )
   const statusLabel =
     status === 'completed' && errors.length > 0
       ? 'warning'
@@ -4473,45 +4495,91 @@ export const ReadwiseContainer = () => {
                     {issueCategorySummary ? ` · ${issueCategorySummary}` : ''}
                   </div>
                 </div>
-                <button
-                  className="rw-btn rw-btn-small"
-                  onClick={() => void handleCopyRunIssueBundle()}
-                >
-                  Copy Issue Bundle
-                </button>
+                <div className="rw-section-actions">
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() => void handleCopyRunIssueBundleWithoutWarnings()}
+                  >
+                    Copy Errors Only
+                  </button>
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() => void handleCopyRunIssueBundle()}
+                  >
+                    Copy Full Bundle
+                  </button>
+                </div>
               </div>
-              <div className="rw-errors">
-                {errors.map((err, i) => {
-                  const diagnosedIssue = diagnoseRunIssue(err)
-
-                  return (
+              {blockingIssues.length > 0 && (
+                <div className="rw-errors">
+                  {blockingIssues.map((issue, index) => (
+                    <div
+                      key={`${issue.book}:${issue.message}:${index}`}
+                      className="rw-error-item"
+                    >
+                      <strong>{issue.book}</strong>
+                      <div className="rw-error-label">
+                        {formatRunIssueCategoryLabel(issue.category)}
+                      </div>
+                      <div className="rw-error-summary">{issue.summary}</div>
+                      <div className="rw-error-message">{issue.message}</div>
+                      {issue.suggestedAction && (
+                        <div className="rw-error-action">
+                          Next: {issue.suggestedAction}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {warningIssues.length > 0 && (
+                <div className="rw-warning-section">
                   <div
-                    key={i}
-                    className={`rw-error-item ${
-                      diagnosedIssue.category === 'warning'
-                        ? 'rw-error-item-warning'
-                        : ''
+                    className={`rw-warning-summary ${
+                      showWarningIssues ? 'is-expanded' : ''
                     }`}
                   >
-                    <strong>{diagnosedIssue.book}</strong>
-                    <div className="rw-error-label">
-                      {formatRunIssueCategoryLabel(diagnosedIssue.category)}
-                    </div>
-                    <div className="rw-error-summary">
-                      {diagnosedIssue.summary}
-                    </div>
-                    <div className="rw-error-message">
-                      {diagnosedIssue.message}
-                    </div>
-                    {diagnosedIssue.suggestedAction && (
-                      <div className="rw-error-action">
-                        Next: {diagnosedIssue.suggestedAction}
+                    <div>
+                      <div className="rw-warning-title">
+                        Warnings are collapsed by default
                       </div>
-                    )}
+                      <div className="rw-warning-meta">
+                        {warningIssues.length} warning item(s)
+                      </div>
+                    </div>
+                    <button
+                      className="rw-btn rw-btn-small"
+                      onClick={() => setShowWarningIssues((previous) => !previous)}
+                    >
+                      {showWarningIssues
+                        ? 'Hide Warnings'
+                        : `Show Warnings (${warningIssues.length})`}
+                    </button>
                   </div>
-                  )
-                })}
-              </div>
+                  {showWarningIssues && (
+                    <div className="rw-errors rw-errors-warning">
+                      {warningIssues.map((issue, index) => (
+                        <div
+                          key={`${issue.book}:${issue.message}:${index}`}
+                          className="rw-error-item rw-error-item-warning"
+                        >
+                          <strong>{issue.book}</strong>
+                          <div className="rw-error-label">
+                            {formatRunIssueCategoryLabel(issue.category)}
+                          </div>
+                          <div className="rw-error-summary">{issue.summary}</div>
+                          <div className="rw-error-message">{issue.message}</div>
+                          {issue.suggestedAction && (
+                            <div className="rw-error-action">
+                              Next: {issue.suggestedAction}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

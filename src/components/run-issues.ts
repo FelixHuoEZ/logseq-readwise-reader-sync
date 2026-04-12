@@ -253,11 +253,21 @@ export const summarizeRunIssueCategories = (issues: RunIssue[]) => {
 export const buildRunIssuesBundle = ({
   issues,
   context,
+  includeWarnings = true,
 }: {
   issues: RunIssue[]
   context: RunIssueBundleContext | null
+  includeWarnings?: boolean
 }) => {
-  const diagnosedIssues = issues.map((issue) => diagnoseRunIssue(issue))
+  const diagnosedIssues = issues
+    .map((issue) => diagnoseRunIssue(issue))
+    .filter((issue) => includeWarnings || issue.category !== 'warning')
+  const omittedWarnings =
+    includeWarnings
+      ? 0
+      : issues
+          .map((issue) => diagnoseRunIssue(issue))
+          .filter((issue) => issue.category === 'warning').length
   const categorySummary = summarizeRunIssueCategories(diagnosedIssues)
   const statsEntries = Object.entries(context?.stats ?? {}).filter(
     ([, value]) => value != null,
@@ -279,25 +289,28 @@ export const buildRunIssuesBundle = ({
     context?.processedItems != null
       ? `Processed Items: ${context.processedItems}`
       : null,
-    context?.issuesCount != null ? `Issue Count: ${context.issuesCount}` : null,
+    `Issue Count: ${diagnosedIssues.length}`,
     categorySummary ? `Issue Categories: ${categorySummary}` : null,
+    omittedWarnings > 0 ? `Warnings Omitted: ${omittedWarnings}` : null,
     context?.statusMessage ? `Status Message: ${context.statusMessage}` : null,
     statsEntries.length > 0 ? '' : null,
     statsEntries.length > 0 ? 'Run Stats:' : null,
     ...statsEntries.map(([key, value]) => `- ${key}: ${value}`),
     '',
     'Issues:',
-    ...diagnosedIssues.flatMap((issue, index) => [
-      `${index + 1}. ${issue.book}`,
-      `   Category: ${formatRunIssueCategoryLabel(issue.category)}`,
-      `   Summary: ${issue.summary}`,
-      `   Suggested Action: ${issue.suggestedAction}`,
-      `   Raw Message: ${issue.message}`,
-      ...(issue.debugFacts.length > 0
-        ? ['   Debug Facts:', ...issue.debugFacts.map((fact) => `   - ${fact}`)]
-        : []),
-      '',
-    ]),
+    ...(diagnosedIssues.length === 0
+      ? ['- No non-warning issues in this bundle.', '']
+      : diagnosedIssues.flatMap((issue, index) => [
+          `${index + 1}. ${issue.book}`,
+          `   Category: ${formatRunIssueCategoryLabel(issue.category)}`,
+          `   Summary: ${issue.summary}`,
+          `   Suggested Action: ${issue.suggestedAction}`,
+          `   Raw Message: ${issue.message}`,
+          ...(issue.debugFacts.length > 0
+            ? ['   Debug Facts:', ...issue.debugFacts.map((fact) => `   - ${fact}`)]
+            : []),
+          '',
+        ])),
   ]
     .filter((line): line is string => typeof line === 'string')
     .join('\n')

@@ -21,6 +21,7 @@ import {
   loadCurrentGraphContextV1,
   loadGraphReaderRetryFallbackEntriesV1,
   loadGraphReaderSyncStateV1,
+  normalizeComparableUrlV1,
   removeGraphReaderRetryFallbackEntriesV1,
   saveGraphLastFormalSyncSummaryV1,
   saveGraphCheckpointStateV1,
@@ -49,6 +50,9 @@ import {
   listManagedPagesBySessionNamespaceRoot,
   loadActiveFormalTestSessionManifestV1,
   migrateLegacyBlockRefsV1,
+  migrateCurrentPageLegacyIdsV1,
+  previewLegacyBlockRefsV1,
+  previewCurrentPageLegacyIdsV1,
   rotateActiveFormalTestSessionNamespaceV1,
   restoreLatestFormalTestPageBackup,
   saveFormalTestSessionManifestV1,
@@ -56,6 +60,8 @@ import {
   syncRenderedDebugPage,
   syncRenderedReaderPreviewPage,
   syncRenderedPage,
+  type CurrentPageLegacyIdRewriteEntryV1,
+  type LegacyBlockRefPreviewEntryV1,
   type ManagedReaderPageAuditEntryV1,
 } from '../services'
 import { deriveNextUpdatedAfterV1 } from '../sync'
@@ -104,6 +110,7 @@ interface ManagedPageRepairCandidate {
   pageName: string
   readerDocumentId: string
   signatures: string[]
+  rootContent: string
 }
 
 interface ManagedPageRepairIdentityRetryCandidate {
@@ -116,6 +123,42 @@ interface ReaderDocumentInferenceResult {
   readerDocumentId: string | null
   shouldRetryAfterScan: boolean
   failedHighlightIds: string[]
+}
+
+interface ManagedPageRepairSignals {
+  pageTitle: string
+  normalizedPageTitle: string | null
+  linkUrl: string | null
+  normalizedLinkUrl: string | null
+  author: string | null
+  normalizedAuthor: string | null
+  category: string | null
+  normalizedCategory: string | null
+}
+
+interface ReaderDocumentRepairMatch {
+  document: ReaderDocument
+  score: number
+  reasons: string[]
+  identityKey: string | null
+}
+
+interface ReaderParentReplacementLookupResult {
+  document: ReaderDocument | null
+  shouldRetry: boolean
+}
+
+interface PendingLegacyBlockRefMigrationPlan {
+  mapping: Map<string, string>
+  entries: LegacyBlockRefPreviewEntryV1[]
+}
+
+interface PendingCurrentPageLegacyIdMigrationPlan {
+  mapping: Map<string, string>
+  pageName: string
+  relativeFilePath: string
+  fileKind: 'page' | 'whiteboard'
+  rewrites: CurrentPageLegacyIdRewriteEntryV1[]
 }
 
 interface ManagedPageRepairScanEntryResult {
@@ -193,6 +236,10 @@ export const ReadwiseContainer = () => {
   const [showWarningIssues, setShowWarningIssues] = useState(false)
   const [runIssueContext, setRunIssueContext] =
     useState<RunIssueBundleContext | null>(null)
+  const [pendingLegacyBlockRefMigration, setPendingLegacyBlockRefMigration] =
+    useState<PendingLegacyBlockRefMigrationPlan | null>(null)
+  const [pendingCurrentPageLegacyIdMigration, setPendingCurrentPageLegacyIdMigration] =
+    useState<PendingCurrentPageLegacyIdMigrationPlan | null>(null)
   const [pageDiffResult, setPageDiffResult] =
     useState<CurrentPageDiffResult | null>(null)
   const [cacheSummaryResult, setCacheSummaryResult] =
@@ -652,12 +699,429 @@ export const ReadwiseContainer = () => {
         .filter((value) => value.length > 0),
     )
 
+  const normalizeComparableText = (value: string | null | undefined) => {
+    if (typeof value !== 'string') return null
+
+    const normalized = value.replace(/\s+/g, ' ').trim().toLowerCase()
+    return normalized.length > 0 ? normalized : null
+  }
+
+  const normalizeReaderCategory = (value: string | null | undefined) => {
+    const normalized = normalizeComparableText(value)
+    if (!normalized) return null
+
+    const singular = normalized.endsWith('s') ? normalized.slice(0, -1) : normalized
+    if (singular === 'article') return 'article'
+    if (singular === 'book') return 'book'
+    if (singular === 'tweet') return 'tweet'
+    if (singular === 'video') return 'video'
+    if (singular === 'podcast') return 'podcast'
+    if (singular === 'supplemental') return 'supplemental'
+
+    return singular
+  }
+
+  const unwrapOrgPropertyValue = (value: string | null | undefined) => {
+    if (typeof value !== 'string') return null
+
+    const trimmed = value.trim()
+    if (trimmed.length === 0) return null
+
+    const orgLinkMatch = trimmed.match(/^\[\[([^[\]]+)\]\[[^[\]]+\]\]$/)
+    if (orgLinkMatch) return orgLinkMatch[1]?.trim() ?? null
+
+    const simpleLinkMatch = trimmed.match(/^\[\[([^[\]]+)\]\]$/)
+    if (simpleLinkMatch) return simpleLinkMatch[1]?.trim() ?? null
+
+    return trimmed
+  }
+
+  const extractRootPropertyValue = (rootContent: string, key: string) => {
+    const pattern = new RegExp(`^:${key}:\\s*(.+?)\\s*$`, 'im')
+    const match = rootContent.match(pattern)
+    return unwrapOrgPropertyValue(match?.[1] ?? null)
+  }
+
+  const extractManagedPageRepairSignals = ({
+    pageName,
+    rootContent,
+  }: {
+    pageName: string
+    rootContent: string
+  }): ManagedPageRepairSignals => {
+    const pageTitle = pageName.startsWith(`${formalNamespaceRoot}/`)
+      ? pageName.slice(formalNamespaceRoot.length + 1)
+      : pageName
+    const linkUrl = extractRootPropertyValue(rootContent, 'LINK')
+    const author = extractRootPropertyValue(rootContent, 'AUTHOR')
+    const category = extractRootPropertyValue(rootContent, 'CATEGORIES')
+
+    return {
+      pageTitle,
+      normalizedPageTitle: normalizeComparableText(pageTitle),
+      linkUrl,
+      normalizedLinkUrl: normalizeComparableUrlV1(linkUrl),
+      author,
+      normalizedAuthor: normalizeComparableText(author),
+      category,
+      normalizedCategory: normalizeReaderCategory(category),
+    }
+  }
+
+  const buildReaderDocumentRepairIdentityKey = (document: ReaderDocument) => {
+    const normalizedUrl =
+      normalizeComparableUrlV1(document.source_url) ??
+      normalizeComparableUrlV1(document.url)
+    if (normalizedUrl) {
+      return `url:${normalizedUrl}`
+    }
+
+    const normalizedTitle = normalizeComparableText(document.title)
+    if (!normalizedTitle) return null
+
+    return [
+      'meta',
+      normalizedTitle,
+      normalizeComparableText(document.author) ?? '',
+      normalizeReaderCategory(document.category) ?? '',
+    ].join('|')
+  }
+
+  const scoreReaderDocumentForRepairSignals = ({
+    document,
+    signals,
+  }: {
+    document: ReaderDocument
+    signals: ManagedPageRepairSignals
+  }): ReaderDocumentRepairMatch | null => {
+    const reasons: string[] = []
+    let score = 0
+
+    const normalizedDocumentUrl =
+      normalizeComparableUrlV1(document.source_url) ??
+      normalizeComparableUrlV1(document.url)
+    const normalizedDocumentTitle = normalizeComparableText(document.title)
+    const normalizedDocumentAuthor = normalizeComparableText(document.author)
+    const normalizedDocumentCategory = normalizeReaderCategory(document.category)
+
+    if (
+      signals.normalizedLinkUrl &&
+      normalizedDocumentUrl &&
+      signals.normalizedLinkUrl === normalizedDocumentUrl
+    ) {
+      score += 1000
+      reasons.push('exact-url')
+    }
+
+    if (
+      signals.normalizedPageTitle &&
+      normalizedDocumentTitle &&
+      signals.normalizedPageTitle === normalizedDocumentTitle
+    ) {
+      score += 300
+      reasons.push('exact-title')
+    }
+
+    if (
+      signals.normalizedAuthor &&
+      normalizedDocumentAuthor &&
+      signals.normalizedAuthor === normalizedDocumentAuthor
+    ) {
+      score += 90
+      reasons.push('exact-author')
+    }
+
+    if (
+      signals.normalizedCategory &&
+      normalizedDocumentCategory &&
+      signals.normalizedCategory === normalizedDocumentCategory
+    ) {
+      score += 40
+      reasons.push('exact-category')
+    }
+
+    if (score === 0) return null
+
+    return {
+      document,
+      score,
+      reasons,
+      identityKey: buildReaderDocumentRepairIdentityKey(document),
+    }
+  }
+
+  const selectCanonicalReaderDocument = (documents: ReaderDocument[]) =>
+    [...documents].sort((left, right) => {
+      if (left.updated_at !== right.updated_at) {
+        return right.updated_at.localeCompare(left.updated_at)
+      }
+      if (left.created_at !== right.created_at) {
+        return right.created_at.localeCompare(left.created_at)
+      }
+      return left.id.localeCompare(right.id)
+    })[0] ?? null
+
+  const chooseStrongReaderDocumentMatch = (
+    matches: ReaderDocumentRepairMatch[],
+  ): ReaderDocument | null => {
+    if (matches.length === 0) return null
+
+    const exactUrlMatches = matches.filter((match) =>
+      match.reasons.includes('exact-url'),
+    )
+    if (exactUrlMatches.length === 1) {
+      return exactUrlMatches[0]?.document ?? null
+    }
+    if (exactUrlMatches.length > 1) {
+      const uniqueIdentityKeys = uniqueStrings(
+        exactUrlMatches
+          .map((match) => match.identityKey ?? '')
+          .filter((value) => value.length > 0),
+      )
+      if (uniqueIdentityKeys.length === 1) {
+        return selectCanonicalReaderDocument(
+          exactUrlMatches.map((match) => match.document),
+        )
+      }
+      return null
+    }
+
+    const exactTitleMatches = matches.filter((match) =>
+      match.reasons.includes('exact-title'),
+    )
+    const highConfidenceTitleMatches = exactTitleMatches.filter(
+      (match) =>
+        match.reasons.includes('exact-author') ||
+        match.reasons.includes('exact-category'),
+    )
+    if (highConfidenceTitleMatches.length === 1) {
+      return highConfidenceTitleMatches[0]?.document ?? null
+    }
+    if (highConfidenceTitleMatches.length > 1) {
+      const uniqueIdentityKeys = uniqueStrings(
+        highConfidenceTitleMatches
+          .map((match) => match.identityKey ?? '')
+          .filter((value) => value.length > 0),
+      )
+      if (uniqueIdentityKeys.length === 1) {
+        return selectCanonicalReaderDocument(
+          highConfidenceTitleMatches.map((match) => match.document),
+        )
+      }
+    }
+
+    return null
+  }
+
   const hasLegacyTweetOnlyLinks = (rootContent: string) =>
     /\[\[[^\]]+\]\[View Tweet\]\]/i.test(rootContent) &&
     !/\[\[[^\]]+\]\[View Highlight\]\]/i.test(rootContent)
 
   const hasReaderHighlightLinks = (rootContent: string) =>
     /\[\[[^\]]+\]\[View Highlight\]\]/i.test(rootContent)
+
+  const listReaderDocumentsWithRetry = async (
+    client: ReturnType<typeof createReadwiseClient>,
+    params: Parameters<ReturnType<typeof createReadwiseClient>['listReaderDocuments']>[0],
+    logPrefix: string,
+    context: {
+      stage: 'repair-parent-scan' | 'repair-replacement-scan'
+      pageName?: string
+      documentId?: string
+      pageCursor?: string | null
+    },
+  ) => {
+    let lastError: unknown = null
+    const totalAttempts = 4
+
+    for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+      try {
+        return await client.listReaderDocuments(params)
+      } catch (error) {
+        lastError = error
+
+        if (!isRetriableReaderListError(error) || attempt === totalAttempts - 1) {
+          break
+        }
+
+        logReadwiseWarn(logPrefix, 'Reader API list request failed; retrying', {
+          stage: context.stage,
+          pageName: context.pageName ?? null,
+          documentId: context.documentId ?? null,
+          pageCursor: context.pageCursor ?? null,
+          attempt: attempt + 1,
+          totalAttempts,
+          formattedError: describeUnknownError(error),
+        })
+
+        await sleep(1000 * 2 ** attempt)
+      }
+    }
+
+    throw new Error(
+      `Reader list request failed after ${totalAttempts} attempt(s). ${describeUnknownError(lastError)}`,
+    )
+  }
+
+  const loadReaderParentDocumentsByIdsAuthoritative = async ({
+    client,
+    parentIds,
+    previewCache,
+    pageName,
+    logPrefix,
+  }: {
+    client: ReturnType<typeof createReadwiseClient>
+    parentIds: readonly string[]
+    previewCache?: ReturnType<typeof createGraphReaderSyncCacheV1>
+    pageName: string
+    logPrefix: string
+  }) => {
+    const resolvedDocuments = await mapWithConcurrency(
+      uniqueStrings(parentIds.filter((value) => value.length > 0)),
+      3,
+      async (parentId) => {
+        throwIfCancelled()
+
+        try {
+          return await loadReaderParentDocumentByIdWithRetry(
+            client,
+            parentId,
+            logPrefix,
+          )
+        } catch (error) {
+          logReadwiseWarn(logPrefix, 'repair parent metadata lookup failed', {
+            pageName,
+            parentId,
+            formattedError: describeUnknownError(error),
+          })
+          return null
+        }
+      },
+    )
+
+    const documents = resolvedDocuments.filter(
+      (document): document is ReaderDocument => !!document,
+    )
+
+    if (documents.length > 0) {
+      try {
+        await previewCache?.putParentDocuments(documents)
+      } catch {
+        // Cache writes are best-effort during repair scan.
+      }
+    }
+
+    return documents
+  }
+
+  const findReplacementReaderParentDocumentByApi = async ({
+    client,
+    pageName,
+    rootContent,
+    previewCache,
+    logPrefix,
+  }: {
+    client: ReturnType<typeof createReadwiseClient>
+    pageName: string
+    rootContent: string
+    previewCache?: ReturnType<typeof createGraphReaderSyncCacheV1>
+    logPrefix: string
+  }): Promise<ReaderParentReplacementLookupResult> => {
+    const signals = extractManagedPageRepairSignals({
+      pageName,
+      rootContent,
+    })
+    if (!signals.normalizedLinkUrl && !signals.normalizedPageTitle) {
+      logReadwiseDebug(logPrefix, 'repair replacement lookup skipped: insufficient page signals', {
+        pageName,
+      })
+      return {
+        document: null,
+        shouldRetry: false,
+      }
+    }
+
+    try {
+      const matches: ReaderDocumentRepairMatch[] = []
+      let pageCursor: string | null = null
+      let scannedDocuments = 0
+
+      do {
+        throwIfCancelled()
+
+        const response = await listReaderDocumentsWithRetry(
+          client,
+          {
+            limit: 100,
+            pageCursor: pageCursor ?? undefined,
+            category: signals.normalizedCategory ?? undefined,
+          },
+          logPrefix,
+          {
+            stage: 'repair-replacement-scan',
+            pageName,
+            pageCursor,
+          },
+        )
+
+        for (const document of response.results) {
+          if (document.parent_id) continue
+          const match = scoreReaderDocumentForRepairSignals({
+            document,
+            signals,
+          })
+          if (match) {
+            matches.push(match)
+          }
+        }
+
+        scannedDocuments += response.results.length
+        pageCursor = response.nextPageCursor
+      } while (pageCursor)
+
+      const replacement = chooseStrongReaderDocumentMatch(matches)
+
+      logReadwiseDebug(logPrefix, 'repair replacement lookup completed', {
+        pageName,
+        scannedDocuments,
+        matchCount: matches.length,
+        replacementReaderDocumentId: replacement?.id ?? null,
+        replacementReason:
+          replacement == null
+            ? null
+            : matches
+                .find((match) => match.document.id === replacement.id)
+                ?.reasons.join(', ') ?? null,
+      })
+
+      if (replacement) {
+        try {
+          await previewCache?.putParentDocuments([replacement])
+        } catch {
+          // Cache writes are best-effort during repair scan.
+        }
+      }
+
+      return {
+        document: replacement,
+        shouldRetry: false,
+      }
+    } catch (error) {
+      if (isRunCancelledError(error)) {
+        throw error
+      }
+
+      logReadwiseWarn(logPrefix, 'repair replacement lookup failed', {
+        pageName,
+        formattedError: describeUnknownError(error),
+      })
+
+      return {
+        document: null,
+        shouldRetry: isRetriableReaderListError(error),
+      }
+    }
+  }
 
   const inferReaderDocumentIdFromHighlights = async ({
     rootContent,
@@ -673,10 +1137,15 @@ export const ReadwiseContainer = () => {
     logPrefix?: string
   }): Promise<ReaderDocumentInferenceResult> => {
     throwIfCancelled()
+    const resolvedLogPrefix = logPrefix ?? formalSyncLogPrefix
     const highlightIds = extractReaderHighlightIdsFromRootContent(rootContent)
+    const signals = extractManagedPageRepairSignals({
+      pageName,
+      rootContent,
+    })
     if (highlightIds.length === 0) {
       logReadwiseDebug(
-        logPrefix ?? formalSyncLogPrefix,
+        resolvedLogPrefix,
         'repair infer skipped: no highlight links found',
         { pageName },
       )
@@ -688,7 +1157,7 @@ export const ReadwiseContainer = () => {
     }
 
     logReadwiseDebug(
-      logPrefix ?? formalSyncLogPrefix,
+      resolvedLogPrefix,
       'repair infer: extracted highlight ids from page',
       {
         pageName,
@@ -707,58 +1176,39 @@ export const ReadwiseContainer = () => {
       return parentIds.length === 1 ? parentIds[0] ?? null : null
     }
 
-    if (previewCache) {
-      throwIfCancelled()
-      try {
-        const cachedHighlights = await previewCache.getCachedHighlightsByIds(
-          highlightIds,
-        )
-        const cachedHighlightsList = [...cachedHighlights.values()]
-        const cachedParentId = resolveUniqueParentId(cachedHighlightsList)
-
-        if (cachedParentId) {
-          logReadwiseDebug(
-            logPrefix ?? formalSyncLogPrefix,
-            'repair infer: resolved parent from cached highlights',
-            {
-              pageName,
-              cachedParentId,
-              cachedHighlightCount: cachedHighlightsList.length,
-            },
-          )
-          return {
-            readerDocumentId: cachedParentId,
-            shouldRetryAfterScan: false,
-            failedHighlightIds: [],
-          }
-        }
-
-        logReadwiseDebug(
-          logPrefix ?? formalSyncLogPrefix,
-          'repair infer: cache lookup did not yield a unique parent',
-          {
-            pageName,
-            cachedHighlightCount: cachedHighlightsList.length,
-            cachedParentIds: uniqueStrings(
-              cachedHighlightsList
-                .map((highlight) => highlight.parent_id ?? '')
-                .filter((value) => value.length > 0),
-            ),
-          },
-        )
-      } catch {
-        // Fall through to remote lookup.
-        logReadwiseDebug(
-          logPrefix ?? formalSyncLogPrefix,
-          'repair infer: cache lookup failed; falling back to remote lookup',
-          { pageName },
-        )
-      }
-    }
-
     if (!client) {
+      if (previewCache) {
+        throwIfCancelled()
+        try {
+          const cachedHighlights = await previewCache.getCachedHighlightsByIds(
+            highlightIds,
+          )
+          const cachedHighlightsList = [...cachedHighlights.values()]
+          const cachedParentId = resolveUniqueParentId(cachedHighlightsList)
+
+          if (cachedParentId) {
+            logReadwiseDebug(
+              resolvedLogPrefix,
+              'repair infer: resolved parent from cached highlights without API client',
+              {
+                pageName,
+                cachedParentId,
+                cachedHighlightCount: cachedHighlightsList.length,
+              },
+            )
+            return {
+              readerDocumentId: cachedParentId,
+              shouldRetryAfterScan: false,
+              failedHighlightIds: [],
+            }
+          }
+        } catch {
+          // Fall through to null.
+        }
+      }
+
       logReadwiseDebug(
-        logPrefix ?? formalSyncLogPrefix,
+        resolvedLogPrefix,
         'repair infer failed: no Readwise client available for remote lookup',
         { pageName },
       )
@@ -772,53 +1222,45 @@ export const ReadwiseContainer = () => {
     const fetchedHighlights: ReaderDocument[] = []
     const failedHighlightIds: string[] = []
     let sawRetriableNetworkFailure = false
+    const attemptedHighlightIds = highlightIds.slice(0, 12)
 
-    for (const highlightId of highlightIds.slice(0, 5)) {
-      throwIfCancelled()
-      try {
-        const highlight = await loadReaderDocumentByIdWithRetry(
-          client,
-          highlightId,
-          logPrefix ?? formalSyncLogPrefix,
-        )
-
-        if (highlight) {
-          fetchedHighlights.push(highlight)
-        }
-      } catch (error) {
-        failedHighlightIds.push(highlightId)
-        if (isRetriableReaderListError(error)) {
-          sawRetriableNetworkFailure = true
-        }
-        logReadwiseWarn(
-          logPrefix ?? formalSyncLogPrefix,
-          'repair infer: highlight lookup failed; trying remaining highlight links',
-          {
-            pageName,
+    const fetchedHighlightResults = await mapWithConcurrency(
+      attemptedHighlightIds,
+      3,
+      async (highlightId) => {
+        throwIfCancelled()
+        try {
+          return await loadReaderDocumentByIdWithRetry(
+            client,
             highlightId,
-            formattedError: describeUnknownError(error),
-          },
-        )
+            resolvedLogPrefix,
+          )
+        } catch (error) {
+          failedHighlightIds.push(highlightId)
+          if (isRetriableReaderListError(error)) {
+            sawRetriableNetworkFailure = true
+          }
+          logReadwiseWarn(
+            resolvedLogPrefix,
+            'repair infer: highlight lookup failed; trying remaining highlight links',
+            {
+              pageName,
+              highlightId,
+              formattedError: describeUnknownError(error),
+            },
+          )
+          return null
+        }
+      },
+    )
+
+    for (const highlight of fetchedHighlightResults) {
+      if (highlight) {
+        fetchedHighlights.push(highlight)
       }
     }
 
     throwIfCancelled()
-    if (fetchedHighlights.length === 0) {
-      logReadwiseDebug(
-        logPrefix ?? formalSyncLogPrefix,
-        'repair infer failed: remote lookup returned no highlights',
-        {
-          pageName,
-          attemptedHighlightIds: highlightIds.slice(0, 5),
-          failedHighlightIds,
-        },
-      )
-      return {
-        readerDocumentId: null,
-        shouldRetryAfterScan: sawRetriableNetworkFailure,
-        failedHighlightIds,
-      }
-    }
 
     try {
       await previewCache?.putHighlights(fetchedHighlights)
@@ -827,43 +1269,117 @@ export const ReadwiseContainer = () => {
     }
 
     const fetchedParentId = resolveUniqueParentId(fetchedHighlights)
-
-    if (!fetchedParentId) {
+    if (fetchedParentId) {
       logReadwiseDebug(
-        logPrefix ?? formalSyncLogPrefix,
-        'repair infer failed: fetched highlights did not map to a unique parent',
+        resolvedLogPrefix,
+        'repair infer: resolved parent from remote highlights',
         {
           pageName,
-          fetchedHighlightIds: fetchedHighlights.map((highlight) => highlight.id),
-          fetchedParentIds: uniqueStrings(
-            fetchedHighlights
-              .map((highlight) => highlight.parent_id ?? '')
-              .filter((value) => value.length > 0),
-          ),
+          fetchedParentId,
+          fetchedHighlightCount: fetchedHighlights.length,
           failedHighlightIds,
         },
       )
+
       return {
-        readerDocumentId: null,
-        shouldRetryAfterScan: sawRetriableNetworkFailure,
+        readerDocumentId: fetchedParentId,
+        shouldRetryAfterScan: false,
+        failedHighlightIds,
+      }
+    }
+
+    const fetchedParentIds = uniqueStrings(
+      fetchedHighlights
+        .map((highlight) => highlight.parent_id ?? '')
+        .filter((value) => value.length > 0),
+    )
+
+    if (fetchedParentIds.length > 1) {
+      const fetchedParentDocuments = await loadReaderParentDocumentsByIdsAuthoritative({
+        client,
+        parentIds: fetchedParentIds,
+        previewCache,
+        pageName,
+        logPrefix: resolvedLogPrefix,
+      })
+      const parentMatches = fetchedParentDocuments
+        .map((document) =>
+          scoreReaderDocumentForRepairSignals({
+            document,
+            signals,
+          }),
+        )
+        .filter((match): match is ReaderDocumentRepairMatch => !!match)
+      const chosenParentDocument = chooseStrongReaderDocumentMatch(parentMatches)
+
+      if (chosenParentDocument) {
+        logReadwiseInfo(
+          resolvedLogPrefix,
+          'repair infer: resolved parent from multiple highlight parents via API metadata match',
+          {
+            pageName,
+            resolvedReaderDocumentId: chosenParentDocument.id,
+            candidateParentIds: fetchedParentIds,
+            resolutionReasons:
+              parentMatches
+                .find((match) => match.document.id === chosenParentDocument.id)
+                ?.reasons ?? [],
+          },
+        )
+
+        return {
+          readerDocumentId: chosenParentDocument.id,
+          shouldRetryAfterScan: false,
+          failedHighlightIds,
+        }
+      }
+    }
+
+    const replacementLookup = await findReplacementReaderParentDocumentByApi({
+      client,
+      pageName,
+      rootContent,
+      previewCache,
+      logPrefix: resolvedLogPrefix,
+    })
+    const replacementDocument = replacementLookup.document
+
+    if (replacementDocument) {
+      logReadwiseInfo(
+        resolvedLogPrefix,
+        'repair infer: resolved parent from API replacement lookup',
+        {
+          pageName,
+          resolvedReaderDocumentId: replacementDocument.id,
+          fetchedParentIds,
+          failedHighlightIds,
+        },
+      )
+
+      return {
+        readerDocumentId: replacementDocument.id,
+        shouldRetryAfterScan: false,
         failedHighlightIds,
       }
     }
 
     logReadwiseDebug(
-      logPrefix ?? formalSyncLogPrefix,
-      'repair infer: resolved parent from remote highlights',
+      resolvedLogPrefix,
+      'repair infer failed: API relookup did not yield a repairable parent',
       {
         pageName,
-        fetchedParentId,
-        fetchedHighlightCount: fetchedHighlights.length,
+        attemptedHighlightIds,
+        fetchedHighlightIds: fetchedHighlights.map((highlight) => highlight.id),
+        fetchedParentIds,
         failedHighlightIds,
       },
     )
 
     return {
-      readerDocumentId: fetchedParentId,
-      shouldRetryAfterScan: false,
+      readerDocumentId: null,
+      shouldRetryAfterScan:
+        replacementLookup.shouldRetry ||
+        (sawRetriableNetworkFailure && fetchedHighlights.length === 0),
       failedHighlightIds,
     }
   }
@@ -1108,6 +1624,7 @@ export const ReadwiseContainer = () => {
             pageName,
             readerDocumentId,
             signatures,
+            rootContent: inspection.searchableContent,
           },
         }
       },
@@ -1166,6 +1683,7 @@ export const ReadwiseContainer = () => {
                 pageName: deferredPage.pageName,
                 readerDocumentId: deferredInference.readerDocumentId,
                 signatures: deferredPage.signatures,
+                rootContent: deferredPage.rootContent,
               },
             }
           }
@@ -1415,10 +1933,19 @@ export const ReadwiseContainer = () => {
     }
   }
 
-  const clearRunIssues = () => {
+  const clearRunIssues = (options?: {
+    preservePendingLegacyBlockRefMigration?: boolean
+    preservePendingCurrentPageLegacyIdMigration?: boolean
+  }) => {
     setErrors([])
     setShowWarningIssues(false)
     setRunIssueContext(null)
+    if (!options?.preservePendingLegacyBlockRefMigration) {
+      setPendingLegacyBlockRefMigration(null)
+    }
+    if (!options?.preservePendingCurrentPageLegacyIdMigration) {
+      setPendingCurrentPageLegacyIdMigration(null)
+    }
     resetLiveRunIssueMetrics()
   }
 
@@ -3096,6 +3623,18 @@ export const ReadwiseContainer = () => {
         }
 
         if (!document) {
+          throwIfCancelled()
+          const replacementLookup = await findReplacementReaderParentDocumentByApi({
+            client,
+            pageName: candidate.pageName,
+            rootContent: candidate.rootContent,
+            previewCache,
+            logPrefix: formalSyncLogPrefix,
+          })
+          document = replacementLookup.document
+        }
+
+        if (!document) {
           const issue: RunIssue = {
             book: candidate.pageName,
             message: `Repair skipped because Reader did not return parent metadata for rw-reader-id=${candidate.readerDocumentId}.`,
@@ -3129,6 +3668,18 @@ export const ReadwiseContainer = () => {
             scanResult.candidates.length,
           )
           continue
+        }
+
+        if (document.id !== candidate.readerDocumentId) {
+          logReadwiseInfo(
+            formalSyncLogPrefix,
+            'repair write: retargeted page to replacement Reader document',
+            {
+              pageName: candidate.pageName,
+              originalReaderDocumentId: candidate.readerDocumentId,
+              replacementReaderDocumentId: document.id,
+            },
+          )
         }
 
         try {
@@ -3253,7 +3804,88 @@ export const ReadwiseContainer = () => {
     }
   }
 
-  const handleMigrateLegacyBlockRefs = async () => {
+  const buildLegacyBlockRefPreviewIssues = (
+    entries: LegacyBlockRefPreviewEntryV1[],
+  ): RunIssue[] => {
+    const byPage = new Map<
+      string,
+      {
+        refsPlanned: number
+        entries: LegacyBlockRefPreviewEntryV1[]
+      }
+    >()
+
+    for (const entry of entries) {
+      const current = byPage.get(entry.pageName) ?? {
+        refsPlanned: 0,
+        entries: [],
+      }
+      current.refsPlanned += entry.refs.length
+      current.entries.push(entry)
+      byPage.set(entry.pageName, current)
+    }
+
+    return [...byPage.entries()].map(([pageName, preview]) => ({
+      book: pageName,
+      category: 'warning' as const,
+      message: `Preview: ${preview.entries.length} block(s) and ${preview.refsPlanned} block ref(s) would be rewritten on ${pageName}.`,
+      summary:
+        'Preview only. This page currently contains graph block refs that point at legacy Readwise highlight UUIDs.',
+      suggestedAction:
+        'Review the listed UUID rewrites. If they look correct, run Apply Legacy Block Ref Migration.',
+      debugFacts: [
+        `previewBlockCount=${preview.entries.length}`,
+        `previewRefsPlanned=${preview.refsPlanned}`,
+        ...preview.entries.flatMap((entry) => [
+          `blockUuid=${entry.blockUuid}`,
+          ...entry.refs.map((ref) => `rewrite=${ref.from} -> ${ref.to}`),
+        ]),
+      ],
+      namespacePrefix: formalNamespaceRoot,
+      pageName,
+    }))
+  }
+
+  const buildCurrentPageLegacyIdPreviewIssues = ({
+    pageName,
+    relativeFilePath,
+    fileKind,
+    rewrites,
+  }: {
+    pageName: string
+    relativeFilePath: string
+    fileKind: 'page' | 'whiteboard'
+    rewrites: CurrentPageLegacyIdRewriteEntryV1[]
+  }): RunIssue[] => {
+    if (rewrites.length === 0) {
+      return []
+    }
+
+    return [
+      {
+        book: pageName,
+        category: 'warning' as const,
+        message: `Preview: ${rewrites.length} legacy id rewrite(s) would be applied to the current ${fileKind}.`,
+        summary:
+          'Preview only. The current page or whiteboard contains legacy Readwise ids that can be migrated to the current canonical ids.',
+        suggestedAction:
+          'Review the listed rewrites. If they look correct, run Apply Current Page Legacy ID Migration.',
+        debugFacts: [
+          `relativeFilePath=${relativeFilePath}`,
+          `fileKind=${fileKind}`,
+          ...rewrites.flatMap((rewrite) => [
+            `line=${rewrite.lineNumber}`,
+            `kind=${rewrite.kind}`,
+            `rewrite=${rewrite.from} -> ${rewrite.to}`,
+          ]),
+        ],
+        namespacePrefix: formalNamespaceRoot,
+        pageName,
+      },
+    ]
+  }
+
+  const handlePreviewLegacyBlockRefs = async () => {
     clearRunIssues()
     setPageDiffResult(null)
     setCacheSummaryResult(null)
@@ -3263,7 +3895,7 @@ export const ReadwiseContainer = () => {
     setStatus('fetching')
     const startedAt = new Date().toISOString()
     setRunIssueContext({
-      modeLabel: 'Migrate legacy block refs',
+      modeLabel: 'Preview legacy block refs',
       namespacePrefix: formalNamespaceRoot,
       logLevel: String(logseq.settings?.logLevel ?? 'warn'),
       statusMessage: '',
@@ -3312,18 +3944,255 @@ export const ReadwiseContainer = () => {
         return
       }
 
-      replaceRunIssues([])
       setStatus('syncing')
       setCurrent(0)
       setTotal(0)
       setCurrentBook('')
-      beginReaderSyncEtaPhase('write-pages', 'block ref rewrite')
+      beginReaderSyncEtaPhase('write-pages', 'block ref preview')
       setStatusMessage(
-        `Rewriting legacy block refs using ${mappingResult.mapping.size} UUID mapping(s)...`,
+        `Previewing legacy block refs using ${mappingResult.mapping.size} UUID mapping(s)...`,
       )
 
-      const migrationSummary = await migrateLegacyBlockRefsV1({
+      const previewResult = await previewLegacyBlockRefsV1({
         mapping: mappingResult.mapping,
+        onProgress: ({ total, completed, pageName, affectedPages, refsPlanned }) => {
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageName)
+          updateReaderSyncEta('write-pages', 'block ref preview', completed, total)
+          setStatusMessage(
+            `Previewing legacy block refs... ${completed} / ${total} page(s), ${affectedPages} affected, ${refsPlanned} ref(s) planned.`,
+          )
+        },
+      })
+      const previewIssues = buildLegacyBlockRefPreviewIssues(previewResult.entries)
+      replaceRunIssues(previewIssues)
+      setShowWarningIssues(true)
+      setPendingLegacyBlockRefMigration({
+        mapping: mappingResult.mapping,
+        entries: previewResult.entries,
+      })
+
+      setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: previewResult.summary.refsPlanned,
+              issuesCount: previewIssues.length,
+              stats: {
+                pagesTargeted: previewResult.summary.graphPagesScanned,
+                pagesProcessed: previewResult.summary.graphPagesAffected,
+                updatedCount: previewResult.summary.blocksAffected,
+              },
+            },
+      )
+      setStatusMessage(
+        previewResult.summary.refsPlanned > 0
+          ? `Preview found ${previewResult.summary.refsPlanned} block ref(s) across ${previewResult.summary.graphPagesAffected} page(s). Review them before applying.`
+          : 'Preview found no legacy block refs to rewrite.',
+      )
+    } catch (err: unknown) {
+      const issue = {
+        book: 'Legacy block ref migration',
+        message: describeUnknownError(err),
+        summary:
+          'Legacy block ref migration stopped before the graph-wide rewrite completed.',
+        suggestedAction:
+          'Copy the issue bundle and inspect the failing page or block before retrying the migration.',
+        namespacePrefix: formalNamespaceRoot,
+      } satisfies RunIssue
+
+      logReadwiseError(formalSyncLogPrefix, 'legacy block ref migration failed', err)
+      replaceRunIssues([issue])
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: 0,
+              issuesCount: 1,
+            },
+      )
+      setStatusMessage(
+        `Legacy block ref migration failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
+  const handlePreviewCurrentPageLegacyIds = async () => {
+    clearRunIssues()
+    setPageDiffResult(null)
+    setCacheSummaryResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Preview current-page legacy ids',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    beginReaderSyncEtaPhase('fetch-highlights', 'block ref mapping')
+    setStatusMessage(
+      `Scanning ${formalNamespaceRoot} managed pages for legacy block UUID mappings...`,
+    )
+
+    try {
+      const mappingResult = await buildLegacyBlockRefMappingV1({
+        namespaceRoot: formalNamespaceRoot,
+        onProgress: ({ total, completed, pageName }) => {
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageName)
+          updateReaderSyncEta('fetch-highlights', 'block ref mapping', completed, total)
+          setStatusMessage(
+            `Building legacy block UUID mapping... ${completed} / ${total} managed page(s).`,
+          )
+        },
+      })
+
+      setStatus('syncing')
+      setCurrent(0)
+      setTotal(1)
+      setCurrentBook('')
+      beginReaderSyncEtaPhase('write-pages', 'current-page preview')
+      setStatusMessage(
+        `Previewing current page legacy ids using ${mappingResult.mapping.size} UUID mapping(s)...`,
+      )
+
+      const previewResult = await previewCurrentPageLegacyIdsV1({
+        mapping: mappingResult.mapping,
+      })
+      setCurrent(1)
+      setCurrentBook(previewResult.target.pageName)
+      updateReaderSyncEta('write-pages', 'current-page preview', 1, 1)
+      const previewIssues = buildCurrentPageLegacyIdPreviewIssues({
+        pageName: previewResult.target.pageName,
+        relativeFilePath: previewResult.target.relativeFilePath,
+        fileKind: previewResult.target.fileKind,
+        rewrites: previewResult.rewrites,
+      })
+      replaceRunIssues(previewIssues)
+      setShowWarningIssues(true)
+      setPendingCurrentPageLegacyIdMigration(
+        previewResult.rewrites.length > 0
+          ? {
+              mapping: mappingResult.mapping,
+              pageName: previewResult.target.pageName,
+              relativeFilePath: previewResult.target.relativeFilePath,
+              fileKind: previewResult.target.fileKind,
+              rewrites: previewResult.rewrites,
+            }
+          : null,
+      )
+
+      setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: previewResult.rewrites.length,
+              issuesCount: previewIssues.length,
+              stats: {
+                pagesTargeted: mappingResult.summary.managedPagesScanned,
+                pagesProcessed: previewResult.rewrites.length > 0 ? 1 : 0,
+                updatedCount: previewResult.rewrites.length,
+              },
+            },
+      )
+      setStatusMessage(
+        previewResult.rewrites.length > 0
+          ? `Preview found ${previewResult.rewrites.length} legacy id rewrite(s) in the current ${previewResult.target.fileKind}.`
+          : `Preview found no legacy ids to rewrite in the current ${previewResult.target.fileKind}.`,
+      )
+    } catch (err: unknown) {
+      const issue = {
+        book: 'Current-page legacy id migration',
+        message: describeUnknownError(err),
+        summary:
+          'Current-page legacy id preview stopped before the page or whiteboard rewrite plan was produced.',
+        suggestedAction:
+          'Copy the issue bundle and inspect the current page or whiteboard file before retrying the preview.',
+        namespacePrefix: formalNamespaceRoot,
+      } satisfies RunIssue
+
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'current-page legacy id preview failed',
+        err,
+      )
+      replaceRunIssues([issue])
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: 0,
+              issuesCount: 1,
+            },
+      )
+      setStatusMessage(
+        `Current-page legacy id preview failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
+  const handleApplyLegacyBlockRefMigration = async () => {
+    const migrationPlan = pendingLegacyBlockRefMigration
+
+    if (!migrationPlan) {
+      setStatus('error')
+      setStatusMessage(
+        'No pending legacy block ref preview is available. Run Preview Legacy Block Refs first.',
+      )
+      return
+    }
+
+    clearRunIssues({
+      preservePendingLegacyBlockRefMigration: true,
+    })
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('syncing')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Apply legacy block ref migration',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    beginReaderSyncEtaPhase('write-pages', 'block ref rewrite')
+    setStatusMessage(
+      `Rewriting legacy block refs using ${migrationPlan.mapping.size} UUID mapping(s)...`,
+    )
+
+    try {
+      const migrationSummary = await migrateLegacyBlockRefsV1({
+        mapping: migrationPlan.mapping,
         logPrefix: formalSyncLogPrefix,
         onProgress: ({ total, completed, pageName, updatedPages, refsRewritten }) => {
           setCurrent(completed)
@@ -3336,6 +4205,7 @@ export const ReadwiseContainer = () => {
         },
       })
 
+      setPendingLegacyBlockRefMigration(null)
       setStatus('completed')
       setRunIssueContext((previous) =>
         previous == null
@@ -3381,6 +4251,108 @@ export const ReadwiseContainer = () => {
       )
       setStatusMessage(
         `Legacy block ref migration failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
+  const handleApplyCurrentPageLegacyIdMigration = async () => {
+    const migrationPlan = pendingCurrentPageLegacyIdMigration
+
+    if (!migrationPlan) {
+      setStatus('error')
+      setStatusMessage(
+        'No pending current-page legacy id preview is available. Run Preview Current Page Legacy ID Migration first.',
+      )
+      return
+    }
+
+    clearRunIssues({
+      preservePendingCurrentPageLegacyIdMigration: true,
+    })
+    setCurrent(0)
+    setTotal(1)
+    setCurrentBook('')
+    setStatus('syncing')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Apply current-page legacy ids',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    beginReaderSyncEtaPhase('write-pages', 'current-page rewrite')
+    setStatusMessage(
+      `Rewriting legacy ids in the current ${migrationPlan.fileKind}...`,
+    )
+
+    try {
+      const migrationSummary = await migrateCurrentPageLegacyIdsV1({
+        mapping: migrationPlan.mapping,
+        expectedRelativeFilePath: migrationPlan.relativeFilePath,
+        logPrefix: formalSyncLogPrefix,
+      })
+
+      setCurrent(1)
+      setCurrentBook(migrationSummary.pageName)
+      updateReaderSyncEta('write-pages', 'current-page rewrite', 1, 1)
+      setPendingCurrentPageLegacyIdMigration(null)
+      setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: migrationSummary.rewritesApplied,
+              issuesCount: 0,
+              stats: {
+                pagesTargeted: 1,
+                pagesProcessed: migrationSummary.rewritesApplied > 0 ? 1 : 0,
+                updatedCount: migrationSummary.rewritesApplied,
+              },
+            },
+      )
+      setStatusMessage(
+        migrationSummary.rewritesApplied > 0
+          ? `Migrated ${migrationSummary.rewritesApplied} legacy id(s) in the current ${migrationSummary.fileKind}.`
+          : `No legacy ids needed rewriting in the current ${migrationSummary.fileKind}.`,
+      )
+    } catch (err: unknown) {
+      const issue = {
+        book: 'Current-page legacy id migration',
+        message: describeUnknownError(err),
+        summary:
+          'Current-page legacy id migration stopped before the page or whiteboard rewrite completed.',
+        suggestedAction:
+          'Copy the issue bundle and re-run Preview Current Page Legacy ID Migration before retrying the apply step.',
+        namespacePrefix: formalNamespaceRoot,
+      } satisfies RunIssue
+
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'current-page legacy id migration failed',
+        err,
+      )
+      replaceRunIssues([issue])
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: 0,
+              issuesCount: 1,
+            },
+      )
+      setStatusMessage(
+        `Current-page legacy id migration failed: ${describeUnknownError(err)}`,
       )
     }
   }
@@ -4711,12 +5683,14 @@ export const ReadwiseContainer = () => {
   const currentPageHelpNotes = [
     'Rebuild Current Page From Cache uses rw-reader-id, reads the cached highlight snapshot for that parent, and rewrites only the current managed page.',
     "Refresh Current Page Metadata re-fetches the current page's parent metadata from Reader, combines it with cached highlights, and rewrites only the current managed page.",
+    'Preview Current Page Legacy ID Migration scans Readwise managed pages for UUID mappings, then previews only the current page or whiteboard rewrites before apply.',
+    'Current-page legacy id migration rewrites only proven Readwise legacy ids: ((block refs)), whiteboard embeds, and refdock-item-id values on the current file.',
   ]
   const maintenanceToolsHelpNotes = [
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
-    'Repair Managed Pages scans ReadwiseHighlights/* for the legacy duplicated metadata and header signature, then rewrites only the matched pages from the cached highlight snapshot.',
-    'Migrate Legacy Block Refs scans Readwise managed pages for old block UUID mappings, then rewrites graph-wide ((block refs)) to the current canonical UUIDs.',
+    'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
+    'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
   ]
   const highlightScanDetailLabel =
     configuredReaderDebugHighlightPageLimit > 0
@@ -5350,6 +6324,19 @@ export const ReadwiseContainer = () => {
                     Refresh Current Page Metadata
                   </button>
                 </div>
+                <div className="rw-action-row">
+                  <button className="rw-btn" onClick={handlePreviewCurrentPageLegacyIds}>
+                    Preview Current Page Legacy ID Migration
+                  </button>
+                  {pendingCurrentPageLegacyIdMigration && (
+                    <button
+                      className="rw-btn"
+                      onClick={handleApplyCurrentPageLegacyIdMigration}
+                    >
+                      Apply Current Page Legacy ID Migration
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="rw-action-group">
@@ -5394,9 +6381,17 @@ export const ReadwiseContainer = () => {
                       <button className="rw-btn" onClick={handleRepairManagedPages}>
                         Repair Managed Pages
                       </button>
-                      <button className="rw-btn" onClick={handleMigrateLegacyBlockRefs}>
-                        Migrate Legacy Block Refs
+                      <button className="rw-btn" onClick={handlePreviewLegacyBlockRefs}>
+                        Preview Legacy Block Ref Migration
                       </button>
+                      {pendingLegacyBlockRefMigration && (
+                        <button
+                          className="rw-btn"
+                          onClick={handleApplyLegacyBlockRefMigration}
+                        >
+                          Apply Legacy Block Ref Migration
+                        </button>
+                      )}
                       <button className="rw-btn" onClick={handleBackupFormalTestPages}>
                         Backup Test Pages
                       </button>

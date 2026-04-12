@@ -1,6 +1,7 @@
 import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
 
 import { logReadwiseInfo } from '../logging'
+import { computeCompatibleHighlightUuid } from '../uuid-compat'
 
 const uniqueStrings = (values: string[]) =>
   values.filter(
@@ -9,6 +10,8 @@ const uniqueStrings = (values: string[]) =>
 
 const ACCEPTED_BLOCK_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const READWISE_HIGHLIGHT_URL_IN_BLOCK_PATTERN =
+  /\[\[(https:\/\/read\.readwise\.io\/read\/[0-9a-z]+)\]\[View Highlight\]\]/i
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
@@ -93,6 +96,58 @@ const collectLegacyInvalidBlockIdsFromTreeV1 = (
   return uniqueStrings(invalid)
 }
 
+const collectLegacyDriftedBlockIdsFromTreeV1 = (
+  blocks: Array<BlockEntity | [unknown, string]>,
+): Array<{
+  currentUuid: string
+  expectedUuid: string
+  highlightUrl: string
+}> => {
+  const mismatches = new Map<
+    string,
+    {
+      currentUuid: string
+      expectedUuid: string
+      highlightUrl: string
+    }
+  >()
+
+  const visit = (node: BlockEntity | [unknown, string]) => {
+    if (Array.isArray(node)) return
+
+    const highlightUrl =
+      typeof node.content === 'string'
+        ? (node.content.match(READWISE_HIGHLIGHT_URL_IN_BLOCK_PATTERN)?.[1] ?? null)
+        : null
+
+    if (
+      highlightUrl &&
+      typeof node.uuid === 'string' &&
+      node.uuid.length > 0
+    ) {
+      const expectedUuid = computeCompatibleHighlightUuid(highlightUrl)
+
+      if (node.uuid !== expectedUuid) {
+        mismatches.set(node.uuid, {
+          currentUuid: node.uuid,
+          expectedUuid,
+          highlightUrl,
+        })
+      }
+    }
+
+    for (const child of node.children ?? []) {
+      visit(child as BlockEntity | [unknown, string])
+    }
+  }
+
+  for (const block of blocks) {
+    visit(block)
+  }
+
+  return [...mismatches.values()]
+}
+
 const extractLegacyFirstSyncedOnV1 = (rootContent: string): string | null => {
   const match = rootContent.match(
     /^\* Highlights first synced by \[\[Readwise\]\] \[\[([0-9]{4}-[0-9]{2}-[0-9]{2})\]\]$/m,
@@ -107,16 +162,24 @@ export const inspectManagedPageIntegrityV1 = async (page: PageEntity) => {
   const invalidTreeBlockIds = collectLegacyInvalidBlockIdsFromTreeV1(
     pageBlocksTree ?? [],
   )
+  const driftedTreeBlockIds = collectLegacyDriftedBlockIdsFromTreeV1(
+    pageBlocksTree ?? [],
+  )
   const signatures = detectLegacyManagedPageRepairSignaturesV1(rootContent)
 
   if (invalidTreeBlockIds.length > 0) {
     signatures.push('legacy invalid block id')
   }
 
+  if (driftedTreeBlockIds.length > 0) {
+    signatures.push('legacy drifted block id')
+  }
+
   return {
     rootContent,
     signatures: uniqueStrings(signatures),
     invalidTreeBlockIds,
+    driftedTreeBlockIds,
     legacyFirstSyncedOn: extractLegacyFirstSyncedOnV1(rootContent),
   }
 }
@@ -134,6 +197,11 @@ export const rebuildManagedPageIfDamagedV1 = async ({
   rebuilt: boolean
   signatures: string[]
   invalidTreeBlockIds: string[]
+  driftedTreeBlockIds: Array<{
+    currentUuid: string
+    expectedUuid: string
+    highlightUrl: string
+  }>
   legacyFirstSyncedOn: string | null
 }> => {
   const inspection = await inspectManagedPageIntegrityV1(page)
@@ -144,6 +212,7 @@ export const rebuildManagedPageIfDamagedV1 = async ({
       rebuilt: false,
       signatures: [],
       invalidTreeBlockIds: [],
+      driftedTreeBlockIds: [],
       legacyFirstSyncedOn: inspection.legacyFirstSyncedOn,
     }
   }
@@ -177,6 +246,7 @@ export const rebuildManagedPageIfDamagedV1 = async ({
     aliases,
     signatures: inspection.signatures,
     invalidTreeBlockIds: inspection.invalidTreeBlockIds,
+    driftedTreeBlockIds: inspection.driftedTreeBlockIds,
   })
 
   return {
@@ -184,6 +254,7 @@ export const rebuildManagedPageIfDamagedV1 = async ({
     rebuilt: true,
     signatures: inspection.signatures,
     invalidTreeBlockIds: inspection.invalidTreeBlockIds,
+    driftedTreeBlockIds: inspection.driftedTreeBlockIds,
     legacyFirstSyncedOn: inspection.legacyFirstSyncedOn,
   }
 }

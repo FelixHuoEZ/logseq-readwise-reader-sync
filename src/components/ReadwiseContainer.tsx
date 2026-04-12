@@ -2423,7 +2423,7 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         repairIssues.length > 0
           ? `Repaired ${repairedCount} managed page(s); ${repairIssues.length} issue(s) still need attention.`
-          : `Repaired ${repairedCount} managed page(s) that matched the legacy duplication signature.`,
+          : `Repaired ${repairedCount} managed page(s) that matched legacy corruption signatures.`,
       )
     } catch (err: unknown) {
       logReadwiseError(formalSyncLogPrefix, 'managed page repair failed', err)

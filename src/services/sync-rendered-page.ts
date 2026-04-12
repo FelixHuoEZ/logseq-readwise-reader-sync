@@ -84,7 +84,7 @@ export const syncRenderedPage = async (
     buildPageRenderContext(normalizedBook, renderRuntime),
     computeCompatibleHighlightUuid,
   )
-  const content = renderedPage.emitResult.pageContentText
+  const content = renderedPage.emitResult.outputText
   logRenderedContentDiagnostics(pageName, content, logPrefix)
   const existingPage = repairedPage.page
   const page = existingPage ?? (await createManagedPageV1(pageName, logPrefix))

@@ -207,7 +207,7 @@ export const syncRenderedReaderPreviewPage = async (
   const emitResult = emitOrgPage(semanticPage)
   const renderHashInput = buildRenderHashInput(semanticPage)
   const renderHash = computeRenderHash(renderHashInput)
-  const content = emitResult.pageContentText
+  const content = emitResult.outputText
 
   logRenderedContentDiagnostics(pageName, content, logPrefix)
 

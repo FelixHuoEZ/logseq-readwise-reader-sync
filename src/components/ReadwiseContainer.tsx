@@ -161,6 +161,21 @@ interface PendingCurrentPageLegacyIdMigrationPlan {
   rewrites: CurrentPageLegacyIdRewriteEntryV1[]
 }
 
+interface CurrentPageLegacyIdPreviewResult {
+  pageName: string
+  relativeFilePath: string
+  fileKind: 'page' | 'whiteboard'
+  rewrites: CurrentPageLegacyIdRewriteEntryV1[]
+  managedPagesScanned: number
+}
+
+interface CurrentPageLegacyIdApplyResult {
+  pageName: string
+  relativeFilePath: string
+  fileKind: 'page' | 'whiteboard'
+  rewritesApplied: number
+}
+
 interface ManagedPageRepairScanEntryResult {
   pageName: string
   candidate?: ManagedPageRepairCandidate
@@ -240,6 +255,10 @@ export const ReadwiseContainer = () => {
     useState<PendingLegacyBlockRefMigrationPlan | null>(null)
   const [pendingCurrentPageLegacyIdMigration, setPendingCurrentPageLegacyIdMigration] =
     useState<PendingCurrentPageLegacyIdMigrationPlan | null>(null)
+  const [currentPageLegacyIdPreviewResult, setCurrentPageLegacyIdPreviewResult] =
+    useState<CurrentPageLegacyIdPreviewResult | null>(null)
+  const [currentPageLegacyIdApplyResult, setCurrentPageLegacyIdApplyResult] =
+    useState<CurrentPageLegacyIdApplyResult | null>(null)
   const [pageDiffResult, setPageDiffResult] =
     useState<CurrentPageDiffResult | null>(null)
   const [cacheSummaryResult, setCacheSummaryResult] =
@@ -356,6 +375,10 @@ export const ReadwiseContainer = () => {
     setStatusMessage('')
     setErrors([])
     setRunIssueContext(null)
+    setPendingLegacyBlockRefMigration(null)
+    setPendingCurrentPageLegacyIdMigration(null)
+    setCurrentPageLegacyIdPreviewResult(null)
+    setCurrentPageLegacyIdApplyResult(null)
     setPageDiffResult(null)
     setCacheSummaryResult(null)
   }
@@ -1940,6 +1963,8 @@ export const ReadwiseContainer = () => {
     setErrors([])
     setShowWarningIssues(false)
     setRunIssueContext(null)
+    setCurrentPageLegacyIdPreviewResult(null)
+    setCurrentPageLegacyIdApplyResult(null)
     if (!options?.preservePendingLegacyBlockRefMigration) {
       setPendingLegacyBlockRefMigration(null)
     }
@@ -1989,6 +2014,23 @@ export const ReadwiseContainer = () => {
         includeWarnings: false,
       }),
       'Run issue bundle (errors only)',
+    )
+  }
+
+  const handleCopyCurrentPageLegacyIdPreviewBundle = async () => {
+    if (!currentPageLegacyIdPreviewResult) return
+
+    await copyText(
+      buildRunIssuesBundle({
+        issues: buildCurrentPageLegacyIdPreviewIssues({
+          pageName: currentPageLegacyIdPreviewResult.pageName,
+          relativeFilePath: currentPageLegacyIdPreviewResult.relativeFilePath,
+          fileKind: currentPageLegacyIdPreviewResult.fileKind,
+          rewrites: currentPageLegacyIdPreviewResult.rewrites,
+        }),
+        context: buildLiveRunIssueContext(),
+      }),
+      'Current-page legacy id preview',
     )
   }
 
@@ -3873,11 +3915,11 @@ export const ReadwiseContainer = () => {
         debugFacts: [
           `relativeFilePath=${relativeFilePath}`,
           `fileKind=${fileKind}`,
-          ...rewrites.flatMap((rewrite) => [
-            `line=${rewrite.lineNumber}`,
-            `kind=${rewrite.kind}`,
-            `rewrite=${rewrite.from} -> ${rewrite.to}`,
-          ]),
+          `rewritesPlanned=${rewrites.length}`,
+          ...rewrites.map(
+            (rewrite) =>
+              `entry=${rewrite.entryIndex} blockUuid=${rewrite.blockUuid} kind=${rewrite.kind} rewrite=${rewrite.from} -> ${rewrite.to}`,
+          ),
         ],
         namespacePrefix: formalNamespaceRoot,
         pageName,
@@ -4028,6 +4070,7 @@ export const ReadwiseContainer = () => {
     clearRunIssues()
     setPageDiffResult(null)
     setCacheSummaryResult(null)
+    setCurrentPageLegacyIdApplyResult(null)
     setCurrent(0)
     setTotal(0)
     setCurrentBook('')
@@ -4085,8 +4128,13 @@ export const ReadwiseContainer = () => {
         fileKind: previewResult.target.fileKind,
         rewrites: previewResult.rewrites,
       })
-      replaceRunIssues(previewIssues)
-      setShowWarningIssues(true)
+      setCurrentPageLegacyIdPreviewResult({
+        pageName: previewResult.target.pageName,
+        relativeFilePath: previewResult.target.relativeFilePath,
+        fileKind: previewResult.target.fileKind,
+        rewrites: previewResult.rewrites,
+        managedPagesScanned: mappingResult.summary.managedPagesScanned,
+      })
       setPendingCurrentPageLegacyIdMigration(
         previewResult.rewrites.length > 0
           ? {
@@ -4136,6 +4184,7 @@ export const ReadwiseContainer = () => {
         'current-page legacy id preview failed',
         err,
       )
+      setCurrentPageLegacyIdPreviewResult(null)
       replaceRunIssues([issue])
       setStatus('error')
       setRunIssueContext((previous) =>
@@ -4269,6 +4318,7 @@ export const ReadwiseContainer = () => {
     clearRunIssues({
       preservePendingCurrentPageLegacyIdMigration: true,
     })
+    setCurrentPageLegacyIdPreviewResult(null)
     setCurrent(0)
     setTotal(1)
     setCurrentBook('')
@@ -4302,6 +4352,12 @@ export const ReadwiseContainer = () => {
       setCurrentBook(migrationSummary.pageName)
       updateReaderSyncEta('write-pages', 'current-page rewrite', 1, 1)
       setPendingCurrentPageLegacyIdMigration(null)
+      setCurrentPageLegacyIdApplyResult({
+        pageName: migrationSummary.pageName,
+        relativeFilePath: migrationSummary.relativeFilePath,
+        fileKind: migrationSummary.fileKind,
+        rewritesApplied: migrationSummary.rewritesApplied,
+      })
       setStatus('completed')
       setRunIssueContext((previous) =>
         previous == null
@@ -4339,6 +4395,7 @@ export const ReadwiseContainer = () => {
         'current-page legacy id migration failed',
         err,
       )
+      setCurrentPageLegacyIdApplyResult(null)
       replaceRunIssues([issue])
       setStatus('error')
       setRunIssueContext((previous) =>
@@ -5683,14 +5740,14 @@ export const ReadwiseContainer = () => {
   const currentPageHelpNotes = [
     'Rebuild Current Page From Cache uses rw-reader-id, reads the cached highlight snapshot for that parent, and rewrites only the current managed page.',
     "Refresh Current Page Metadata re-fetches the current page's parent metadata from Reader, combines it with cached highlights, and rewrites only the current managed page.",
-    'Preview Current Page Legacy ID Migration scans Readwise managed pages for UUID mappings, then previews only the current page or whiteboard rewrites before apply.',
-    'Current-page legacy id migration rewrites only proven Readwise legacy ids: ((block refs)), whiteboard embeds, and refdock-item-id values on the current file.',
+    'These are the common page-level recovery actions. Low-frequency migration and audit workflows live under Maintenance Tools.',
   ]
   const maintenanceToolsHelpNotes = [
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
+    'Preview Current Page Legacy ID Migration scans Readwise managed pages for UUID mappings, then previews only the current page or whiteboard rewrites before apply.',
   ]
   const highlightScanDetailLabel =
     configuredReaderDebugHighlightPageLimit > 0
@@ -6004,6 +6061,101 @@ export const ReadwiseContainer = () => {
             )}
           </div>
 
+          {currentPageLegacyIdPreviewResult && (
+            <div className="rw-feedback-block rw-preview-panel">
+              <div className="rw-section-header">
+                <div>
+                  <div className="rw-section-title">Current-Page Preview</div>
+                  <div className="rw-section-meta">
+                    {currentPageLegacyIdPreviewResult.rewrites.length} rewrite(s) in the
+                    current {currentPageLegacyIdPreviewResult.fileKind}
+                  </div>
+                </div>
+                <div className="rw-section-actions">
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() => void handleCopyCurrentPageLegacyIdPreviewBundle()}
+                  >
+                    Copy Preview Bundle
+                  </button>
+                </div>
+              </div>
+              <div className="rw-preview-summary">
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Target</span>
+                  <strong>{currentPageLegacyIdPreviewResult.pageName}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Path</span>
+                  <strong>{currentPageLegacyIdPreviewResult.relativeFilePath}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Kind</span>
+                  <strong>{currentPageLegacyIdPreviewResult.fileKind}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Managed pages scanned</span>
+                  <strong>{currentPageLegacyIdPreviewResult.managedPagesScanned}</strong>
+                </div>
+              </div>
+              <div className="rw-preview-note">
+                Preview only. Review these UUID rewrites, then run Apply Current Page
+                Legacy ID Migration if they look correct.
+              </div>
+              <div className="rw-preview-list">
+                {currentPageLegacyIdPreviewResult.rewrites.map((rewrite) => (
+                  <div
+                    key={`${rewrite.entryIndex}:${rewrite.blockUuid}:${rewrite.from}:${rewrite.to}`}
+                    className="rw-preview-item"
+                  >
+                    <div className="rw-preview-item-head">
+                      <span className="rw-preview-entry">Entry {rewrite.entryIndex}</span>
+                      <span className="rw-preview-kind">{rewrite.kind}</span>
+                    </div>
+                    <div className="rw-preview-block">blockUuid={rewrite.blockUuid}</div>
+                    <div className="rw-preview-rewrite">
+                      <code>{rewrite.from}</code>
+                      <span aria-hidden="true">→</span>
+                      <code>{rewrite.to}</code>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {currentPageLegacyIdApplyResult && (
+            <div className="rw-feedback-block rw-preview-panel rw-preview-panel-applied">
+              <div className="rw-section-header">
+                <div>
+                  <div className="rw-section-title">Current-Page Migration</div>
+                  <div className="rw-section-meta">
+                    Applied {currentPageLegacyIdApplyResult.rewritesApplied} rewrite(s) to
+                    the current {currentPageLegacyIdApplyResult.fileKind}
+                  </div>
+                </div>
+              </div>
+              <div className="rw-preview-summary">
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Target</span>
+                  <strong>{currentPageLegacyIdApplyResult.pageName}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Path</span>
+                  <strong>{currentPageLegacyIdApplyResult.relativeFilePath}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Kind</span>
+                  <strong>{currentPageLegacyIdApplyResult.fileKind}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Rewrites applied</span>
+                  <strong>{currentPageLegacyIdApplyResult.rewritesApplied}</strong>
+                </div>
+              </div>
+            </div>
+          )}
+
           {errors.length > 0 && (
             <div className="rw-feedback-block">
               <div className="rw-section-header">
@@ -6279,7 +6431,7 @@ export const ReadwiseContainer = () => {
               Setup Properties
             </button>
           )}
-          {propsReady && status === 'idle' && (
+          {propsReady && !isBusy && (
             <div className="rw-action-groups">
               <div className="rw-action-group">
                 <div className="rw-action-group-heading">
@@ -6324,19 +6476,6 @@ export const ReadwiseContainer = () => {
                     Refresh Current Page Metadata
                   </button>
                 </div>
-                <div className="rw-action-row">
-                  <button className="rw-btn" onClick={handlePreviewCurrentPageLegacyIds}>
-                    Preview Current Page Legacy ID Migration
-                  </button>
-                  {pendingCurrentPageLegacyIdMigration && (
-                    <button
-                      className="rw-btn"
-                      onClick={handleApplyCurrentPageLegacyIdMigration}
-                    >
-                      Apply Current Page Legacy ID Migration
-                    </button>
-                  )}
-                </div>
               </div>
 
               <div className="rw-action-group">
@@ -6363,89 +6502,159 @@ export const ReadwiseContainer = () => {
                 </div>
                 {!showMaintenanceTools && (
                   <div className="rw-summary-note">
-                    Audit, repair, backup, and debug tools for managed pages.
+                    Low-frequency audit, migration, snapshot, and debug tools for managed
+                    pages.
                   </div>
                 )}
                 {showMaintenanceTools && (
                   <>
-                    <div className="rw-action-row">
-                      <button className="rw-btn" onClick={handleLimitedSync}>
-                        {sessionTestSyncLabel}
-                      </button>
-                      <button className="rw-btn" onClick={handleInspectCacheSummary}>
-                        Inspect Cache Summary
-                      </button>
-                      <button className="rw-btn" onClick={handleAuditManagedIds}>
-                        Audit Managed IDs
-                      </button>
-                      <button className="rw-btn" onClick={handleRepairManagedPages}>
-                        Repair Managed Pages
-                      </button>
-                      <button className="rw-btn" onClick={handlePreviewLegacyBlockRefs}>
-                        Preview Legacy Block Ref Migration
-                      </button>
-                      {pendingLegacyBlockRefMigration && (
-                        <button
-                          className="rw-btn"
-                          onClick={handleApplyLegacyBlockRefMigration}
-                        >
-                          Apply Legacy Block Ref Migration
-                        </button>
-                      )}
-                      <button className="rw-btn" onClick={handleBackupFormalTestPages}>
-                        Backup Test Pages
-                      </button>
-                      <button className="rw-btn" onClick={handleRestoreTestPages}>
-                        Restore Test Pages
-                      </button>
-                      <button className="rw-btn" onClick={handleClearSessionTestPages}>
-                        Clear Session Test Pages
-                      </button>
-                      {showAdvancedFormalTestActions && (
-                        <button className="rw-btn" onClick={handleClearFormalTestPages}>
-                          Clear Formal Test Pages
-                        </button>
-                      )}
-                    </div>
-                    <div className="rw-action-row">
-                      <button className="rw-btn" onClick={handleDebugSyncFromScratch}>
-                        Start Debug Sync (5)
-                      </button>
-                      <button className="rw-btn" onClick={handleClearDebugPages}>
-                        Clear Debug Pages
-                      </button>
-                      <button className="rw-btn" onClick={handleReaderPreviewSync}>
-                        Start Reader Preview (20, full scan)
-                      </button>
-                      <button className="rw-btn" onClick={handleClearReaderPreviewPages}>
-                        Clear Reader Preview Pages
-                      </button>
-                    </div>
-                    <div className="rw-action-row">
-                      <button className="rw-btn" onClick={handleCaptureCurrentPageSnapshot}>
-                        Capture Page Snapshot
-                      </button>
-                      <button className="rw-btn" onClick={handleDiffCurrentPageSnapshot}>
-                        Diff Page Snapshot
-                      </button>
-                      <button
-                        className="rw-btn"
-                        onClick={() => void handleCopyExternalRawSnapshotCommand('capture')}
-                      >
-                        Copy Raw Capture Cmd
-                      </button>
-                      <button
-                        className="rw-btn"
-                        onClick={() => void handleCopyExternalRawSnapshotCommand('diff')}
-                      >
-                        Copy Raw Diff Cmd
-                      </button>
-                      <button
-                        className="rw-btn"
-                        onClick={() => void handleCopyExternalRawSnapshotWorkflow()}
-                      >
-                        Copy Raw Workflow
-                      </button>
+                    <div className="rw-maintenance-sections">
+                      <div className="rw-maintenance-section">
+                        <div className="rw-maintenance-section-header">
+                          <div className="rw-maintenance-section-title">
+                            Audit & Repair
+                          </div>
+                          <div className="rw-maintenance-section-note">
+                            Inspect managed-page identity and rebuild corrupted pages.
+                          </div>
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handleInspectCacheSummary}>
+                            Inspect Cache Summary
+                          </button>
+                          <button className="rw-btn" onClick={handleAuditManagedIds}>
+                            Audit Managed IDs
+                          </button>
+                          <button className="rw-btn" onClick={handleRepairManagedPages}>
+                            Repair Managed Pages
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="rw-maintenance-section">
+                        <div className="rw-maintenance-section-header">
+                          <div className="rw-maintenance-section-title">Migration</div>
+                          <div className="rw-maintenance-section-note">
+                            Preview and apply low-frequency UUID rewrite workflows.
+                          </div>
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handlePreviewCurrentPageLegacyIds}>
+                            Preview Current Page Legacy ID Migration
+                          </button>
+                          {pendingCurrentPageLegacyIdMigration && (
+                            <button
+                              className="rw-btn"
+                              onClick={handleApplyCurrentPageLegacyIdMigration}
+                            >
+                              Apply Current Page Legacy ID Migration
+                            </button>
+                          )}
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handlePreviewLegacyBlockRefs}>
+                            Preview Legacy Block Ref Migration
+                          </button>
+                          {pendingLegacyBlockRefMigration && (
+                            <button
+                              className="rw-btn"
+                              onClick={handleApplyLegacyBlockRefMigration}
+                            >
+                              Apply Legacy Block Ref Migration
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="rw-maintenance-section">
+                        <div className="rw-maintenance-section-header">
+                          <div className="rw-maintenance-section-title">Snapshots</div>
+                          <div className="rw-maintenance-section-note">
+                            Capture raw page state and external commands for diff-based debugging.
+                          </div>
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handleCaptureCurrentPageSnapshot}>
+                            Capture Page Snapshot
+                          </button>
+                          <button className="rw-btn" onClick={handleDiffCurrentPageSnapshot}>
+                            Diff Page Snapshot
+                          </button>
+                        </div>
+                        <div className="rw-action-row">
+                          <button
+                            className="rw-btn"
+                            onClick={() => void handleCopyExternalRawSnapshotCommand('capture')}
+                          >
+                            Copy Raw Capture Cmd
+                          </button>
+                          <button
+                            className="rw-btn"
+                            onClick={() => void handleCopyExternalRawSnapshotCommand('diff')}
+                          >
+                            Copy Raw Diff Cmd
+                          </button>
+                          <button
+                            className="rw-btn"
+                            onClick={() => void handleCopyExternalRawSnapshotWorkflow()}
+                          >
+                            Copy Raw Workflow
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="rw-maintenance-section">
+                        <div className="rw-maintenance-section-header">
+                          <div className="rw-maintenance-section-title">Test & Preview</div>
+                          <div className="rw-maintenance-section-note">
+                            Session-scoped fixtures and preview-page utilities.
+                          </div>
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handleLimitedSync}>
+                            {sessionTestSyncLabel}
+                          </button>
+                          <button className="rw-btn" onClick={handleBackupFormalTestPages}>
+                            Backup Test Pages
+                          </button>
+                          <button className="rw-btn" onClick={handleRestoreTestPages}>
+                            Restore Test Pages
+                          </button>
+                          <button className="rw-btn" onClick={handleClearSessionTestPages}>
+                            Clear Session Test Pages
+                          </button>
+                          {showAdvancedFormalTestActions && (
+                            <button className="rw-btn" onClick={handleClearFormalTestPages}>
+                              Clear Formal Test Pages
+                            </button>
+                          )}
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handleReaderPreviewSync}>
+                            Start Reader Preview (20, full scan)
+                          </button>
+                          <button className="rw-btn" onClick={handleClearReaderPreviewPages}>
+                            Clear Reader Preview Pages
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="rw-maintenance-section">
+                        <div className="rw-maintenance-section-header">
+                          <div className="rw-maintenance-section-title">Debug</div>
+                          <div className="rw-maintenance-section-note">
+                            Short-lived debug pages and troubleshooting runs.
+                          </div>
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handleDebugSyncFromScratch}>
+                            Start Debug Sync (5)
+                          </button>
+                          <button className="rw-btn" onClick={handleClearDebugPages}>
+                            Clear Debug Pages
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </>
                 )}

@@ -6,6 +6,7 @@ import type { ExportedBook } from '../types'
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import { rebuildManagedPageIfDamagedV1 } from './managed-page-integrity'
 import { withManagedSyncTimestampPagePropertiesV1 } from './managed-page-sync-timestamps'
+import { invalidateLegacyBlockRefMappingCacheV1 } from './migrate-legacy-block-refs'
 import { buildManagedPageNamePlanV1 } from './readwise-page-names'
 import {
   renameManagedPageIfNeededV1,
@@ -134,6 +135,10 @@ export const syncRenderedPage = async (
   }
   const result =
     repairedPage.rebuilt && writeResult === 'created' ? 'updated' : writeResult
+
+  if (result !== 'unchanged') {
+    await invalidateLegacyBlockRefMappingCacheV1(namespacePrefix)
+  }
 
   console.info(`${logPrefix} synced rendered page`, {
     userBookId: book.user_book_id,

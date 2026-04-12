@@ -13,6 +13,7 @@ import {
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import { rebuildManagedPageIfDamagedV1 } from './managed-page-integrity'
 import { withManagedSyncTimestampPagePropertiesV1 } from './managed-page-sync-timestamps'
+import { invalidateLegacyBlockRefMappingCacheV1 } from './migrate-legacy-block-refs'
 import { buildManagedPageNamePlanV1 } from './readwise-page-names'
 import {
   renameManagedPageIfNeededV1,
@@ -258,6 +259,12 @@ export const syncRenderedReaderPreviewPage = async (
   }
   const result =
     repairedPage.rebuilt && writeResult === 'created' ? 'updated' : writeResult
+
+  if (result !== 'unchanged') {
+    await invalidateLegacyBlockRefMappingCacheV1(
+      options.identityNamespaceRoot ?? namespacePrefix,
+    )
+  }
 
   const summary: SyncRenderedReaderPageResult = {
     readerDocumentId: previewBook.document.id,

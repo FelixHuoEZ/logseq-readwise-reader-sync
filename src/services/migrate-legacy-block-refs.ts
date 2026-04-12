@@ -1,6 +1,10 @@
-import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
+import type {
+  AppGraphInfo,
+  BlockEntity,
+  PageEntity,
+} from '@logseq/libs/dist/LSPlugin'
 
-import { logReadwiseInfo } from '../logging'
+import { describeUnknownError, logReadwiseDebug, logReadwiseInfo } from '../logging'
 import {
   computeCompatibleHighlightUuid,
   computeLegacyHighlightUuid,
@@ -19,10 +23,27 @@ const trimTrailingSeparators = (value: string) => value.replace(/[\\/]+$/, '')
 const joinAbsolutePath = (basePath: string, relativePath: string) =>
   `${trimTrailingSeparators(basePath)}/${relativePath}`
 
+const LEGACY_ID_MIGRATION_LOG_PREFIX = '[Readwise Sync]'
+const LEGACY_BLOCK_REF_MAPPING_CACHE_SCHEMA_VERSION = 1
+const LEGACY_BLOCK_REF_MAPPING_CACHE_TTL_MS = 1000 * 60 * 60
+
+interface StoredLegacyBlockRefMappingCacheV1 {
+  schemaVersion: 1
+  namespaceRoot: string
+  cachedAt: string
+  expiresAt: string
+  managedPagesScanned: number
+  entries: Array<[string, string]>
+}
+
 const getRuntimeFsPromises = () => {
-  const runtimeRequire = (
-    window as unknown as { require?: ((id: string) => unknown) | undefined }
-  ).require
+  const runtimeRequire =
+    (window as unknown as { require?: ((id: string) => unknown) | undefined }).require ??
+    (
+      window.top as unknown as {
+        require?: ((id: string) => unknown) | undefined
+      } | null
+    )?.require
 
   if (typeof runtimeRequire !== 'function') {
     throw new Error('window.require is unavailable in the current Logseq runtime.')
@@ -32,6 +53,245 @@ const getRuntimeFsPromises = () => {
     readFile: (path: string, encoding: string) => Promise<string>
     writeFile: (path: string, content: string, encoding: string) => Promise<void>
   }
+}
+
+const serializeDiagnosticValue = (value: unknown): string => {
+  if (value instanceof Error) {
+    return JSON.stringify({
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    })
+  }
+
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return JSON.stringify(value)
+  }
+
+  if (typeof value === 'undefined') {
+    return 'undefined'
+  }
+
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+const describeRootdirApiResult = (value: unknown) => {
+  if (typeof value === 'string') {
+    return {
+      type: 'string',
+      length: value.length,
+      preview: value.slice(0, 120),
+    }
+  }
+
+  if (value === null) {
+    return { type: 'null' }
+  }
+
+  if (typeof value === 'undefined') {
+    return { type: 'undefined' }
+  }
+
+  if (Array.isArray(value)) {
+    return { type: 'array', length: value.length }
+  }
+
+  if (typeof value === 'object') {
+    return {
+      type: 'object',
+      keys: Object.keys(value as Record<string, unknown>).slice(0, 12),
+    }
+  }
+
+  return {
+    type: typeof value,
+    value: String(value),
+  }
+}
+
+const getInternalExecCallableApiAsync = () => {
+  const pluginApi = logseq as unknown as {
+    _execCallableAPIAsync?: (
+      method: string,
+      ...args: unknown[]
+    ) => Promise<unknown>
+  }
+
+  return typeof pluginApi._execCallableAPIAsync === 'function'
+    ? pluginApi._execCallableAPIAsync.bind(pluginApi)
+    : null
+}
+
+const getHostRootdirFileApi = () => {
+  try {
+    const hostScope =
+      (
+        logseq.Experiments as unknown as {
+          ensureHostScope?: () =>
+            | {
+                logseq?: {
+                  api?: {
+                    read_rootdir_file?: (
+                      file: string,
+                      subRoot: string,
+                      rootDir: string,
+                    ) => Promise<unknown>
+                    write_rootdir_file?: (
+                      file: string,
+                      content: string,
+                      subRoot: string,
+                      rootDir: string,
+                    ) => Promise<unknown>
+                  }
+                }
+              }
+            | undefined
+        }
+      ).ensureHostScope?.() ?? null
+
+    const rootdirApi = hostScope?.logseq?.api
+    return rootdirApi &&
+      typeof rootdirApi.read_rootdir_file === 'function' &&
+      typeof rootdirApi.write_rootdir_file === 'function'
+      ? rootdirApi
+      : null
+  } catch {
+    return null
+  }
+}
+
+const readGraphFileViaRootdirApi = async (
+  graphPath: string | null | undefined,
+  relativeFilePath: string,
+) => {
+  if (!graphPath) {
+    throw new Error('Current graph path is unavailable.')
+  }
+
+  const failures: string[] = []
+  const execCallableApiAsync = getInternalExecCallableApiAsync()
+  if (execCallableApiAsync) {
+    try {
+      const content = await execCallableApiAsync(
+        'read_rootdir_file',
+        relativeFilePath,
+        '',
+        graphPath,
+      )
+      if (typeof content === 'string') {
+        return {
+          content,
+          absolutePath: joinAbsolutePath(graphPath, relativeFilePath),
+          readFrom: 'rootdir-api' as const,
+        }
+      }
+
+      failures.push(
+        `internal read_rootdir_file returned ${serializeDiagnosticValue(
+          describeRootdirApiResult(content),
+        )}`,
+      )
+    } catch (error: unknown) {
+      failures.push(`internal read_rootdir_file threw ${serializeDiagnosticValue(error)}`)
+    }
+  } else {
+    failures.push('internal _execCallableAPIAsync is unavailable')
+  }
+
+  const hostRootdirApi = getHostRootdirFileApi()
+  if (hostRootdirApi?.read_rootdir_file) {
+    try {
+      const content = await hostRootdirApi.read_rootdir_file(
+        relativeFilePath,
+        '',
+        graphPath,
+      )
+      if (typeof content === 'string') {
+        return {
+          content,
+          absolutePath: joinAbsolutePath(graphPath, relativeFilePath),
+          readFrom: 'host-rootdir-api' as const,
+        }
+      }
+
+      failures.push(
+        `host read_rootdir_file returned ${serializeDiagnosticValue(
+          describeRootdirApiResult(content),
+        )}`,
+      )
+    } catch (error: unknown) {
+      failures.push(`host read_rootdir_file threw ${serializeDiagnosticValue(error)}`)
+    }
+  } else {
+    failures.push('host rootdir file API is unavailable')
+  }
+
+  throw new Error(
+    `Rootdir file API failed for ${relativeFilePath} | ${failures.join(' | ')}`,
+  )
+}
+
+const writeGraphFileViaRootdirApi = async ({
+  graphPath,
+  relativeFilePath,
+  content,
+}: {
+  graphPath: string | null | undefined
+  relativeFilePath: string
+  content: string
+}) => {
+  if (!graphPath) {
+    throw new Error('Current graph path is unavailable.')
+  }
+
+  const failures: string[] = []
+  const execCallableApiAsync = getInternalExecCallableApiAsync()
+  if (execCallableApiAsync) {
+    try {
+      const result = await execCallableApiAsync(
+        'write_rootdir_file',
+        relativeFilePath,
+        content,
+        '',
+        graphPath,
+      )
+      return result
+    } catch (error: unknown) {
+      failures.push(`internal write_rootdir_file threw ${serializeDiagnosticValue(error)}`)
+    }
+  } else {
+    failures.push('internal _execCallableAPIAsync is unavailable')
+  }
+
+  const hostRootdirApi = getHostRootdirFileApi()
+  if (hostRootdirApi?.write_rootdir_file) {
+    try {
+      const result = await hostRootdirApi.write_rootdir_file(
+        relativeFilePath,
+        content,
+        '',
+        graphPath,
+      )
+      return result
+    } catch (error: unknown) {
+      failures.push(`host write_rootdir_file threw ${serializeDiagnosticValue(error)}`)
+    }
+  } else {
+    failures.push('host rootdir file API is unavailable')
+  }
+
+  throw new Error(
+    `Rootdir write API failed for ${relativeFilePath} | ${failures.join(' | ')}`,
+  )
 }
 
 const buildPageFileStem = (pageName: string) => pageName.replaceAll('/', '___')
@@ -49,26 +309,54 @@ const readGraphFile = async (
   graphPath: string | null | undefined,
   relativeFilePath: string,
 ) => {
+  const failures: string[] = []
+
   try {
+    if (!graphPath) {
+      throw new Error('Current graph path is unavailable.')
+    }
+
     const fsPromises = getRuntimeFsPromises()
-    const absolutePath = joinAbsolutePath(graphPath ?? '', relativeFilePath)
+    const absolutePath = joinAbsolutePath(graphPath, relativeFilePath)
     const content = await fsPromises.readFile(absolutePath, 'utf8')
     return {
       content,
       absolutePath,
       readFrom: 'disk' as const,
     }
-  } catch {
+  } catch (error: unknown) {
+    failures.push(`disk read failed ${serializeDiagnosticValue(error)}`)
+  }
+
+  try {
     const content = await logseq.DB.getFileContent(relativeFilePath)
     if (typeof content !== 'string') {
-      throw new Error(`Failed to read graph file ${relativeFilePath}`)
+      throw new Error(
+        `getFileContent returned ${serializeDiagnosticValue(
+          describeRootdirApiResult(content),
+        )}`,
+      )
     }
+
     return {
       content,
       absolutePath: null,
       readFrom: 'db' as const,
     }
+  } catch (error: unknown) {
+    failures.push(`DB.getFileContent failed ${serializeDiagnosticValue(error)}`)
   }
+
+  try {
+    const resolved = await readGraphFileViaRootdirApi(graphPath, relativeFilePath)
+    return resolved
+  } catch (error: unknown) {
+    failures.push(describeUnknownError(error))
+  }
+
+  throw new Error(
+    `Failed to read graph file ${relativeFilePath} | ${failures.join(' | ')}`,
+  )
 }
 
 const writeGraphFile = async ({
@@ -81,14 +369,27 @@ const writeGraphFile = async ({
   content: string
 }) => {
   try {
-    await logseq.DB.setFileContent(relativeFilePath, content)
-  } catch {
-    const fsPromises = getRuntimeFsPromises()
-    await fsPromises.writeFile(
-      joinAbsolutePath(graphPath ?? '', relativeFilePath),
+    await writeGraphFileViaRootdirApi({
+      graphPath,
+      relativeFilePath,
       content,
-      'utf8',
-    )
+    })
+  } catch {
+    try {
+      await logseq.DB.setFileContent(relativeFilePath, content)
+    } catch {
+      if (!graphPath) {
+        throw new Error(
+          `Failed to persist graph file ${relativeFilePath}: current graph path is unavailable.`,
+        )
+      }
+      const fsPromises = getRuntimeFsPromises()
+      await fsPromises.writeFile(
+        joinAbsolutePath(graphPath, relativeFilePath),
+        content,
+        'utf8',
+      )
+    }
   }
 
   const confirmed = await readGraphFile(graphPath, relativeFilePath)
@@ -97,10 +398,54 @@ const writeGraphFile = async ({
   }
 }
 
+const resolveGraphRootPath = (graph: AppGraphInfo | null | undefined) => {
+  if (typeof graph?.path === 'string' && graph.path.trim().length > 0) {
+    return graph.path.trim()
+  }
+
+  if (typeof graph?.url === 'string' && graph.url.trim().length > 0) {
+    const rawUrl = graph.url.trim()
+    if (rawUrl.startsWith('file://')) {
+      try {
+        return decodeURIComponent(new URL(rawUrl).pathname)
+      } catch {
+        // Fall through to other heuristics.
+      }
+    }
+
+    if (rawUrl.startsWith('/')) {
+      return rawUrl
+    }
+  }
+
+  return null
+}
+
 const uniqueStrings = (values: string[]) =>
   values.filter(
     (value, index, array) => value.length > 0 && array.indexOf(value) === index,
   )
+
+const isMissingFileStorageItemError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.includes('file not existed')
+}
+
+const safeGetFileStorageItem = async (key: string): Promise<string | null> => {
+  try {
+    const value = await logseq.FileStorage.getItem(key)
+    return typeof value === 'string' ? value : null
+  } catch (error: unknown) {
+    if (isMissingFileStorageItemError(error)) {
+      return null
+    }
+
+    throw error
+  }
+}
+
+const buildLegacyBlockRefMappingCacheKeyV1 = (namespaceRoot: string) =>
+  `legacy-block-ref-mapping/v1/${encodeURIComponent(namespaceRoot)}.json`
 
 const collectPageAliases = (page: PageEntity): string[] =>
   uniqueStrings([
@@ -108,6 +453,77 @@ const collectPageAliases = (page: PageEntity): string[] =>
     typeof page.title === 'string' ? page.title : '',
     typeof page.name === 'string' ? page.name : '',
   ])
+
+const isPageEntityLike = (value: unknown): value is PageEntity =>
+  value != null &&
+  typeof value === 'object' &&
+  ('originalName' in value || 'title' in value || 'name' in value)
+
+const getCurrentRoutePath = () => {
+  try {
+    const location = window.top?.location ?? window.location
+    if (location.hash && location.hash !== '#') {
+      return location.hash.startsWith('#') ? location.hash.slice(1) : location.hash
+    }
+
+    const path = `${location.pathname}${location.search}`
+    return path || null
+  } catch {
+    return null
+  }
+}
+
+const decodeCurrentRoutePageName = () => {
+  const routePath = getCurrentRoutePath()
+  if (!routePath) {
+    return null
+  }
+
+  const [rawRoutePath] = routePath.split('?')
+  const normalizedRoutePath = rawRoutePath ?? ''
+  const candidateMatches = [
+    normalizedRoutePath.match(/^\/page\/(.+)$/i),
+    normalizedRoutePath.match(/^\/whiteboard\/(.+)$/i),
+    normalizedRoutePath.match(/^\/whiteboards\/(.+)$/i),
+  ]
+
+  for (const pagePrefixMatch of candidateMatches) {
+    if (!pagePrefixMatch) continue
+    const rawPageName = pagePrefixMatch[1]?.trim() ?? ''
+    if (rawPageName.length === 0) continue
+
+    try {
+      return decodeURIComponent(rawPageName)
+    } catch {
+      return rawPageName
+    }
+  }
+
+  return null
+}
+
+const resolveCurrentOpenPageEntityV1 = async (): Promise<PageEntity> => {
+  const currentPage = await logseq.Editor.getCurrentPage()
+  if (isPageEntityLike(currentPage)) {
+    return currentPage
+  }
+
+  const routePageName = decodeCurrentRoutePageName()
+  if (routePageName) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const routePage = await logseq.Editor.getPage(routePageName)
+      if (routePage) {
+        return routePage
+      }
+
+      if (attempt < 3) {
+        await new Promise((resolve) => window.setTimeout(resolve, 80 * (attempt + 1)))
+      }
+    }
+  }
+
+  throw new Error('No current page is open.')
+}
 
 const flattenPageBlocksTreeContent = (
   blocks: Array<BlockEntity | [unknown, string]>,
@@ -155,6 +571,59 @@ const collectContentBlocks = (
   }
 
   return collected
+}
+
+const getBlockPropertyString = (
+  block: BlockEntity,
+  candidateKeys: string[],
+): string | null => {
+  const properties = block.properties
+  if (!properties || typeof properties !== 'object') {
+    return null
+  }
+
+  const normalizedKeys = uniqueStrings(
+    candidateKeys.flatMap((key) => [
+      key,
+      key.toLowerCase(),
+      key.replaceAll('-', '_'),
+      key.toLowerCase().replaceAll('-', '_'),
+    ]),
+  )
+
+  for (const key of normalizedKeys) {
+    const value = (properties as Record<string, unknown>)[key]
+    if (typeof value === 'string' && value.length > 0) {
+      return value
+    }
+  }
+
+  return null
+}
+
+const resolveCurrentPageBestEffortRelativeFilePath = (
+  page: PageEntity,
+  aliases: string[],
+) => {
+  const directRelativePath =
+    page.file &&
+    typeof page.file === 'object' &&
+    'path' in page.file &&
+    typeof page.file.path === 'string' &&
+    page.file.path.length > 0
+      ? page.file.path
+      : null
+
+  if (directRelativePath) {
+    return directRelativePath
+  }
+
+  const pageName = aliases[0] ?? page.originalName ?? page.name ?? page.title ?? ''
+  if (page.type === 'whiteboard') {
+    return `whiteboards/${pageName}.edn`
+  }
+
+  return `pages/${buildPageFileStem(pageName)}.org`
 }
 
 const extractLegacyToCurrentUuidPairsFromContent = (content: string) => {
@@ -208,6 +677,95 @@ const extractLegacyToCurrentUuidPairsFromContent = (content: string) => {
 export interface LegacyBlockRefMappingSummaryV1 {
   managedPagesScanned: number
   mappedLegacyUuids: number
+  cacheStatus: 'hit' | 'rebuilt'
+}
+
+const restoreLegacyBlockRefMappingCacheV1 = async ({
+  namespaceRoot,
+  managedPagesScanned,
+}: {
+  namespaceRoot: string
+  managedPagesScanned: number
+}): Promise<Map<string, string> | null> => {
+  const key = buildLegacyBlockRefMappingCacheKeyV1(namespaceRoot)
+  const raw = await safeGetFileStorageItem(key)
+  if (!raw) return null
+
+  let parsed: StoredLegacyBlockRefMappingCacheV1
+  try {
+    parsed = JSON.parse(raw) as StoredLegacyBlockRefMappingCacheV1
+  } catch {
+    return null
+  }
+
+  if (
+    parsed.schemaVersion !== LEGACY_BLOCK_REF_MAPPING_CACHE_SCHEMA_VERSION ||
+    parsed.namespaceRoot !== namespaceRoot
+  ) {
+    return null
+  }
+
+  const expiresAt = Date.parse(parsed.expiresAt)
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
+    return null
+  }
+
+  if (parsed.managedPagesScanned !== managedPagesScanned) {
+    return null
+  }
+
+  return new Map(
+    (parsed.entries ?? []).filter(
+      (entry): entry is [string, string] =>
+        Array.isArray(entry) &&
+        typeof entry[0] === 'string' &&
+        typeof entry[1] === 'string' &&
+        entry[0].length > 0 &&
+        entry[1].length > 0,
+    ),
+  )
+}
+
+const persistLegacyBlockRefMappingCacheV1 = async ({
+  namespaceRoot,
+  managedPagesScanned,
+  mapping,
+}: {
+  namespaceRoot: string
+  managedPagesScanned: number
+  mapping: Map<string, string>
+}) => {
+  const now = new Date()
+  const payload: StoredLegacyBlockRefMappingCacheV1 = {
+    schemaVersion: LEGACY_BLOCK_REF_MAPPING_CACHE_SCHEMA_VERSION,
+    namespaceRoot,
+    cachedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + LEGACY_BLOCK_REF_MAPPING_CACHE_TTL_MS).toISOString(),
+    managedPagesScanned,
+    entries: [...mapping.entries()],
+  }
+
+  await logseq.FileStorage.setItem(
+    buildLegacyBlockRefMappingCacheKeyV1(namespaceRoot),
+    JSON.stringify(payload),
+  )
+}
+
+export const invalidateLegacyBlockRefMappingCacheV1 = async (
+  namespaceRoot: string,
+) => {
+  try {
+    const key = buildLegacyBlockRefMappingCacheKeyV1(namespaceRoot)
+    const hasItem = await logseq.FileStorage.hasItem(key)
+    if (hasItem) {
+      await logseq.FileStorage.removeItem(key)
+    }
+  } catch (error: unknown) {
+    logReadwiseDebug(LEGACY_ID_MIGRATION_LOG_PREFIX, 'failed to invalidate legacy block ref mapping cache', {
+      namespaceRoot,
+      error: describeUnknownError(error),
+    })
+  }
 }
 
 export const buildLegacyBlockRefMappingV1 = async ({
@@ -230,6 +788,27 @@ export const buildLegacyBlockRefMappingV1 = async ({
       alias === namespaceRoot || alias.startsWith(`${namespaceRoot}/`),
     ),
   ) as PageEntity[]
+
+  const cachedMapping = await restoreLegacyBlockRefMappingCacheV1({
+    namespaceRoot,
+    managedPagesScanned: managedPages.length,
+  })
+  if (cachedMapping) {
+    logReadwiseDebug(LEGACY_ID_MIGRATION_LOG_PREFIX, 'loaded legacy block ref mapping cache', {
+      namespaceRoot,
+      managedPagesScanned: managedPages.length,
+      mappedLegacyUuids: cachedMapping.size,
+    })
+    return {
+      mapping: cachedMapping,
+      summary: {
+        managedPagesScanned: managedPages.length,
+        mappedLegacyUuids: cachedMapping.size,
+        cacheStatus: 'hit' as const,
+      },
+    }
+  }
+
   const mapping = new Map<string, string>()
 
   for (let index = 0; index < managedPages.length; index += 1) {
@@ -252,11 +831,32 @@ export const buildLegacyBlockRefMappingV1 = async ({
     }
   }
 
+  try {
+    await persistLegacyBlockRefMappingCacheV1({
+      namespaceRoot,
+      managedPagesScanned: managedPages.length,
+      mapping,
+    })
+    logReadwiseDebug(LEGACY_ID_MIGRATION_LOG_PREFIX, 'persisted legacy block ref mapping cache', {
+      namespaceRoot,
+      managedPagesScanned: managedPages.length,
+      mappedLegacyUuids: mapping.size,
+    })
+  } catch (error: unknown) {
+    logReadwiseDebug(LEGACY_ID_MIGRATION_LOG_PREFIX, 'failed to persist legacy block ref mapping cache', {
+      namespaceRoot,
+      managedPagesScanned: managedPages.length,
+      mappedLegacyUuids: mapping.size,
+      error: describeUnknownError(error),
+    })
+  }
+
   return {
     mapping,
     summary: {
       managedPagesScanned: managedPages.length,
       mappedLegacyUuids: mapping.size,
+      cacheStatus: 'rebuilt',
     },
   }
 }
@@ -285,7 +885,8 @@ export interface PreviewLegacyBlockRefsSummaryV1 {
 }
 
 export interface CurrentPageLegacyIdRewriteEntryV1 {
-  lineNumber: number
+  entryIndex: number
+  blockUuid: string
   kind: 'block-ref' | 'refdock-item-id'
   from: string
   to: string
@@ -308,10 +909,10 @@ export interface MigrateCurrentPageLegacyIdsSummaryV1 {
 }
 
 interface CurrentPageLegacyIdMigrationTargetV1 {
+  page: PageEntity
   pageName: string
   relativeFilePath: string
   fileKind: 'page' | 'whiteboard'
-  content: string
 }
 
 const escapeDatalogString = (value: string) =>
@@ -353,10 +954,7 @@ const resolvePageFilePathViaQuery = async (
 
 const resolveCurrentPageLegacyIdMigrationTargetV1 =
   async (): Promise<CurrentPageLegacyIdMigrationTargetV1> => {
-    const currentPage = (await logseq.Editor.getCurrentPage()) as PageEntity | null
-    if (!currentPage) {
-      throw new Error('No current page is open.')
-    }
+    const currentPage = await resolveCurrentOpenPageEntityV1()
 
     const aliases = collectPageAliases(currentPage)
     const pageName = aliases[0] ?? null
@@ -364,67 +962,13 @@ const resolveCurrentPageLegacyIdMigrationTargetV1 =
       throw new Error('Failed to resolve the current page name.')
     }
 
-    const graph = await logseq.App.getCurrentGraph()
-    const directRelativePath =
-      currentPage.file &&
-      typeof currentPage.file === 'object' &&
-      'path' in currentPage.file &&
-      typeof currentPage.file.path === 'string' &&
-      currentPage.file.path.length > 0
-        ? currentPage.file.path
-        : null
-
-    const candidatePaths = uniqueStrings([
-      directRelativePath ?? '',
-      ...buildCurrentPageCandidateRelativePaths(aliases),
-    ])
-
-    for (const relativeFilePath of candidatePaths) {
-      try {
-        const resolved = await readGraphFile(graph?.path ?? null, relativeFilePath)
-        return {
-          pageName,
-          relativeFilePath,
-          fileKind: relativeFilePath.startsWith('whiteboards/')
-            ? 'whiteboard'
-            : 'page',
-          content: resolved.content,
-        }
-      } catch {
-        // Continue trying more candidates.
-      }
+    return {
+      page: currentPage,
+      pageName,
+      relativeFilePath: resolveCurrentPageBestEffortRelativeFilePath(currentPage, aliases),
+      fileKind: currentPage.type === 'whiteboard' ? 'whiteboard' : 'page',
     }
-
-    const assets = await logseq.Assets.listFilesOfCurrentGraph(['org', 'md', 'edn'])
-    for (const candidatePath of candidatePaths) {
-      const asset = assets.find((entry) => entry.path === candidatePath)
-      if (!asset) continue
-
-      const resolved = await readGraphFile(graph?.path ?? null, asset.path)
-      return {
-        pageName,
-        relativeFilePath: asset.path,
-        fileKind: asset.path.startsWith('whiteboards/') ? 'whiteboard' : 'page',
-        content: resolved.content,
-      }
-    }
-
-    const queryRelativePath = await resolvePageFilePathViaQuery(currentPage, aliases)
-    if (queryRelativePath) {
-      const resolved = await readGraphFile(graph?.path ?? null, queryRelativePath)
-      return {
-        pageName,
-        relativeFilePath: queryRelativePath,
-        fileKind: queryRelativePath.startsWith('whiteboards/') ? 'whiteboard' : 'page',
-        content: resolved.content,
-      }
-    }
-
-    throw new Error(`Failed to resolve the current page file for "${pageName}".`)
   }
-
-const countLineNumberAtIndex = (content: string, index: number) =>
-  content.slice(0, index).split('\n').length
 
 const getLineAtIndex = (content: string, index: number) => {
   const before = content.slice(0, index)
@@ -434,82 +978,163 @@ const getLineAtIndex = (content: string, index: number) => {
   return content.slice(lineStart, lineEnd)
 }
 
-const collectCurrentPageLegacyIdRewrites = (
-  content: string,
+const collectCurrentPageLegacyIdRewritesFromBlocks = (
+  blocks: BlockEntity[],
   mapping: Map<string, string>,
 ): CurrentPageLegacyIdRewriteEntryV1[] => {
   const rewrites: CurrentPageLegacyIdRewriteEntryV1[] = []
+  let rewriteIndex = 0
 
-  for (const match of content.matchAll(BLOCK_REF_PATTERN)) {
-    const from = match[1] ?? ''
-    const to = mapping.get(from)
-    const index = match.index ?? -1
-    if (!to || to === from || index < 0) continue
+  for (const block of blocks) {
+    const originalContent = block.content ?? ''
 
-    const beforeLine = getLineAtIndex(content, index)
+    for (const match of originalContent.matchAll(BLOCK_REF_PATTERN)) {
+      const from = match[1] ?? ''
+      const to = mapping.get(from)
+      const index = match.index ?? -1
+      if (!to || to === from || index < 0) continue
+
+      const beforeLine = getLineAtIndex(originalContent, index)
+      rewriteIndex += 1
+      rewrites.push({
+        entryIndex: rewriteIndex,
+        blockUuid: block.uuid,
+        kind: 'block-ref',
+        from,
+        to,
+        beforeLine,
+        afterLine: beforeLine.replaceAll(`((${from}))`, `((${to}))`),
+      })
+    }
+
+    for (const match of originalContent.matchAll(REFDOCK_ITEM_ID_PATTERN)) {
+      const prefix = match[1] ?? ''
+      const from = match[2] ?? ''
+      const suffix = match[3] ?? ''
+      const to = mapping.get(from)
+      const index = match.index ?? -1
+      if (!to || to === from || index < 0) continue
+
+      const beforeLine = getLineAtIndex(originalContent, index)
+      rewriteIndex += 1
+      rewrites.push({
+        entryIndex: rewriteIndex,
+        blockUuid: block.uuid,
+        kind: 'refdock-item-id',
+        from,
+        to,
+        beforeLine,
+        afterLine: `${prefix}${to}${suffix}`,
+      })
+    }
+
+    if (originalContent.match(REFDOCK_ITEM_ID_PATTERN)) {
+      continue
+    }
+
+    const propertyValue = getBlockPropertyString(block, ['refdock-item-id'])
+    if (!propertyValue) {
+      continue
+    }
+
+    const nextUuid = mapping.get(propertyValue)
+    if (!nextUuid || nextUuid === propertyValue) {
+      continue
+    }
+
+    rewriteIndex += 1
     rewrites.push({
-      lineNumber: countLineNumberAtIndex(content, index),
-      kind: 'block-ref',
-      from,
-      to,
-      beforeLine,
-      afterLine: beforeLine.replaceAll(`((${from}))`, `((${to}))`),
-    })
-  }
-
-  for (const match of content.matchAll(REFDOCK_ITEM_ID_PATTERN)) {
-    const prefix = match[1] ?? ''
-    const from = match[2] ?? ''
-    const suffix = match[3] ?? ''
-    const to = mapping.get(from)
-    const index = match.index ?? -1
-    if (!to || to === from || index < 0) continue
-
-    const beforeLine = getLineAtIndex(content, index)
-    rewrites.push({
-      lineNumber: countLineNumberAtIndex(content, index),
+      entryIndex: rewriteIndex,
+      blockUuid: block.uuid,
       kind: 'refdock-item-id',
-      from,
-      to,
-      beforeLine,
-      afterLine: `${prefix}${to}${suffix}`,
+      from: propertyValue,
+      to: nextUuid,
+      beforeLine: `:refdock-item-id: ${propertyValue}`,
+      afterLine: `:refdock-item-id: ${nextUuid}`,
     })
   }
 
-  return rewrites.sort((left, right) => left.lineNumber - right.lineNumber)
+  return rewrites.sort((left, right) => left.entryIndex - right.entryIndex)
 }
 
-const rewriteCurrentPageLegacyIdsInContent = (
-  content: string,
+const rewriteCurrentPageLegacyIdsInBlocks = (
+  blocks: BlockEntity[],
   mapping: Map<string, string>,
 ) => {
   let rewritesApplied = 0
-  let nextContent = content.replace(BLOCK_REF_PATTERN, (match, uuid: string) => {
-    const nextUuid = mapping.get(uuid)
-    if (!nextUuid || nextUuid === uuid) {
-      return match
-    }
+  const contentUpdates: Array<{
+    blockUuid: string
+    nextContent: string
+  }> = []
+  const propertyUpdates: Array<{
+    blockUuid: string
+    key: string
+    value: string
+  }> = []
 
-    rewritesApplied += 1
-    return `((${nextUuid}))`
-  })
-
-  nextContent = nextContent.replace(
-    REFDOCK_ITEM_ID_PATTERN,
-    (match, prefix: string, uuid: string, suffix: string) => {
+  for (const block of blocks) {
+    const originalContent = block.content ?? ''
+    let replacedInBlock = 0
+    let nextContent = originalContent.replace(BLOCK_REF_PATTERN, (match, uuid: string) => {
       const nextUuid = mapping.get(uuid)
       if (!nextUuid || nextUuid === uuid) {
         return match
       }
 
-      rewritesApplied += 1
-      return `${prefix}${nextUuid}${suffix}`
-    },
-  )
+      replacedInBlock += 1
+      return `((${nextUuid}))`
+    })
+
+    const contentContainsRefdockProperty = Boolean(
+      originalContent.match(REFDOCK_ITEM_ID_PATTERN),
+    )
+    nextContent = nextContent.replace(
+      REFDOCK_ITEM_ID_PATTERN,
+      (match, prefix: string, uuid: string, suffix: string) => {
+        const nextUuid = mapping.get(uuid)
+        if (!nextUuid || nextUuid === uuid) {
+          return match
+        }
+
+        replacedInBlock += 1
+        return `${prefix}${nextUuid}${suffix}`
+      },
+    )
+
+    if (replacedInBlock > 0 && nextContent !== originalContent) {
+      contentUpdates.push({
+        blockUuid: block.uuid,
+        nextContent,
+      })
+      rewritesApplied += replacedInBlock
+    }
+
+    if (contentContainsRefdockProperty) {
+      continue
+    }
+
+    const propertyValue = getBlockPropertyString(block, ['refdock-item-id'])
+    if (!propertyValue) {
+      continue
+    }
+
+    const nextUuid = mapping.get(propertyValue)
+    if (!nextUuid || nextUuid === propertyValue) {
+      continue
+    }
+
+    propertyUpdates.push({
+      blockUuid: block.uuid,
+      key: 'refdock-item-id',
+      value: nextUuid,
+    })
+    rewritesApplied += 1
+  }
 
   return {
-    nextContent,
     rewritesApplied,
+    contentUpdates,
+    propertyUpdates,
   }
 }
 
@@ -710,7 +1335,11 @@ export const previewCurrentPageLegacyIdsV1 = async ({
   rewrites: CurrentPageLegacyIdRewriteEntryV1[]
 }> => {
   const target = await resolveCurrentPageLegacyIdMigrationTargetV1()
-  const rewrites = collectCurrentPageLegacyIdRewrites(target.content, mapping)
+  const pageBlocksTree = await logseq.Editor.getPageBlocksTree(target.page.name)
+  const rewrites = collectCurrentPageLegacyIdRewritesFromBlocks(
+    collectContentBlocks(pageBlocksTree ?? []),
+    mapping,
+  )
 
   return {
     target: {
@@ -742,18 +1371,23 @@ export const migrateCurrentPageLegacyIdsV1 = async ({
     )
   }
 
-  const { nextContent, rewritesApplied } = rewriteCurrentPageLegacyIdsInContent(
-    target.content,
+  const pageBlocksTree = await logseq.Editor.getPageBlocksTree(target.page.name)
+  const { rewritesApplied, contentUpdates, propertyUpdates } =
+    rewriteCurrentPageLegacyIdsInBlocks(
+    collectContentBlocks(pageBlocksTree ?? []),
     mapping,
   )
 
-  if (rewritesApplied > 0 && nextContent !== target.content) {
-    const graph = await logseq.App.getCurrentGraph()
-    await writeGraphFile({
-      graphPath: graph?.path ?? null,
-      relativeFilePath: target.relativeFilePath,
-      content: nextContent,
-    })
+  for (const update of contentUpdates) {
+    await logseq.Editor.updateBlock(update.blockUuid, update.nextContent)
+  }
+
+  for (const propertyUpdate of propertyUpdates) {
+    await logseq.Editor.upsertBlockProperty(
+      propertyUpdate.blockUuid,
+      propertyUpdate.key,
+      propertyUpdate.value,
+    )
   }
 
   logReadwiseInfo(logPrefix, 'migrated current-page legacy ids', {

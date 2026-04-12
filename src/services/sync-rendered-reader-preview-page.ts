@@ -20,7 +20,6 @@ import {
   createManagedPageV1,
   writeSingleRootPageContentV1,
 } from './single-root-page-content'
-import { syncManagedPagePropertiesV1 } from './sync-managed-page-properties'
 
 const toYmd = (value: string | null | undefined) => {
   if (!value) return null
@@ -195,12 +194,11 @@ export const syncRenderedReaderPreviewPage = async (
   const emitResult = emitOrgPage(semanticPage)
   const renderHashInput = buildRenderHashInput(semanticPage)
   const renderHash = computeRenderHash(renderHashInput)
-  const content = emitResult.pageContentText
+  const content = emitResult.outputText
 
   logRenderedContentDiagnostics(pageName, content, logPrefix)
 
   const page = existingPage ?? (await createManagedPageV1(pageName, logPrefix))
-  await syncManagedPagePropertiesV1(page, emitResult.pageProperties, logPrefix)
   const result = await writeSingleRootPageContentV1(
     page,
     pageName,

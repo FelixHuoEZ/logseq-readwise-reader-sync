@@ -9,7 +9,6 @@ import {
   createManagedPageV1,
   writeSingleRootPageContentV1,
 } from './single-root-page-content'
-import { syncManagedPagePropertiesV1 } from './sync-managed-page-properties'
 
 const logRenderedContentDiagnostics = (
   pageName: string,
@@ -69,14 +68,9 @@ export const syncRenderedPage = async (
     buildPageRenderContext(normalizedBook, renderRuntime),
     computeCompatibleHighlightUuid,
   )
-  const content = renderedPage.emitResult.pageContentText
+  const content = renderedPage.emitResult.outputText
   logRenderedContentDiagnostics(pageName, content, logPrefix)
   const page = existingPage ?? (await createManagedPageV1(pageName, logPrefix))
-  await syncManagedPagePropertiesV1(
-    page,
-    renderedPage.emitResult.pageProperties,
-    logPrefix,
-  )
   const result = await writeSingleRootPageContentV1(
     page,
     pageName,

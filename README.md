@@ -18,9 +18,10 @@ This project is published as an independent plugin release line. If it is publis
 - Manual `Full Refresh` for whole-library rebuilds
 - Current-page tools for `Rebuild Current Page From Cache` and `Refresh Current Page Metadata`
 - Preview-first current-page legacy ID migration for pages and whiteboards
+- Dedicated current-page preview and apply summaries, instead of burying successful previews in the issue list
 - Managed page identity tracking through `rw-reader-id`
 - Automatic page retargeting when a managed page title changes
-- Hidden maintenance tools for debug, preview, and recovery flows
+- Maintenance tools grouped into `Audit & Repair`, `Migration`, `Snapshots`, `Test & Preview`, and `Debug`
 - Formal sync summary page with counts and phase timings
 - Log level control through plugin settings
 
@@ -60,8 +61,9 @@ Do not run this project and another Readwise Logseq plugin against the same grap
 3. Use `Full Refresh` when you need a fresh whole-library rebuild.
 4. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
 5. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
-6. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
-7. Wait for the plugin to:
+6. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
+7. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
+8. Wait for the plugin to:
    - scan Reader highlights or load the cached highlight snapshot
    - group them by parent document
    - fetch the target parent documents
@@ -85,6 +87,20 @@ After each formal sync:
 
 The panel hides maintenance tools during normal use. They appear when formal sync detects conflicting managed pages, or when you explicitly expose them during debugging.
 
+Maintenance tools are grouped by purpose:
+
+- `Audit & Repair`
+  - cache inspection, managed-id audit, damaged-page repair
+- `Migration`
+  - current-page legacy id preview/apply
+  - graph-wide legacy block ref preview/apply
+- `Snapshots`
+  - capture and diff raw current-page snapshots
+- `Test & Preview`
+  - session test pages, preview pages, and restore/clear helpers
+- `Debug`
+  - short-lived debug sync pages and cleanup
+
 Debug settings affect different phases:
 
 - `Reader Full Scan Target Documents`
@@ -104,7 +120,7 @@ Use the highlight page limit only for short debug runs. Set it back to `0` for r
 - If a damaged page points at a highlight whose original parent metadata is gone, repair scans Reader again for a replacement parent using the page's current metadata.
 - If Reader still does not provide a unique, high-confidence parent, the page stays as an issue instead of being rebound by guesswork.
 - Legacy block ref migration now follows a preview-first flow: the plugin lists every planned `((block ref))` rewrite before you confirm the apply step.
-- Current-page legacy id migration also follows a preview-first flow and rewrites only the current page or whiteboard file. It updates proven Readwise legacy ids in `((block refs))`, whiteboard embeds, and `:refdock-item-id:` values.
+- Current-page legacy id migration also follows a preview-first flow and rewrites only the current page or whiteboard. It updates proven Readwise legacy ids in `((block refs))`, whiteboard embeds, and `:refdock-item-id:` values, then shows a dedicated apply summary after the rewrite completes.
 
 See [docs/repair-managed-pages-spec.md](./docs/repair-managed-pages-spec.md) for the detailed recovery rules, analyzed failure classes, and the guardrails for these repair flows.
 

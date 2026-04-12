@@ -105,6 +105,22 @@ export interface LoadReaderPreviewBooksOptions {
   onProgress?: (progress: LoadReaderPreviewBooksProgress) => void
 }
 
+export interface LoadReaderPreviewBooksByParentIdsOptions {
+  parentIds: readonly string[]
+  previewCache: GraphReaderSyncCacheV1
+  parentMetadataMode?: ReaderParentMetadataMode
+  logPrefix?: string
+  highlightCoverage?: ReaderPreviewLoadMode
+}
+
+export interface LoadReaderPreviewBooksByParentIdsResult {
+  books: ReaderPreviewBook[]
+  unresolvedParentIds: string[]
+  parentMetadataCacheHits: number
+  parentMetadataRemoteFetches: number
+  fetchDocumentsDurationMs: number
+}
+
 const sortByCreatedAtAscending = (left: ReaderDocument, right: ReaderDocument) =>
   left.created_at.localeCompare(right.created_at)
 
@@ -113,6 +129,9 @@ const sortByUpdatedAtDescending = (left: ReaderDocument, right: ReaderDocument) 
 
 const getHighlightText = (document: ReaderDocument) =>
   typeof document.content === 'string' ? document.content.trim() : ''
+
+const uniqueParentIds = (parentIds: readonly string[]) =>
+  [...new Set(parentIds.filter((parentId) => typeof parentId === 'string' && parentId.length > 0))]
 
 const sleep = async (milliseconds: number) =>
   new Promise((resolve) => {
@@ -202,6 +221,180 @@ const getLatestUpdatedAt = (documents: Iterable<ReaderDocument>) => {
 
 const flattenHighlightsByParent = (highlightsByParent: Map<string, ReaderDocument[]>) =>
   [...highlightsByParent.values()].flat()
+
+export const loadReaderPreviewBooksByParentIds = async (
+  client: ReadwiseClient,
+  options: LoadReaderPreviewBooksByParentIdsOptions,
+): Promise<LoadReaderPreviewBooksByParentIdsResult> => {
+  const parentIds = uniqueParentIds(options.parentIds)
+  if (parentIds.length === 0) {
+    return {
+      books: [],
+      unresolvedParentIds: [],
+      parentMetadataCacheHits: 0,
+      parentMetadataRemoteFetches: 0,
+      fetchDocumentsDurationMs: 0,
+    }
+  }
+
+  const fetchDocumentsStartedAt = Date.now()
+  const parentMetadataMode = options.parentMetadataMode ?? 'cache_first'
+  const unresolvedParentIds: string[] = []
+  let parentMetadataCacheHits = 0
+  let parentMetadataRemoteFetches = 0
+  let highlightsByParent = new Map<string, ReaderDocument[]>()
+  let cachedParentDocuments = new Map<string, ReaderDocument>()
+
+  try {
+    highlightsByParent = await options.previewCache.loadGroupedHighlightsByParent(parentIds)
+  } catch (error) {
+    if (options.logPrefix) {
+      logReadwiseWarn(
+        options.logPrefix,
+        'failed to load cached highlights for queued retry pages',
+        {
+          parentCount: parentIds.length,
+          formattedError: describeUnknownError(error),
+        },
+      )
+    }
+
+    return {
+      books: [],
+      unresolvedParentIds: parentIds,
+      parentMetadataCacheHits,
+      parentMetadataRemoteFetches,
+      fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
+    }
+  }
+
+  if (parentMetadataMode === 'cache_first') {
+    try {
+      cachedParentDocuments = await options.previewCache.getCachedParentDocuments(
+        parentIds,
+      )
+    } catch (error) {
+      if (options.logPrefix) {
+        logReadwiseWarn(
+          options.logPrefix,
+          'failed to load cached parent metadata for queued retry pages',
+          {
+            parentCount: parentIds.length,
+            formattedError: describeUnknownError(error),
+          },
+        )
+      }
+    }
+  }
+
+  const fetchedParentDocuments: ReaderDocument[] = []
+  const books: ReaderPreviewBook[] = []
+
+  for (const parentId of parentIds) {
+    const highlights = [...(highlightsByParent.get(parentId) ?? [])].sort(
+      sortByCreatedAtAscending,
+    )
+
+    if (highlights.length === 0) {
+      unresolvedParentIds.push(parentId)
+
+      if (options.logPrefix) {
+        logReadwiseWarn(
+          options.logPrefix,
+          'queued retry page has no cached highlights; leaving it queued for a future run',
+          {
+            parentId,
+          },
+        )
+      }
+
+      continue
+    }
+
+    const cachedDocument =
+      parentMetadataMode === 'cache_first'
+        ? cachedParentDocuments.get(parentId) ?? null
+        : null
+    let document = cachedDocument
+
+    if (document) {
+      parentMetadataCacheHits += 1
+    } else {
+      try {
+        const response = await listReaderDocumentsWithRetry(
+          client,
+          {
+            id: parentId,
+            limit: 1,
+          },
+          {
+            logPrefix: options.logPrefix,
+            stage: 'fetch-documents',
+            parentId,
+          },
+        )
+
+        document = response.results[0] ?? null
+      } catch (error) {
+        unresolvedParentIds.push(parentId)
+
+        if (options.logPrefix) {
+          logReadwiseWarn(
+            options.logPrefix,
+            'failed to reload queued retry page parent metadata; keeping it queued',
+            {
+              parentId,
+              formattedError: describeUnknownError(error),
+            },
+          )
+        }
+
+        continue
+      }
+
+      if (document) {
+        parentMetadataRemoteFetches += 1
+        fetchedParentDocuments.push(document)
+      }
+    }
+
+    if (!document) {
+      unresolvedParentIds.push(parentId)
+      continue
+    }
+
+    books.push({
+      document,
+      highlights,
+      highlightCoverage: options.highlightCoverage ?? 'cached-full-rebuild',
+    })
+  }
+
+  if (fetchedParentDocuments.length > 0) {
+    try {
+      await options.previewCache.putParentDocuments(fetchedParentDocuments)
+    } catch (error) {
+      if (options.logPrefix) {
+        logReadwiseWarn(
+          options.logPrefix,
+          'failed to persist refreshed parent metadata for queued retry pages',
+          {
+            documentCount: fetchedParentDocuments.length,
+            formattedError: describeUnknownError(error),
+          },
+        )
+      }
+    }
+  }
+
+  return {
+    books,
+    unresolvedParentIds,
+    parentMetadataCacheHits,
+    parentMetadataRemoteFetches,
+    fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
+  }
+}
 
 export const loadReaderPreviewBooks = async (
   client: ReadwiseClient,

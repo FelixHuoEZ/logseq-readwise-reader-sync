@@ -20,6 +20,12 @@ export type RunIssueCategory =
   | 'path-too-long'
   | 'generic'
 
+const NON_BLOCKING_READER_SYNC_RUN_ISSUE_CATEGORIES = new Set<RunIssueCategory>([
+  'managed-page-identity-conflict',
+  'duplicate-reader-id',
+  'path-too-long',
+])
+
 export interface RunIssue {
   book: string
   message: string
@@ -204,6 +210,13 @@ export const diagnoseRunIssue = (issue: RunIssue): DiagnosedRunIssue => {
       'Copy this issue bundle, set log level to debug if needed, and inspect the console payload for the failing page.',
     debugFacts: withContextFacts(issue.debugFacts ?? [], issue),
   }
+}
+
+export const shouldRunIssueBlockReaderSyncCursor = (
+  issue: RunIssue | DiagnosedRunIssue,
+) => {
+  const category = diagnoseRunIssue(issue).category
+  return !NON_BLOCKING_READER_SYNC_RUN_ISSUE_CATEGORIES.has(category)
 }
 
 export const summarizeRunIssueCategories = (issues: RunIssue[]) => {

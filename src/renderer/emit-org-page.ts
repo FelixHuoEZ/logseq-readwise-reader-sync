@@ -152,14 +152,13 @@ export const emitOrgPage = (page: SemanticPage): EmitResult => {
   const pageProperties = buildPageProperties(page)
   const metadataText = emitMetadataText(pageProperties)
   const pageNoteText = emitPageNoteText(page)
-  const syncHeaderText = page.syncHeader.text ? `* ${page.syncHeader.text}` : ''
   const highlightBlocks = emitHighlightBlocks(page)
   const highlightTexts = highlightBlocks.map((block) =>
     [block.text, ...(block.children?.map((child) => child.text) ?? [])].join(
       '\n',
     ),
   )
-  const bodyText = [syncHeaderText, ...highlightTexts]
+  const bodyText = highlightTexts
     .filter(
       (part): part is string => typeof part === 'string' && part.length > 0,
     )
@@ -179,7 +178,7 @@ export const emitOrgPage = (page: SemanticPage): EmitResult => {
     pageProperties,
     metadataText,
     pageNoteText,
-    syncHeaderText,
+    syncHeaderText: null,
     highlightBlocks,
     bodyText,
     pageContentText,

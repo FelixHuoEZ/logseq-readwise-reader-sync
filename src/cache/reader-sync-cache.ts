@@ -5,12 +5,13 @@ import {
 } from '../logging'
 
 const DATABASE_NAME_PREFIX = 'readwise-reader-sync-cache'
-const DATABASE_VERSION = 1
+const DATABASE_VERSION = 2
 const CACHE_LOG_PREFIX = '[Readwise Cache]'
 
 const PARENT_DOCUMENT_STORE = 'parent_documents'
 const HIGHLIGHT_STORE = 'highlights'
 const STATE_STORE = 'cache_state'
+const RETRY_PAGE_STORE = 'page_retry_queue'
 const STATE_KEY = 'state'
 
 export interface ReaderSyncHighlightCacheStateV1 {
@@ -32,6 +33,15 @@ export interface ReaderSyncCacheSummaryV1 {
   state: ReaderSyncHighlightCacheStateV1 | null
 }
 
+export interface ReaderSyncRetryPageEntryV1 {
+  readerDocumentId: string
+  pageName: string | null
+  category: string
+  message: string
+  queuedAt: string
+  lastSeenAt: string
+}
+
 export interface GraphReaderSyncCacheV1 {
   getCachedParentDocuments(
     parentIds: string[],
@@ -50,6 +60,9 @@ export interface GraphReaderSyncCacheV1 {
   ): Promise<void>
   getHighlightCacheState(): Promise<ReaderSyncHighlightCacheStateV1 | null>
   inspectCacheSummary(): Promise<ReaderSyncCacheSummaryV1>
+  getQueuedRetryPages(): Promise<ReaderSyncRetryPageEntryV1[]>
+  queueRetryPages(entries: ReaderSyncRetryPageEntryV1[]): Promise<void>
+  removeQueuedRetryPages(readerDocumentIds: string[]): Promise<void>
 }
 
 interface ParentDocumentRecord {
@@ -67,6 +80,11 @@ interface HighlightRecord {
 interface CacheStateRecord {
   key: string
   state: ReaderSyncHighlightCacheStateV1
+}
+
+interface RetryPageRecord {
+  readerDocumentId: string
+  entry: ReaderSyncRetryPageEntryV1
 }
 
 const cacheInstances = new Map<string, ReaderSyncCacheImplV1>()
@@ -135,6 +153,10 @@ function openDatabase(graphId: string): Promise<IDBDatabase> {
 
       if (!db.objectStoreNames.contains(STATE_STORE)) {
         db.createObjectStore(STATE_STORE, { keyPath: 'key' })
+      }
+
+      if (!db.objectStoreNames.contains(RETRY_PAGE_STORE)) {
+        db.createObjectStore(RETRY_PAGE_STORE, { keyPath: 'readerDocumentId' })
       }
     }
 
@@ -227,6 +249,56 @@ async function writeStateToDb(
     state,
   }
   store.put(record)
+  await txToPromise(tx)
+}
+
+async function loadRetryQueueFromDb(
+  db: IDBDatabase,
+): Promise<ReaderSyncRetryPageEntryV1[]> {
+  const tx = db.transaction([RETRY_PAGE_STORE], 'readonly')
+  const store = tx.objectStore(RETRY_PAGE_STORE)
+  const records = await requestToPromise<RetryPageRecord[]>(store.getAll())
+  await txToPromise(tx)
+
+  return records
+    .map((record) => record.entry)
+    .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))
+}
+
+async function queueRetryPagesInDb(
+  db: IDBDatabase,
+  entries: readonly ReaderSyncRetryPageEntryV1[],
+): Promise<void> {
+  if (entries.length === 0) return
+
+  const tx = db.transaction([RETRY_PAGE_STORE], 'readwrite')
+  const store = tx.objectStore(RETRY_PAGE_STORE)
+
+  for (const entry of entries) {
+    const record: RetryPageRecord = {
+      readerDocumentId: entry.readerDocumentId,
+      entry,
+    }
+    store.put(record)
+  }
+
+  await txToPromise(tx)
+}
+
+async function removeRetryPagesFromDb(
+  db: IDBDatabase,
+  readerDocumentIds: readonly string[],
+): Promise<void> {
+  const ids = uniqueStrings(readerDocumentIds)
+  if (ids.length === 0) return
+
+  const tx = db.transaction([RETRY_PAGE_STORE], 'readwrite')
+  const store = tx.objectStore(RETRY_PAGE_STORE)
+
+  for (const readerDocumentId of ids) {
+    store.delete(readerDocumentId)
+  }
+
   await txToPromise(tx)
 }
 
@@ -494,6 +566,42 @@ class ReaderSyncCacheImplV1 implements GraphReaderSyncCacheV1 {
           ? stateRecord.state
           : null,
     }
+  }
+
+  async getQueuedRetryPages(): Promise<ReaderSyncRetryPageEntryV1[]> {
+    const db = await this.getDatabase()
+    return await loadRetryQueueFromDb(db)
+  }
+
+  async queueRetryPages(
+    entries: ReaderSyncRetryPageEntryV1[],
+  ): Promise<void> {
+    if (entries.length === 0) return
+
+    const db = await this.getDatabase()
+    await queueRetryPagesInDb(db, entries)
+    logReadwiseInfo(CACHE_LOG_PREFIX, 'queued page retry entries in IndexedDB', {
+      graphId: this.graphId,
+      databaseName: db.name,
+      store: RETRY_PAGE_STORE,
+      entryCount: entries.length,
+      readerDocumentIds: entries.map((entry) => entry.readerDocumentId),
+    })
+  }
+
+  async removeQueuedRetryPages(readerDocumentIds: string[]): Promise<void> {
+    const ids = uniqueStrings(readerDocumentIds)
+    if (ids.length === 0) return
+
+    const db = await this.getDatabase()
+    await removeRetryPagesFromDb(db, ids)
+    logReadwiseInfo(CACHE_LOG_PREFIX, 'removed page retry entries from IndexedDB', {
+      graphId: this.graphId,
+      databaseName: db.name,
+      store: RETRY_PAGE_STORE,
+      entryCount: ids.length,
+      readerDocumentIds: ids,
+    })
   }
 
   private async readState(): Promise<ReaderSyncHighlightCacheStateV1 | null> {

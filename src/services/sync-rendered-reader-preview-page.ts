@@ -11,6 +11,8 @@ import {
   type SemanticPage,
 } from '../renderer'
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
+import { rebuildManagedPageIfDamagedV1 } from './managed-page-integrity'
+import { withManagedSyncTimestampPagePropertiesV1 } from './managed-page-sync-timestamps'
 import { buildFormalManagedPageName } from './readwise-page-names'
 import {
   renameManagedReaderPageIfNeededV1,
@@ -181,12 +183,22 @@ export const syncRenderedReaderPreviewPage = async (
           renamed: false,
           previousPageName: null,
         }
-  const existingPage = resolvedExistingPage.page
-  const syncHeaderText =
-    options.syncHeaderText ??
-    (existingPage == null
-      ? `Highlights first synced by [[Readwise]] [[${syncDate}]]`
-      : `Highlights refreshed by [[Readwise]] [[${syncDate}]]`)
+  const pageBeforeRepair = resolvedExistingPage.page
+  const repairedPage =
+    pageBeforeRepair == null
+      ? {
+          page: null,
+          rebuilt: false,
+          signatures: [] as string[],
+          legacyFirstSyncedOn: null,
+        }
+      : await rebuildManagedPageIfDamagedV1({
+          page: pageBeforeRepair,
+          expectedPageName: pageName,
+          logPrefix,
+        })
+  const existingPage = repairedPage.page
+  const syncHeaderText = options.syncHeaderText ?? ''
   const semanticPage = buildReaderPreviewSemanticPage(
     previewBook,
     syncDate,
@@ -200,13 +212,21 @@ export const syncRenderedReaderPreviewPage = async (
   logRenderedContentDiagnostics(pageName, content, logPrefix)
 
   const page = existingPage ?? (await createManagedPageV1(pageName, logPrefix))
-  await syncManagedPagePropertiesV1(page, emitResult.pageProperties, logPrefix)
-  const result = await writeSingleRootPageContentV1(
+  const pageProperties = await withManagedSyncTimestampPagePropertiesV1({
+    page: pageBeforeRepair,
+    pageProperties: emitResult.pageProperties,
+    syncDate,
+    fallbackFirstSyncedAt: repairedPage.legacyFirstSyncedOn,
+  })
+  await syncManagedPagePropertiesV1(page, pageProperties, logPrefix)
+  const writeResult = await writeSingleRootPageContentV1(
     page,
     pageName,
     content,
     logPrefix,
   )
+  const result =
+    repairedPage.rebuilt && writeResult === 'created' ? 'updated' : writeResult
 
   const summary: SyncRenderedReaderPageResult = {
     readerDocumentId: previewBook.document.id,
@@ -218,9 +238,13 @@ export const syncRenderedReaderPreviewPage = async (
     renderHash,
     highlightCount: previewBook.highlights.length,
     highlightCoverage: previewBook.highlightCoverage,
-    isNewPage: existingPage == null,
+    isNewPage: pageBeforeRepair == null,
   }
 
-  logReadwiseInfo(logPrefix, 'synced rendered page', summary)
+  logReadwiseInfo(logPrefix, 'synced rendered page', {
+    ...summary,
+    repairedBeforeWrite: repairedPage.rebuilt,
+    repairSignatures: repairedPage.signatures,
+  })
   return summary
 }

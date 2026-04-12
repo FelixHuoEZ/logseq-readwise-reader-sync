@@ -7,6 +7,7 @@ import { format } from 'date-fns'
 import {
   createReadwiseClient,
   loadReaderPreviewBooks,
+  loadReaderPreviewBooksByParentIds,
   isReaderPreviewLoadResumeError,
   type ReaderPreviewLoadMode,
   type ReaderPreviewLoadResumeState,
@@ -26,6 +27,7 @@ import {
 import {
   createGraphReaderSyncCacheV1,
   type ReaderSyncCacheSummaryV1,
+  type ReaderSyncRetryPageEntryV1,
 } from '../cache'
 import {
   auditManagedReaderPagesV1,
@@ -66,6 +68,7 @@ import {
   buildRunIssuesBundle,
   diagnoseRunIssue,
   formatRunIssueCategoryLabel,
+  shouldRunIssueBlockReaderSyncCursor,
   type RunIssue,
   type RunIssueBundleContext,
   summarizeRunIssueCategories,
@@ -875,19 +878,19 @@ export const ReadwiseContainer = () => {
 
   const shouldAdvanceReaderSyncCursor = ({
     mode,
-    syncErrorsForRun,
+    blockingSyncErrorsForRun,
     debugHighlightPageLimit,
     targetDocuments,
     loadStats,
   }: {
     mode: ReaderSyncMode
-    syncErrorsForRun: Array<{ book: string; message: string }>
+    blockingSyncErrorsForRun: Array<{ book: string; message: string }>
     debugHighlightPageLimit: number | null
     targetDocuments: number | null
     loadStats: ReaderPreviewLoadStats
   }) => {
     if (mode === 'cached-full-rebuild') return false
-    if (syncErrorsForRun.length > 0) return false
+    if (blockingSyncErrorsForRun.length > 0) return false
     if (debugHighlightPageLimit != null) return false
     if (mode === 'incremental-window') return true
     if (targetDocuments == null) return true
@@ -2703,6 +2706,14 @@ export const ReadwiseContainer = () => {
 
     const client = createReadwiseClient(token)
     const syncErrorsForRun: RunIssue[] = []
+    const blockingSyncErrorsForRun: RunIssue[] = []
+    const queuedRetryEntriesByDocumentId = new Map<
+      string,
+      ReaderSyncRetryPageEntryV1
+    >()
+    const resolvedRetryReaderDocumentIds = new Set<string>()
+    const queuedRetryEntriesToUpsert = new Map<string, ReaderSyncRetryPageEntryV1>()
+    let retryQueueUpdateFailed = false
     const runStartedAt = runStartedAtMs ?? Date.now()
     let loadStats: ReaderPreviewLoadStats = {
       highlightPagesScanned: 0,
@@ -2726,6 +2737,20 @@ export const ReadwiseContainer = () => {
     let updatedCount = 0
     let unchangedCount = 0
     let renamedCount = 0
+
+    if (syncHeaderMode === 'formal') {
+      try {
+        const queuedRetryEntries = await previewCache.getQueuedRetryPages()
+
+        for (const entry of queuedRetryEntries) {
+          queuedRetryEntriesByDocumentId.set(entry.readerDocumentId, entry)
+        }
+      } catch (error) {
+        logReadwiseWarn(logPrefix, 'failed to load queued Reader retry pages', {
+          formattedError: describeUnknownError(error),
+        })
+      }
+    }
 
     try {
       beginReaderSyncEtaPhase(
@@ -2806,7 +2831,7 @@ export const ReadwiseContainer = () => {
           )
         },
       })
-      const previewBooks = previewLoadResult.books
+      let previewBooks = previewLoadResult.books
       loadStats = {
         ...previewLoadResult.stats,
         pagesProcessed: 0,
@@ -2851,6 +2876,60 @@ export const ReadwiseContainer = () => {
         )
       }
 
+      const queuedRetryParentIdsToReload =
+        syncHeaderMode === 'formal'
+          ? [...queuedRetryEntriesByDocumentId.keys()].filter(
+              (readerDocumentId) =>
+                !previewBooks.some((previewBook) => previewBook.document.id === readerDocumentId),
+            )
+          : []
+
+      if (queuedRetryParentIdsToReload.length > 0) {
+        try {
+          setStatusMessage(
+            `${statusPrefix}: reloading ${queuedRetryParentIdsToReload.length} queued retry page(s) from the local Reader cache...`,
+          )
+
+          const queuedRetryLoadResult = await loadReaderPreviewBooksByParentIds(client, {
+            parentIds: queuedRetryParentIdsToReload,
+            previewCache,
+            parentMetadataMode: 'cache_first',
+            logPrefix,
+            highlightCoverage: 'cached-full-rebuild',
+          })
+
+          if (queuedRetryLoadResult.books.length > 0) {
+            previewBooks = [...previewBooks, ...queuedRetryLoadResult.books]
+            loadStats.pagesTargeted += queuedRetryLoadResult.books.length
+            loadStats.parentMetadataCacheHits +=
+              queuedRetryLoadResult.parentMetadataCacheHits
+            loadStats.parentMetadataRemoteFetches +=
+              queuedRetryLoadResult.parentMetadataRemoteFetches
+            loadStats.fetchDocumentsDurationMs +=
+              queuedRetryLoadResult.fetchDocumentsDurationMs
+          }
+
+          logReadwiseInfo(logPrefix, 'merged queued retry pages into sync target set', {
+            queuedRetryEntries: queuedRetryEntriesByDocumentId.size,
+            queuedRetryPagesRequested: queuedRetryParentIdsToReload.length,
+            queuedRetryPagesLoaded: queuedRetryLoadResult.books.length,
+            unresolvedQueuedRetryPages:
+              queuedRetryLoadResult.unresolvedParentIds.length,
+            unresolvedQueuedRetryPageIds:
+              queuedRetryLoadResult.unresolvedParentIds,
+          })
+        } catch (error) {
+          logReadwiseWarn(
+            logPrefix,
+            'failed to reload queued retry pages; continuing without them',
+            {
+              queuedRetryEntries: queuedRetryParentIdsToReload.length,
+              formattedError: describeUnknownError(error),
+            },
+          )
+        }
+      }
+
       if (cancelledRef.current) return
 
       if (previewBooks.length === 0) {
@@ -2882,7 +2961,7 @@ export const ReadwiseContainer = () => {
           if (
             shouldAdvanceReaderSyncCursor({
               mode,
-              syncErrorsForRun,
+              blockingSyncErrorsForRun,
               debugHighlightPageLimit,
               targetDocuments,
               loadStats,
@@ -2992,6 +3071,9 @@ export const ReadwiseContainer = () => {
           if (pageSyncResult.result === 'updated') updatedCount += 1
           if (pageSyncResult.result === 'unchanged') unchangedCount += 1
           if (pageSyncResult.pageRenamed) renamedCount += 1
+          if (queuedRetryEntriesByDocumentId.has(previewBook.document.id)) {
+            resolvedRetryReaderDocumentIds.add(previewBook.document.id)
+          }
         } catch (err: unknown) {
           const message = describeUnknownError(err)
           logReadwiseError(logPrefix, 'failed to sync rendered Reader page', {
@@ -3001,8 +3083,32 @@ export const ReadwiseContainer = () => {
             formattedError: message,
             error: err,
           })
-          const issue = { book: pageTitle, message }
+          const issue = diagnoseRunIssue({
+            book: pageTitle,
+            message,
+            readerDocumentId: previewBook.document.id,
+            namespacePrefix,
+            pageName: queuedRetryEntriesByDocumentId.get(previewBook.document.id)?.pageName ?? null,
+          })
           syncErrorsForRun.push(issue)
+          if (shouldRunIssueBlockReaderSyncCursor(issue)) {
+            blockingSyncErrorsForRun.push(issue)
+          } else if (syncHeaderMode === 'formal') {
+            const existingRetryEntry = queuedRetryEntriesByDocumentId.get(
+              previewBook.document.id,
+            )
+            const now = new Date().toISOString()
+            queuedRetryEntriesToUpsert.set(previewBook.document.id, {
+              readerDocumentId: previewBook.document.id,
+              pageName:
+                existingRetryEntry?.pageName ??
+                pageTitle,
+              category: issue.category,
+              message: issue.message,
+              queuedAt: existingRetryEntry?.queuedAt ?? now,
+              lastSeenAt: now,
+            })
+          }
           appendRunIssue(issue)
         }
         loadStats.pagesProcessed += 1
@@ -3024,6 +3130,45 @@ export const ReadwiseContainer = () => {
             ? Math.round(writePagesDurationMs / previewBooks.length)
             : null,
       })
+
+      if (syncHeaderMode === 'formal') {
+        if (resolvedRetryReaderDocumentIds.size > 0) {
+          try {
+            await previewCache.removeQueuedRetryPages([
+              ...resolvedRetryReaderDocumentIds,
+            ])
+          } catch (error) {
+            logReadwiseWarn(
+              logPrefix,
+              'failed to clear resolved Reader retry pages',
+              {
+                resolvedRetryReaderDocumentIds: [...resolvedRetryReaderDocumentIds],
+                formattedError: describeUnknownError(error),
+              },
+            )
+          }
+        }
+
+        if (queuedRetryEntriesToUpsert.size > 0) {
+          try {
+            await previewCache.queueRetryPages([
+              ...queuedRetryEntriesToUpsert.values(),
+            ])
+          } catch (error) {
+            retryQueueUpdateFailed = true
+            logReadwiseWarn(
+              logPrefix,
+              'failed to persist queued Reader retry pages',
+              {
+                queuedRetryReaderDocumentIds: [
+                  ...queuedRetryEntriesToUpsert.keys(),
+                ],
+                formattedError: describeUnknownError(error),
+              },
+            )
+          }
+        }
+      }
 
       if (syncHeaderMode === 'formal') {
         const summary: GraphLastFormalSyncSummaryV1 = {
@@ -3054,9 +3199,10 @@ export const ReadwiseContainer = () => {
         logReadwiseInfo(logPrefix, 'saved graph formal sync summary', summary)
 
         if (
+          !retryQueueUpdateFailed &&
           shouldAdvanceReaderSyncCursor({
             mode,
-            syncErrorsForRun,
+            blockingSyncErrorsForRun,
             debugHighlightPageLimit,
             targetDocuments,
             loadStats,
@@ -3080,13 +3226,19 @@ export const ReadwiseContainer = () => {
           logReadwiseInfo(logPrefix, 'skipped graph reader sync state update', {
             mode,
             reason:
-              syncErrorsForRun.length > 0
-                ? 'page_errors_present'
+              retryQueueUpdateFailed
+                ? 'retry_queue_update_failed'
+                : blockingSyncErrorsForRun.length > 0
+                ? 'blocking_page_errors_present'
                 : mode === 'cached-full-rebuild'
                   ? 'cached_rebuild_does_not_advance_cursor'
                   : debugHighlightPageLimit != null
                     ? 'debug_highlight_page_cap_active'
                     : 'full_reconcile_document_limit_active',
+            retryQueueUpdateFailed,
+            blockingPageErrorCount: blockingSyncErrorsForRun.length,
+            nonBlockingPageErrorCount:
+              syncErrorsForRun.length - blockingSyncErrorsForRun.length,
             targetDocuments,
             parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
           })

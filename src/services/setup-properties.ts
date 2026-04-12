@@ -20,6 +20,8 @@ const readwisePageProps: ReadwisePageProp[] = [
   { key: 'rw-asin', schema: { type: 'default' } },
   { key: 'rw-document-note', schema: { type: 'default' } },
   { key: 'rw-summary', schema: { type: 'default' } },
+  { key: 'rw-first-synced-at', schema: { type: 'default' } },
+  { key: 'rw-last-synced-at', schema: { type: 'default' } },
 ]
 
 const ensureReadwiseTagPage = async () => {

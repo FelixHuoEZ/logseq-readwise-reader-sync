@@ -363,12 +363,31 @@
   background: linear-gradient(90deg, #dc2626, #ef4444);
 }
 
-.rw-progress-label {
+.rw-progress-stats {
+  display: grid;
+  grid-template-columns: 11ch 5ch 11ch 13ch;
+  align-items: center;
+  justify-items: end;
+  justify-content: center;
+  column-gap: 6px;
   margin-top: 8px;
   font-size: 12px;
   font-weight: 600;
   color: var(--rw-text-faint);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+.rw-progress-stat {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-align: right;
+}
+
+.rw-progress-stat-phase {
+  color: var(--rw-text-soft);
 }
 
 .rw-feedback-block {

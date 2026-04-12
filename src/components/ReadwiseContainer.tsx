@@ -168,6 +168,8 @@ export const ReadwiseContainer = () => {
   const [showMaintenanceTools, setShowMaintenanceTools] = useState(false)
   const [activeFormalTestSessionCount, setActiveFormalTestSessionCount] =
     useState<number | null>(null)
+  const [readerSyncState, setReaderSyncState] =
+    useState<GraphReaderSyncStateV1 | null>(null)
   const [hoveredHelpPopover, setHoveredHelpPopover] =
     useState<ReaderSyncHelpPopoverState | null>(null)
   const [pinnedHelpPopover, setPinnedHelpPopover] =
@@ -216,6 +218,10 @@ export const ReadwiseContainer = () => {
     }
   }, [])
 
+  const refreshReaderSyncState = async () => {
+    setReaderSyncState(await loadGraphReaderSyncStateV1())
+  }
+
   const refreshActiveFormalTestSessionCount = async () => {
     const activeFormalTestSession = await loadActiveFormalTestSessionManifestV1()
     setActiveFormalTestSessionCount(activeFormalTestSession?.books.length ?? null)
@@ -223,6 +229,7 @@ export const ReadwiseContainer = () => {
 
   useEffect(() => {
     void refreshActiveFormalTestSessionCount()
+    void refreshReaderSyncState()
   }, [])
 
   useEffect(() => {
@@ -3030,8 +3037,10 @@ export const ReadwiseContainer = () => {
                   ? 'incremental_sync'
                   : 'full_reconcile',
             }
-            await saveGraphReaderSyncStateV1(nextReaderSyncState)
-            logReadwiseInfo(logPrefix, 'saved graph reader sync state', nextReaderSyncState)
+            const savedReaderSyncState =
+              await saveGraphReaderSyncStateV1(nextReaderSyncState)
+            setReaderSyncState(savedReaderSyncState)
+            logReadwiseInfo(logPrefix, 'saved graph reader sync state', savedReaderSyncState)
           } else {
             logReadwiseInfo(logPrefix, 'skipped graph reader sync state update', {
               mode,
@@ -3335,8 +3344,10 @@ export const ReadwiseContainer = () => {
                 ? 'incremental_sync'
                 : 'full_reconcile',
           }
-          await saveGraphReaderSyncStateV1(nextReaderSyncState)
-          logReadwiseInfo(logPrefix, 'saved graph reader sync state', nextReaderSyncState)
+          const savedReaderSyncState =
+            await saveGraphReaderSyncStateV1(nextReaderSyncState)
+          setReaderSyncState(savedReaderSyncState)
+          logReadwiseInfo(logPrefix, 'saved graph reader sync state', savedReaderSyncState)
         } else {
           logReadwiseInfo(logPrefix, 'skipped graph reader sync state update', {
             mode,
@@ -3670,6 +3681,13 @@ export const ReadwiseContainer = () => {
     resolveConfiguredReaderFullScanTargetDocuments()
   const configuredReaderDebugHighlightPageLimit =
     resolveConfiguredReaderDebugHighlightPageLimit() ?? 0
+  const showManagedPagesSummary =
+    configuredReaderTargetDocuments !== defaultReaderFullScanTargetDocuments
+  const showHighlightScanSummary =
+    configuredReaderDebugHighlightPageLimit !==
+    defaultReaderFullScanDebugHighlightPageLimit
+  const summaryCardCount =
+    Number(showManagedPagesSummary) + Number(showHighlightScanSummary)
   const sessionTestSyncCount =
     activeFormalTestSessionCount ?? configuredSyncMaxBooks
   const sessionTestSyncLabel = `Incremental Sync (session test: ${sessionTestSyncCount})`
@@ -3681,9 +3699,17 @@ export const ReadwiseContainer = () => {
       : status === 'idle'
         ? 'ready'
         : status
+  const idleCursorSummary =
+    readerSyncState?.updatedAfter != null
+      ? `Updated after ${formatTimestampForUi(readerSyncState.updatedAfter)}`
+      : 'No incremental cursor saved yet.'
+  const idleCursorSavedAt =
+    readerSyncState?.committedAt != null
+      ? `Saved ${formatTimestampForUi(readerSyncState.committedAt)}`
+      : ''
   const statusHeadline =
     status === 'idle'
-      ? 'Ready for Reader sync'
+      ? 'Last sync cursor'
       : status === 'fetching'
         ? 'Scanning Reader highlights'
         : status === 'syncing'
@@ -3701,7 +3727,11 @@ export const ReadwiseContainer = () => {
         ? 'page writes'
         : status === 'completed'
           ? 'latest run'
-          : 'reader sync')
+          : '')
+  const statusDetail =
+    status === 'idle'
+      ? statusMessage || idleCursorSummary
+      : statusMessage || 'Ready to sync your Readwise highlights.'
   const currentOperationLabel =
     status === 'syncing'
       ? currentBook
@@ -3730,7 +3760,7 @@ export const ReadwiseContainer = () => {
           'Incremental Sync scans changed Reader highlights only.',
           'Full Refresh scans the full Reader highlight library.',
         ]
-  const globalSyncHelpNotes = [
+  const librarySyncHelpNotes = [
     'Incremental Sync pulls changed Reader highlights, refreshes parent metadata for matched documents, and rewrites managed pages in ReadwiseHighlights/<title>.',
     'Full Refresh rescans the full Reader highlight library, refreshes parent metadata, and replaces the local full-library snapshot used for future rebuilds and deletion calibration.',
     'Full Refresh uses the Debug settings. A truncated highlight scan does not refresh the local cached snapshot.',
@@ -3938,16 +3968,10 @@ export const ReadwiseContainer = () => {
       <div className="rw-card">
         <div className="rw-header">
           <div className="rw-header-copy">
-            <div className="rw-kicker">Reader sync modes</div>
-            <h2>Readwise Reader Sync</h2>
+            <div className="rw-header-title">Readwise Reader Sync</div>
           </div>
           <div className="rw-header-meta">
             <span className={`rw-badge ${statusLabel}`}>{statusLabel}</span>
-            <span className="rw-scope-chip">
-              {configuredReaderDebugHighlightPageLimit > 0
-                ? 'debug scope'
-                : 'global sync'}
-            </span>
           </div>
         </div>
 
@@ -3959,49 +3983,60 @@ export const ReadwiseContainer = () => {
             </div>
           )}
 
-          <div className="rw-summary-grid">
-            <div className="rw-summary-card">
-              <div className="rw-summary-heading">
-                <div className="rw-summary-label">Managed pages</div>
-                {renderHelpPanel(
-                  'managed-pages',
-                  'Managed Pages',
-                  managedPagesHelpNotes,
-                )}
-              </div>
-              <div className="rw-summary-value">
-                {configuredReaderTargetDocuments == null
-                  ? 'All matched'
-                  : configuredReaderTargetDocuments}
-              </div>
-              <div className="rw-summary-note">{shortManagedPagesSummary}</div>
+          {summaryCardCount > 0 && (
+            <div
+              className={`rw-summary-grid ${
+                summaryCardCount === 1 ? 'rw-summary-grid-single' : ''
+              }`}
+            >
+              {showManagedPagesSummary && (
+                <div className="rw-summary-card">
+                  <div className="rw-summary-heading">
+                    <div className="rw-summary-label">Managed pages</div>
+                    {renderHelpPanel(
+                      'managed-pages',
+                      'Managed Pages',
+                      managedPagesHelpNotes,
+                    )}
+                  </div>
+                  <div className="rw-summary-value">
+                    {configuredReaderTargetDocuments == null
+                      ? 'All matched'
+                      : configuredReaderTargetDocuments}
+                  </div>
+                  <div className="rw-summary-note">{shortManagedPagesSummary}</div>
+                </div>
+              )}
+              {showHighlightScanSummary && (
+                <div className="rw-summary-card">
+                  <div className="rw-summary-heading">
+                    <div className="rw-summary-label">Highlight scan</div>
+                    {renderHelpPanel(
+                      'highlight-scan',
+                      'Highlight Scan',
+                      highlightScanHelpNotes,
+                    )}
+                  </div>
+                  <div className="rw-summary-value">
+                    {configuredReaderDebugHighlightPageLimit} page(s)
+                  </div>
+                  <div className="rw-summary-note">{highlightScanDetailLabel}</div>
+                </div>
+              )}
             </div>
-            <div className="rw-summary-card">
-              <div className="rw-summary-heading">
-                <div className="rw-summary-label">Highlight scan</div>
-                {renderHelpPanel(
-                  'highlight-scan',
-                  'Highlight Scan',
-                  highlightScanHelpNotes,
-                )}
-              </div>
-              <div className="rw-summary-value">
-                {configuredReaderDebugHighlightPageLimit > 0
-                  ? `${configuredReaderDebugHighlightPageLimit} page(s)`
-                  : 'Full library'}
-              </div>
-              <div className="rw-summary-note">{highlightScanDetailLabel}</div>
-            </div>
-          </div>
+          )}
 
           <div className={statusPanelClassName}>
             <div className="rw-status-panel-header">
               <div className="rw-status-panel-copy">
-                <div className="rw-status-phase">{statusPhaseLabel}</div>
+                {statusPhaseLabel && (
+                  <div className="rw-status-phase">{statusPhaseLabel}</div>
+                )}
                 <div className="rw-status-headline">{statusHeadline}</div>
-                <div className="rw-status">
-                  {statusMessage || 'Ready to sync your Readwise highlights.'}
-                </div>
+                <div className="rw-status">{statusDetail}</div>
+                {status === 'idle' && idleCursorSavedAt && (
+                  <div className="rw-status-meta">{idleCursorSavedAt}</div>
+                )}
               </div>
               {isBusy && (
                 <div className="rw-activity-indicator" aria-hidden="true">
@@ -4261,9 +4296,13 @@ export const ReadwiseContainer = () => {
               <div className="rw-action-group">
                 <div className="rw-action-group-heading">
                   <div className="rw-action-group-label">
-                    Global Sync
+                    Library Sync
                   </div>
-                  {renderHelpPanel('global-sync', 'Global Sync', globalSyncHelpNotes)}
+                  {renderHelpPanel(
+                    'global-sync',
+                    'Library Sync',
+                    librarySyncHelpNotes,
+                  )}
                 </div>
                 <div className="rw-action-row">
                   <button className="rw-btn rw-btn-primary" onClick={handleSync}>

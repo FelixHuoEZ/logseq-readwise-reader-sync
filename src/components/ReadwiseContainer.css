@@ -82,36 +82,27 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  padding: 22px 22px 18px;
+  gap: 12px;
+  padding: 18px 22px 12px;
 }
 
 .rw-header-copy {
   min-width: 0;
 }
 
-.rw-kicker {
-  margin-bottom: 8px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--rw-primary);
-}
-
-.rw-header h2 {
+.rw-header-title {
   margin: 0;
-  font-size: 24px;
-  line-height: 1.08;
-  font-weight: 700;
-  color: #0f3f3a;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--rw-text-soft);
 }
 
 .rw-header-meta {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
   flex-shrink: 0;
 }
 
@@ -171,7 +162,7 @@
 }
 
 .rw-body {
-  padding: 0 22px 22px;
+  padding: 0 22px 16px;
 }
 
 .rw-setup-notice,
@@ -198,8 +189,12 @@
 .rw-summary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.rw-summary-grid-single {
+  grid-template-columns: 1fr;
 }
 
 .rw-summary-card {
@@ -241,8 +236,8 @@
 }
 
 .rw-status-panel {
-  margin-bottom: 16px;
-  padding: 16px;
+  margin-bottom: 10px;
+  padding: 14px;
 }
 
 .rw-status-panel-fetching,
@@ -304,6 +299,13 @@
   font-size: 13px;
   line-height: 1.55;
   color: var(--rw-text-soft);
+}
+
+.rw-status-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--rw-text-faint);
 }
 
 .rw-current-book {
@@ -543,18 +545,18 @@
 }
 
 .rw-actions {
-  padding: 0 22px 22px;
+  padding: 0 22px 18px;
 }
 
 .rw-action-groups {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
   width: 100%;
 }
 
 .rw-action-group {
-  padding: 16px;
+  padding: 14px;
   border-radius: 18px;
   border: 1px solid var(--rw-border);
   background: rgba(255, 255, 255, 0.88);
@@ -570,7 +572,7 @@
 }
 
 .rw-action-group-heading {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .rw-action-group-heading-actions {
@@ -655,7 +657,7 @@
 .rw-action-note + .rw-action-note,
 .rw-action-row + .rw-action-row,
 .rw-action-note + .rw-action-row {
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .rw-action-note {

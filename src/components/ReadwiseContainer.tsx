@@ -100,6 +100,18 @@ interface ManagedPageRepairCandidate {
   signatures: string[]
 }
 
+interface ManagedPageRepairIdentityRetryCandidate {
+  pageName: string
+  rootContent: string
+  signatures: string[]
+}
+
+interface ReaderDocumentInferenceResult {
+  readerDocumentId: string | null
+  shouldRetryAfterScan: boolean
+  failedHighlightIds: string[]
+}
+
 type ReaderSyncHelpPanelId =
   | 'managed-pages'
   | 'highlight-scan'
@@ -577,7 +589,7 @@ export const ReadwiseContainer = () => {
     previewCache?: ReturnType<typeof createGraphReaderSyncCacheV1>
     client?: ReturnType<typeof createReadwiseClient>
     logPrefix?: string
-  }): Promise<string | null> => {
+  }): Promise<ReaderDocumentInferenceResult> => {
     throwIfCancelled()
     const highlightIds = extractReaderHighlightIdsFromRootContent(rootContent)
     if (highlightIds.length === 0) {
@@ -586,7 +598,11 @@ export const ReadwiseContainer = () => {
         'repair infer skipped: no highlight links found',
         { pageName },
       )
-      return null
+      return {
+        readerDocumentId: null,
+        shouldRetryAfterScan: false,
+        failedHighlightIds: [],
+      }
     }
 
     logReadwiseDebug(
@@ -628,7 +644,11 @@ export const ReadwiseContainer = () => {
               cachedHighlightCount: cachedHighlightsList.length,
             },
           )
-          return cachedParentId
+          return {
+            readerDocumentId: cachedParentId,
+            shouldRetryAfterScan: false,
+            failedHighlightIds: [],
+          }
         }
 
         logReadwiseDebug(
@@ -660,21 +680,43 @@ export const ReadwiseContainer = () => {
         'repair infer failed: no Readwise client available for remote lookup',
         { pageName },
       )
-      return null
+      return {
+        readerDocumentId: null,
+        shouldRetryAfterScan: false,
+        failedHighlightIds: [],
+      }
     }
 
     const fetchedHighlights: ReaderDocument[] = []
+    const failedHighlightIds: string[] = []
+    let sawRetriableNetworkFailure = false
 
     for (const highlightId of highlightIds.slice(0, 5)) {
       throwIfCancelled()
-      const highlight = await loadReaderDocumentByIdWithRetry(
-        client,
-        highlightId,
-        logPrefix ?? formalSyncLogPrefix,
-      )
+      try {
+        const highlight = await loadReaderDocumentByIdWithRetry(
+          client,
+          highlightId,
+          logPrefix ?? formalSyncLogPrefix,
+        )
 
-      if (highlight) {
-        fetchedHighlights.push(highlight)
+        if (highlight) {
+          fetchedHighlights.push(highlight)
+        }
+      } catch (error) {
+        failedHighlightIds.push(highlightId)
+        if (isRetriableReaderListError(error)) {
+          sawRetriableNetworkFailure = true
+        }
+        logReadwiseWarn(
+          logPrefix ?? formalSyncLogPrefix,
+          'repair infer: highlight lookup failed; trying remaining highlight links',
+          {
+            pageName,
+            highlightId,
+            formattedError: describeUnknownError(error),
+          },
+        )
       }
     }
 
@@ -686,9 +728,14 @@ export const ReadwiseContainer = () => {
         {
           pageName,
           attemptedHighlightIds: highlightIds.slice(0, 5),
+          failedHighlightIds,
         },
       )
-      return null
+      return {
+        readerDocumentId: null,
+        shouldRetryAfterScan: sawRetriableNetworkFailure,
+        failedHighlightIds,
+      }
     }
 
     try {
@@ -711,9 +758,14 @@ export const ReadwiseContainer = () => {
               .map((highlight) => highlight.parent_id ?? '')
               .filter((value) => value.length > 0),
           ),
+          failedHighlightIds,
         },
       )
-      return null
+      return {
+        readerDocumentId: null,
+        shouldRetryAfterScan: sawRetriableNetworkFailure,
+        failedHighlightIds,
+      }
     }
 
     logReadwiseDebug(
@@ -723,10 +775,15 @@ export const ReadwiseContainer = () => {
         pageName,
         fetchedParentId,
         fetchedHighlightCount: fetchedHighlights.length,
+        failedHighlightIds,
       },
     )
 
-    return fetchedParentId
+    return {
+      readerDocumentId: fetchedParentId,
+      shouldRetryAfterScan: false,
+      failedHighlightIds,
+    }
   }
 
   const isManagedPageTitleOverlong = (pageTitle: string) => {
@@ -891,6 +948,7 @@ export const ReadwiseContainer = () => {
       ),
     ) as PageEntity[]
     const candidates: ManagedPageRepairCandidate[] = []
+    const deferredIdentityRetries: ManagedPageRepairIdentityRetryCandidate[] = []
     const issues: RunIssue[] = []
 
     for (let index = 0; index < managedPages.length; index += 1) {
@@ -916,17 +974,34 @@ export const ReadwiseContainer = () => {
       }
 
       throwIfCancelled()
-      const readerDocumentId =
-        (await loadReaderDocumentIdFromPage(page)) ??
-        (await inferReaderDocumentIdFromHighlights({
+      const pageReaderDocumentId = await loadReaderDocumentIdFromPage(page)
+      const inferredReaderDocument = pageReaderDocumentId
+        ? null
+        : await inferReaderDocumentIdFromHighlights({
           pageName,
           rootContent: inspection.searchableContent,
           previewCache: options?.previewCache,
           client: options?.client,
           logPrefix: formalSyncLogPrefix,
-        }))
+        })
+      const readerDocumentId =
+        pageReaderDocumentId ?? inferredReaderDocument?.readerDocumentId ?? null
 
       if (!readerDocumentId) {
+        if (inferredReaderDocument?.shouldRetryAfterScan) {
+          deferredIdentityRetries.push({
+            pageName,
+            rootContent: inspection.searchableContent,
+            signatures,
+          })
+          options?.onProgress?.({
+            total: managedPages.length,
+            completed: index + 1,
+            pageName,
+          })
+          continue
+        }
+
         const warningOnly =
           hasLegacyTweetOnlyLinks(inspection.searchableContent) ||
           !hasReaderHighlightLinks(inspection.searchableContent)
@@ -964,6 +1039,59 @@ export const ReadwiseContainer = () => {
         completed: index + 1,
         pageName,
       })
+    }
+
+    if (deferredIdentityRetries.length > 0) {
+      logReadwiseInfo(
+        formalSyncLogPrefix,
+        'retrying deferred managed page identity lookups after repair scan',
+        {
+          deferredPages: deferredIdentityRetries.length,
+        },
+      )
+
+      await sleep(5000)
+
+      for (const deferredPage of deferredIdentityRetries) {
+        throwIfCancelled()
+
+        const deferredInference = await inferReaderDocumentIdFromHighlights({
+          pageName: deferredPage.pageName,
+          rootContent: deferredPage.rootContent,
+          previewCache: options?.previewCache,
+          client: options?.client,
+          logPrefix: formalSyncLogPrefix,
+        })
+
+        if (deferredInference.readerDocumentId) {
+          candidates.push({
+            pageName: deferredPage.pageName,
+            readerDocumentId: deferredInference.readerDocumentId,
+            signatures: deferredPage.signatures,
+          })
+          continue
+        }
+
+        issues.push({
+          book: deferredPage.pageName || 'Managed page',
+          message: `Repair skipped because rw-reader-id is missing for ${deferredPage.pageName}.`,
+          summary:
+            'Automatic repair retried this page after a transient Reader lookup failure, but still could not map it back to a Reader document.',
+          suggestedAction:
+            'Retry repair later after the network stabilizes, or run Full Refresh after restoring the page identity.',
+          debugFacts: [
+            `detectedSignatures=${deferredPage.signatures.join(', ')}`,
+            `deferredIdentityRetry=yes`,
+            ...(deferredInference.failedHighlightIds.length > 0
+              ? [
+                  `failedHighlightIds=${deferredInference.failedHighlightIds.join(', ')}`,
+                ]
+              : []),
+          ],
+          namespacePrefix: formalNamespaceRoot,
+          pageName: deferredPage.pageName || null,
+        })
+      }
     }
 
     return {
@@ -1271,7 +1399,7 @@ export const ReadwiseContainer = () => {
 
     return (
       error instanceof TypeError ||
-      /Failed to fetch|NetworkError|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_NETWORK_CHANGED|ERR_INTERNET_DISCONNECTED|fetch/i.test(
+      /Failed to fetch|NetworkError|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_NETWORK_CHANGED|ERR_INTERNET_DISCONNECTED|ERR_TUNNEL_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_RESET|fetch/i.test(
         message,
       )
     )
@@ -1283,7 +1411,7 @@ export const ReadwiseContainer = () => {
     logPrefix: string,
   ) => {
     let lastError: unknown = null
-    const totalAttempts = 3
+    const totalAttempts = 4
 
     for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
       try {
@@ -1310,7 +1438,7 @@ export const ReadwiseContainer = () => {
           },
         )
 
-        await sleep(1000 * (attempt + 1))
+        await sleep(1000 * 2 ** attempt)
       }
     }
 

@@ -20,7 +20,11 @@ export interface GraphReaderSyncStateV1 {
 
 export interface GraphLastFormalSyncSummaryV1 {
   schemaVersion: 1
-  runKind: 'reader_full_scan' | 'reader_incremental' | 'reader_cached_rebuild'
+  runKind:
+    | 'reader_full_scan'
+    | 'reader_incremental'
+    | 'reader_cached_rebuild'
+    | 'reader_snapshot_refresh'
   status: 'success' | 'partial_error' | 'failed'
   completedAt: string
   highlightPagesScanned: number
@@ -552,7 +556,8 @@ export const loadGraphLastFormalSyncSummaryV1 =
       schemaVersion !== 1 ||
       (runKind !== 'reader_full_scan' &&
         runKind !== 'reader_incremental' &&
-        runKind !== 'reader_cached_rebuild') ||
+        runKind !== 'reader_cached_rebuild' &&
+        runKind !== 'reader_snapshot_refresh') ||
       (status !== 'success' && status !== 'partial_error' && status !== 'failed') ||
       completedAt == null
     ) {

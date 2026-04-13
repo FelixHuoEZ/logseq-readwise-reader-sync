@@ -2188,6 +2188,7 @@ export const ReadwiseContainer = () => {
   ): GraphLastFormalSyncSummaryV1['runKind'] => {
     if (mode === 'incremental-window') return 'reader_incremental'
     if (mode === 'cached-full-rebuild') return 'reader_cached_rebuild'
+    if (mode === 'snapshot-only-refresh') return 'reader_snapshot_refresh'
     return 'reader_full_scan'
   }
 
@@ -2208,6 +2209,7 @@ export const ReadwiseContainer = () => {
     targetDocuments: number | null
     loadStats: ReaderPreviewLoadStats
   }) => {
+    if (mode === 'snapshot-only-refresh') return false
     if (mode === 'cached-full-rebuild') return false
     if (blockingSyncErrorsForRun.length > 0) return false
     if (debugHighlightPageLimit != null) return false
@@ -3239,6 +3241,18 @@ export const ReadwiseContainer = () => {
       statusPrefix: 'Cached rebuild',
       syncHeaderMode: 'formal',
       mode: 'cached-full-rebuild',
+    })
+  }
+
+  const handleRefreshLocalSnapshotOnly = async () => {
+    setCacheSummaryResult(null)
+
+    await runReaderManagedSync({
+      namespacePrefix: formalNamespaceRoot,
+      logPrefix: formalSyncLogPrefix,
+      statusPrefix: 'Refresh local snapshot',
+      syncHeaderMode: 'formal',
+      mode: 'snapshot-only-refresh',
     })
   }
 
@@ -4748,6 +4762,8 @@ export const ReadwiseContainer = () => {
           )} and grouping changed parent documents (${debugCapSummary || 'no debug cap'})...`
         : mode === 'cached-full-rebuild'
           ? `${statusPrefix}: loading the local Reader highlight snapshot and rebuilding cached parent groups...`
+          : mode === 'snapshot-only-refresh'
+            ? `${statusPrefix}: full-scanning Reader highlights and rebuilding the local snapshot only (${debugCapSummary || 'no debug cap'}). Managed pages will not be rewritten.`
           : `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${targetDocumentsSummary}${debugCapSummary})...`,
     )
 
@@ -4874,6 +4890,8 @@ export const ReadwiseContainer = () => {
                 ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s) ${buildReaderSyncUpdatedAfterSummary(
                     readerSyncUpdatedAfter,
                   )}, identified ${uniqueParents} changed parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`
+                : mode === 'snapshot-only-refresh'
+                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s), and refreshed the local snapshot from ${progress.totalHighlights ?? 0} highlight(s). No page writes will run.`
                 : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`,
             )
             return
@@ -4942,7 +4960,7 @@ export const ReadwiseContainer = () => {
       }
 
       const queuedRetryParentIdsToReload =
-        syncHeaderMode === 'formal'
+        syncHeaderMode === 'formal' && mode !== 'snapshot-only-refresh'
           ? [...queuedRetryEntriesByDocumentId.keys()].filter(
               (readerDocumentId) =>
                 !previewBooks.some((previewBook) => previewBook.document.id === readerDocumentId),
@@ -4996,6 +5014,82 @@ export const ReadwiseContainer = () => {
       }
 
       if (cancelledRef.current) return
+
+      if (mode === 'snapshot-only-refresh') {
+        if (syncHeaderMode === 'formal') {
+          const summary: GraphLastFormalSyncSummaryV1 = {
+            schemaVersion: 1,
+            runKind: buildFormalRunKind(mode),
+            status: 'success',
+            completedAt: new Date().toISOString(),
+            highlightPagesScanned: loadStats.highlightPagesScanned,
+            highlightsScanned: loadStats.highlightsScanned,
+            parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+            pagesTargeted: 0,
+            pagesProcessed: 0,
+            createdCount: 0,
+            updatedCount: 0,
+            unchangedCount: 0,
+            renamedCount: 0,
+            errorCount: 0,
+            totalDurationMs: Date.now() - runStartedAt,
+            fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+            fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+            writePagesDurationMs: 0,
+            failureSummary: null,
+          }
+          await saveGraphLastFormalSyncSummaryV1(summary)
+          logReadwiseInfo(logPrefix, 'saved graph formal sync summary', summary)
+          logReadwiseInfo(logPrefix, 'skipped graph reader sync state update', {
+            mode,
+            reason: 'snapshot_refresh_does_not_advance_cursor',
+            targetDocuments: null,
+            parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+          })
+        }
+
+        const incompleteSnapshotSuffix = !loadStats.completeHighlightSnapshotRefreshed
+          ? ' Local highlight snapshot was left unchanged because this run did not exhaust the full Reader highlight library.'
+          : ''
+
+        setStatus('completed')
+        setCurrent(0)
+        setTotal(0)
+        setCurrentBook('')
+        setRunIssueContext((previous) =>
+          previous == null
+            ? previous
+            : {
+                ...previous,
+                completedAt: new Date().toISOString(),
+                processedItems: loadStats.highlightsScanned,
+                issuesCount: 0,
+                stats: {
+                  highlightPagesScanned: loadStats.highlightPagesScanned,
+                  highlightsScanned: loadStats.highlightsScanned,
+                  parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+                  pagesTargeted: 0,
+                  pagesProcessed: 0,
+                  fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+                  fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+                  writePagesDurationMs: 0,
+                },
+              },
+        )
+        setStatusMessage(
+          `${statusPrefix}: refreshed the local full-library snapshot from ${loadStats.highlightsScanned} highlight(s) across ${loadStats.highlightPagesScanned} remote page(s). Managed pages were not rewritten.${incompleteSnapshotSuffix}`,
+        )
+        logReadwiseInfo(logPrefix, 'snapshot refresh completed', {
+          mode,
+          graphId: graphContext.graphId,
+          highlightsScanned: loadStats.highlightsScanned,
+          highlightPagesScanned: loadStats.highlightPagesScanned,
+          parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+          completeHighlightSnapshotRefreshed:
+            loadStats.completeHighlightSnapshotRefreshed,
+        })
+        return
+      }
 
       if (previewBooks.length === 0) {
         if (syncHeaderMode === 'formal') {
@@ -5782,6 +5876,7 @@ export const ReadwiseContainer = () => {
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
+    'Refresh Local Snapshot Only rescans the full Reader highlight library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
     'Preview Current Page Legacy ID Migration scans Readwise managed pages for UUID mappings, then previews only the current page or whiteboard rewrites before apply.',
   ]
@@ -6606,8 +6701,14 @@ export const ReadwiseContainer = () => {
                         <div className="rw-maintenance-section-header">
                           <div className="rw-maintenance-section-title">Snapshots</div>
                           <div className="rw-maintenance-section-note">
-                            Capture raw page state and external commands for diff-based debugging.
+                            Refresh the local highlight snapshot or capture raw page state for
+                            diff-based debugging.
                           </div>
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handleRefreshLocalSnapshotOnly}>
+                            Refresh Local Snapshot Only
+                          </button>
                         </div>
                         <div className="rw-action-row">
                           <button className="rw-btn" onClick={handleCaptureCurrentPageSnapshot}>

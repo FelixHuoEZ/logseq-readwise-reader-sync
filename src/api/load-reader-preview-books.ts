@@ -11,6 +11,7 @@ export type ReaderPreviewLoadMode =
   | 'full-library-scan'
   | 'incremental-window'
   | 'cached-full-rebuild'
+  | 'snapshot-only-refresh'
 
 export type ReaderParentMetadataMode = 'cache_first' | 'always_refresh'
 
@@ -658,7 +659,7 @@ export const loadReaderPreviewBooks = async (
       const allHighlights = flattenHighlightsByParent(highlightsByParent)
 
       try {
-        if (mode === 'full-library-scan') {
+        if (mode === 'full-library-scan' || mode === 'snapshot-only-refresh') {
           if (remoteHighlightScanExhaustive) {
             await previewCache.replaceHighlightsFromFullScan(
               allHighlights,
@@ -697,6 +698,29 @@ export const loadReaderPreviewBooks = async (
   }
 
   const fetchHighlightsDurationMs = Date.now() - fetchHighlightsStartedAt
+  if (mode === 'snapshot-only-refresh') {
+    return {
+      books: [],
+      stats: {
+        highlightPagesScanned: pageNumber,
+        highlightsScanned: totalHighlights,
+        parentDocumentsIdentified: targetParentIds.length,
+        pagesTargeted: 0,
+        pagesProcessed: 0,
+        estimatedHighlightPages: initialTotalPages,
+        estimatedHighlightResults: initialTotalResults,
+        latestHighlightUpdatedAt,
+        usedCachedHighlightSnapshot,
+        staleHighlightDeletionRisk,
+        completeHighlightSnapshotRefreshed,
+        parentMetadataCacheHits: 0,
+        parentMetadataRemoteFetches: 0,
+        fetchHighlightsDurationMs,
+        fetchDocumentsDurationMs: 0,
+      },
+    }
+  }
+
   const selectedParentIds =
     resumeState?.phase === 'fetch-documents' && resumeState.selectedParentIds.length > 0
       ? [...resumeState.selectedParentIds]

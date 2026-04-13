@@ -16,6 +16,7 @@ This project is published as an independent plugin release line. If it is publis
 
 - Reader v3 incremental sync with explicit progress, ETA, and structured logging
 - Manual `Full Refresh` for whole-library rebuilds
+- `Refresh Local Snapshot Only` for rebuilding the local full-library snapshot without rewriting managed pages
 - Current-page tools for `Rebuild Current Page From Cache` and `Refresh Current Page Metadata`
 - Preview-first current-page legacy ID migration for pages and whiteboards
 - Dedicated current-page preview and apply summaries, instead of burying successful previews in the issue list
@@ -27,7 +28,7 @@ This project is published as an independent plugin release line. If it is publis
 
 ## Known Tradeoff
 
-`Incremental Sync` uses the saved Reader cursor and only scans changed highlights. `Full Refresh` still scans the full Reader highlight library and can take minutes on large libraries. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates `Full Refresh`, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
+`Incremental Sync` uses the saved Reader cursor and only scans changed highlights. `Full Refresh` still scans the full Reader highlight library and can take minutes on large libraries. `Refresh Local Snapshot Only` runs the full highlight scan too, but stops after refreshing the local snapshot and does not rewrite managed pages. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates a full-library scan, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
 
 ## Sync Scope Difference From The Official Plugin
 
@@ -59,11 +60,12 @@ Do not run this project and another Readwise Logseq plugin against the same grap
 1. Open the plugin panel.
 2. Click `Incremental Sync` for the normal day-to-day path.
 3. Use `Full Refresh` when you need a fresh whole-library rebuild.
-4. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
-5. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
-6. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
-7. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
-8. Wait for the plugin to:
+4. Open `Maintenance Tools > Snapshots` and use `Refresh Local Snapshot Only` when you want a fresh local snapshot without rewriting pages.
+5. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
+6. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
+7. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
+8. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
+9. Wait for the plugin to:
    - scan Reader highlights or load the cached highlight snapshot
    - group them by parent document
    - fetch the target parent documents
@@ -95,6 +97,7 @@ Maintenance tools are grouped by purpose:
   - current-page legacy id preview/apply
   - graph-wide legacy block ref preview/apply
 - `Snapshots`
+  - refresh the local highlight snapshot without rewriting pages
   - capture and diff raw current-page snapshots
 - `Test & Preview`
   - session test pages, preview pages, and restore/clear helpers

@@ -2,7 +2,7 @@ import type { PageEntity } from '@logseq/libs/dist/LSPlugin'
 
 import type { ExportedBook } from '../types'
 import { appendHighlights, upsertBookProperties } from '.'
-import { buildManagedPageNamePlanV1 } from './readwise-page-names'
+import { resolveAvailableManagedPageNameV1 } from './resolve-available-managed-page-name'
 
 export interface SyncBookOptions {
   namespacePrefix?: string | null
@@ -23,17 +23,6 @@ const matchesNamespacePrefix = (
   const pageTitle = toPageTitle(page)
   return pageTitle.startsWith(`${namespacePrefix}/`)
 }
-
-const buildTargetPageName = (
-  book: ExportedBook,
-  namespacePrefix: string | null | undefined,
-) =>
-  buildManagedPageNamePlanV1({
-    pageTitle: book.title,
-    namespacePrefix,
-    managedId: book.user_book_id,
-    format: 'org',
-  })
 
 const readBookIdFromPageProperties = (page: PageEntity): number | null => {
   const properties = page.properties as Record<string, unknown> | undefined
@@ -104,19 +93,14 @@ export const syncBook = async (
   if (existingPageUuid) {
     await appendHighlights(existingPageUuid, book.highlights)
   } else {
-    const pageNamePlan = buildTargetPageName(book, options.namespacePrefix)
-    const preferredPage = await logseq.Editor.getPage(
-      pageNamePlan.preferredPageName,
-    )
-    const conflictingPreferredPage =
-      preferredPage &&
-      readBookIdFromPageProperties(preferredPage) !== book.user_book_id
-        ? preferredPage
-        : null
-    const targetPageName =
-      conflictingPreferredPage != null
-        ? pageNamePlan.disambiguatedPageName
-        : pageNamePlan.preferredPageName
+    const targetPageName = (
+      await resolveAvailableManagedPageNameV1({
+        pageTitle: book.title,
+        namespacePrefix: options.namespacePrefix,
+        managedId: book.user_book_id,
+        format: 'org',
+      })
+    ).pageName
     const page = await logseq.Editor.createPage(
       targetPageName,
       {},

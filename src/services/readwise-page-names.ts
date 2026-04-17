@@ -192,6 +192,49 @@ export const buildManagedPageNamePlanV1 = ({
   }
 }
 
+export const buildManagedPageNameAttemptV1 = ({
+  pageTitle,
+  namespacePrefix,
+  managedId,
+  format = 'org',
+  attempt = 0,
+}: {
+  pageTitle: string
+  namespacePrefix?: string | null
+  managedId: string | number
+  format?: 'org' | 'md'
+  attempt?: number
+}): string => {
+  const plan = buildManagedPageNamePlanV1({
+    pageTitle,
+    namespacePrefix,
+    managedId,
+    format,
+  })
+
+  if (attempt <= 0) {
+    return plan.preferredPageName
+  }
+
+  if (attempt === 1) {
+    return plan.disambiguatedPageName
+  }
+
+  const normalizedPageTitleSegment = normalizePageTitleSegment(pageTitle)
+  const attemptSuffix = `${plan.disambiguationSuffix}${attempt}`
+  const disambiguatedTitleSegment = buildFittedPageTitleSegment({
+    pageTitleSegment: normalizedPageTitleSegment,
+    namespacePrefix,
+    suffix: attemptSuffix,
+    format,
+  })
+
+  return buildPageName(
+    `${disambiguatedTitleSegment.pageTitleSegment}${attemptSuffix}`,
+    namespacePrefix,
+  )
+}
+
 export const buildFormalManagedPageName = (
   bookTitle: string,
   namespacePrefix = 'ReadwiseHighlights',

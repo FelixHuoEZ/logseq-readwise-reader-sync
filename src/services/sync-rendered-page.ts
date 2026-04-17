@@ -8,6 +8,7 @@ import { rebuildManagedPageIfDamagedV1 } from './managed-page-integrity'
 import { withManagedSyncTimestampPagePropertiesV1 } from './managed-page-sync-timestamps'
 import { invalidateLegacyBlockRefMappingCacheV1 } from './migrate-legacy-block-refs'
 import { buildManagedPageNamePlanV1 } from './readwise-page-names'
+import { resolveAvailableManagedPageNameV1 } from './resolve-available-managed-page-name'
 import {
   renameManagedPageIfNeededV1,
   resolveManagedReadwisePageV1,
@@ -74,8 +75,16 @@ export const syncRenderedPage = async (
     disambiguatedPageName: pageNamePlan.disambiguatedPageName,
     namespaceRoot: namespacePrefix,
   })
-  const pageName = pageResolution.resolvedPageName
   const pageBeforeRepair = pageResolution.page
+  const pageName = (
+    await resolveAvailableManagedPageNameV1({
+      pageTitle: book.title,
+      namespacePrefix,
+      managedId: book.user_book_id,
+      format: 'org',
+      currentPageUuid: pageBeforeRepair?.uuid ?? null,
+    })
+  ).pageName
   const repairedPage =
     pageBeforeRepair == null
       ? {
@@ -92,7 +101,7 @@ export const syncRenderedPage = async (
   const resolvedExistingPage = repairedPage.page
     ? await renameManagedPageIfNeededV1({
         page: repairedPage.page,
-        expectedPageName: pageResolution.resolvedPageName,
+        expectedPageName: pageName,
         logPrefix,
       })
     : {

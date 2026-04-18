@@ -35,6 +35,7 @@ const buildMetadataEntries = (
           ? ` ${book.documentTags.join('  ,  ')}  ,  `
           : null,
     },
+    { key: 'summary', value: book.summary },
     { key: 'DATE', value: toYmd(runtime.syncDate) },
     { key: 'PUBLISHED', value: toYmd(book.publishedDate) },
     { key: 'SAVED', value: toYmd(book.savedDate) },
@@ -106,10 +107,13 @@ export const buildSemanticPage = (
   format: context.runtime.format,
   pageTitle: context.book.title,
   metadata: buildMetadataEntries(context),
-  pageNote: {
-    imageUrl: context.book.coverImageUrl,
-    summary: context.book.summary,
-  },
+  pageNote:
+    context.book.documentNote != null || context.book.coverImageUrl != null
+      ? {
+          imageUrl: context.book.coverImageUrl,
+          text: context.book.documentNote,
+        }
+      : null,
   syncHeader: buildSyncHeader(context),
   highlights: context.book.highlights.map((highlight) =>
     buildSemanticHighlight(

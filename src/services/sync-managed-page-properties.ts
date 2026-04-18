@@ -17,6 +17,7 @@ const MANAGED_PROPERTY_KEY_NORMALIZATIONS = new Set([
   'date',
   'published',
   'saved',
+  'summary',
   'rwauthor',
   'rwreadabletitle',
   'rwcategory',

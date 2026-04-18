@@ -63,6 +63,7 @@ const buildMetadataEntries = (
       value:
         documentTags.length > 0 ? ` ${documentTags.join('  ,  ')}  ,  ` : null,
     },
+    { key: 'summary', value: document.summary },
     { key: 'DATE', value: syncDate },
     { key: 'PUBLISHED', value: toYmd(document.published_date) },
     { key: 'SAVED', value: toYmd(document.saved_at) },
@@ -94,10 +95,14 @@ const buildReaderPreviewSemanticPage = (
     ? previewBook.document.title
     : previewBook.document.id,
   metadata: buildMetadataEntries(previewBook, syncDate),
-  pageNote: {
-    imageUrl: previewBook.document.image_url ?? null,
-    summary: previewBook.document.summary ?? null,
-  },
+  pageNote:
+    normalizeOptionalText(previewBook.document.notes) != null ||
+    normalizeOptionalText(previewBook.document.image_url) != null
+      ? {
+          imageUrl: normalizeOptionalText(previewBook.document.image_url),
+          text: normalizeOptionalText(previewBook.document.notes),
+        }
+      : null,
   syncHeader: {
     kind: 'first_sync',
     text: syncHeaderText,

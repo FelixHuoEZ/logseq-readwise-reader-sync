@@ -9,7 +9,7 @@ export const buildRenderHashInput = (page: SemanticPage): RenderHashInput => ({
   pageNote: page.pageNote
     ? {
         imageUrl: page.pageNote.imageUrl,
-        summary: page.pageNote.summary,
+        text: page.pageNote.text,
       }
     : null,
   highlights: page.highlights.map((highlight) => ({

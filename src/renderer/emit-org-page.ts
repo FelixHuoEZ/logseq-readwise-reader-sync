@@ -23,6 +23,7 @@ export const buildPageProperties = (
   const date = getMetadataValue(page, 'DATE')
   const published = getMetadataValue(page, 'PUBLISHED')
   const saved = getMetadataValue(page, 'SAVED')
+  const summary = getMetadataValue(page, 'summary')
   const reservedKeys = new Set([
     'rw-id',
     'rw-reader-id',
@@ -33,6 +34,7 @@ export const buildPageProperties = (
     'DATE',
     'PUBLISHED',
     'SAVED',
+    'summary',
   ])
   const extraMetadataEntries = page.metadata.filter(
     (entry) => !reservedKeys.has(entry.key),
@@ -48,6 +50,7 @@ export const buildPageProperties = (
     { key: 'DATE', value: date ? wrapWikiLink(date) : null },
     { key: 'PUBLISHED', value: published ? wrapWikiLink(published) : null },
     { key: 'SAVED', value: saved ? wrapWikiLink(saved) : null },
+    { key: 'summary', value: summary },
     ...extraMetadataEntries.map((entry) => ({
       key: entry.key,
       value: entry.value,
@@ -59,10 +62,8 @@ export const emitPageNoteText = (page: SemanticPage): string | null => {
   const imageLine = page.pageNote?.imageUrl
     ? wrapWikiLink(page.pageNote.imageUrl)
     : ''
-  const summaryLine = page.pageNote?.summary ?? ''
-  const noteLines = [imageLine, summaryLine].filter(
-    (line) => line.trim().length > 0,
-  )
+  const noteText = normalizeBoundaryBlankLines(page.pageNote?.text ?? '')
+  const noteLines = [imageLine, noteText].filter((line) => line.trim().length > 0)
 
   if (noteLines.length === 0) {
     return null
@@ -127,10 +128,7 @@ const emitHighlightMainText = (
 
   const [firstLine = '', ...restLines] = highlight.text.split('\n')
   const restText = normalizeBoundaryBlankLines(restLines.join('\n'))
-  const imageSection = highlight.imageUrl
-    ? [wrapWikiLink(highlight.imageUrl)]
-    : []
-  const trailingSections = [restText, ...imageSection].filter(
+  const trailingSections = [restText].filter(
     (section): section is string => section.length > 0,
   )
 
@@ -155,13 +153,36 @@ const emitChildBlockText = (level: number, value: string) => {
   return [(`${prefix} ${firstLine}`).trimEnd(), ...restLines].join('\n')
 }
 
+const emitChildNoteBlockText = (level: number, value: string) => {
+  const normalizedValue = normalizeBoundaryBlankLines(value)
+  if (normalizedValue.length === 0) return ''
+
+  const prefix = '*'.repeat(level)
+
+  return [`${prefix} #+BEGIN_NOTE`, normalizedValue, '#+END_NOTE'].join('\n')
+}
+
 const emitHighlightBlocks = (page: SemanticPage): EmittedBlock[] =>
-  page.highlights.map((highlight) => ({
-    text: emitHighlightMainText(highlight),
-    children: highlight.note
-      ? [{ text: emitChildBlockText(3, highlight.note) }]
-      : undefined,
-  }))
+  page.highlights.map((highlight) => {
+    const children: EmittedBlock[] = []
+
+    if (highlight.imageUrl) {
+      children.push({
+        text: emitChildBlockText(3, wrapWikiLink(highlight.imageUrl)),
+      })
+    }
+
+    if (highlight.note) {
+      children.push({
+        text: emitChildNoteBlockText(3, highlight.note),
+      })
+    }
+
+    return {
+      text: emitHighlightMainText(highlight),
+      children: children.length > 0 ? children : undefined,
+    }
+  })
 
 export const emitOrgPage = (page: SemanticPage): EmitResult => {
   const pageProperties = buildPageProperties(page)

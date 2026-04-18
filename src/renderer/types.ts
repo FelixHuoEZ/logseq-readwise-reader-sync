@@ -31,7 +31,7 @@ export interface SemanticMetadataEntry {
 
 export interface SemanticPageNote {
   imageUrl: string | null
-  summary: string | null
+  text: string | null
 }
 
 export interface SemanticSyncHeader {

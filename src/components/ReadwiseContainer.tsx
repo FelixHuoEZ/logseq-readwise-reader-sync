@@ -9,6 +9,7 @@ import {
   loadReaderPreviewBooks,
   loadReaderPreviewBooksByParentIds,
   isReaderPreviewLoadResumeError,
+  type ReaderPreviewBook,
   type ReaderPreviewLoadMode,
   type ReaderPreviewLoadResumeState,
   type ReaderPreviewLoadStats,
@@ -19,6 +20,7 @@ import {
   type GraphReaderSyncStateV1,
   loadGraphCheckpointStateV1,
   loadCurrentGraphContextV1,
+  loadGraphLastFormalSyncSummaryV1,
   loadGraphReaderRetryFallbackEntriesV1,
   loadGraphReaderSyncStateV1,
   normalizeComparableUrlV1,
@@ -92,6 +94,7 @@ import {
 
 type ReaderSyncEtaPhase = 'fetch-highlights' | 'fetch-documents' | 'write-pages'
 type ReaderSyncMode = ReaderPreviewLoadMode
+type ReaderSyncRunTrigger = 'manual' | 'auto'
 
 interface ReaderSyncEtaSample {
   msPerUnit: number
@@ -104,6 +107,20 @@ interface ReaderSyncEtaSnapshot {
   label: string
   etaMs: number | null
   observedAt: number
+}
+
+interface ManagedPageActivityRecord {
+  pageName: string | null
+  readerDocumentId: string | null
+  lastViewedAt: number | null
+  lastWrittenAt: number | null
+}
+
+interface AutoSyncProtectedWriteMatch {
+  reason: 'current_page_open' | 'recently_viewed' | 'recently_written'
+  pageName: string | null
+  readerDocumentId: string | null
+  observedAt: number | null
 }
 
 interface ManagedPageRepairCandidate {
@@ -220,6 +237,13 @@ export const ReadwiseContainer = () => {
   const debugLogPrefix = '[Readwise Debug Sync]'
   const readerPreviewLogPrefix = '[Readwise Reader Preview]'
   const showAdvancedFormalTestActions = false
+  const autoSyncStartupDelayMs = 5000
+  const autoSyncIdleTimeoutMs = 3000
+  const autoSyncObservedPagePollMs = 15000
+  const autoSyncProtectedActivityWindowMs = 5 * 60 * 1000
+  const autoSyncLargeWriteThreshold = 100
+  const autoSyncCautionWriteThreshold = 20
+  const manualLargeWriteThreshold = 300
   const cancelledRef = useRef(false)
   const retryActionRef = useRef<{
     kind: 'formal' | 'preview'
@@ -275,6 +299,18 @@ export const ReadwiseContainer = () => {
   const [pinnedHelpPopover, setPinnedHelpPopover] =
     useState<ReaderSyncHelpPopoverState | null>(null)
   const helpHideTimeoutRef = useRef<number | null>(null)
+  const latestStatusRef = useRef<SyncStatus>('idle')
+  const latestPropsReadyRef = useRef(propsReady)
+  const latestReaderSyncStateRef = useRef<GraphReaderSyncStateV1 | null>(null)
+  const autoSyncInFlightRef = useRef(false)
+  const lastAutoSyncAttemptAtRef = useRef<number | null>(null)
+  const lastAutoSyncPromptAtRef = useRef<number | null>(null)
+  const recentManagedPageActivityRef = useRef<ManagedPageActivityRecord[]>([])
+  const pendingAutoSyncScheduleRef = useRef<
+    | { kind: 'idle'; handle: number }
+    | { kind: 'timeout'; handle: number }
+    | null
+  >(null)
   const liveRunIssueMetricsRef = useRef<{
     processedItems: number | null
     stats: NonNullable<RunIssueBundleContext['stats']>
@@ -322,6 +358,13 @@ export const ReadwiseContainer = () => {
       if (helpHideTimeoutRef.current != null) {
         window.clearTimeout(helpHideTimeoutRef.current)
       }
+      if (pendingAutoSyncScheduleRef.current != null) {
+        if (pendingAutoSyncScheduleRef.current.kind === 'idle') {
+          window.cancelIdleCallback?.(pendingAutoSyncScheduleRef.current.handle)
+        } else {
+          window.clearTimeout(pendingAutoSyncScheduleRef.current.handle)
+        }
+      }
     }
   }, [])
 
@@ -338,6 +381,18 @@ export const ReadwiseContainer = () => {
     void refreshActiveFormalTestSessionCount()
     void refreshReaderSyncState()
   }, [])
+
+  useEffect(() => {
+    latestStatusRef.current = status
+  }, [status])
+
+  useEffect(() => {
+    latestPropsReadyRef.current = propsReady
+  }, [propsReady])
+
+  useEffect(() => {
+    latestReaderSyncStateRef.current = readerSyncState
+  }, [readerSyncState])
 
   useEffect(() => {
     if (
@@ -2196,6 +2251,378 @@ export const ReadwiseContainer = () => {
     updatedAfter: string | null | undefined,
   ) => (updatedAfter ? `updated after ${updatedAfter}` : 'full library')
 
+  const resolveAutoSyncIntervalMinutes = () => {
+    const rawValue = Number(logseq.settings?.syncIntervalMinutes ?? 15)
+    if (!Number.isFinite(rawValue) || rawValue <= 0) {
+      return 15
+    }
+
+    return Math.max(1, Math.round(rawValue))
+  }
+
+  const normalizePropertyLookupKey = (value: string) =>
+    value.toLowerCase().replace(/[^a-z0-9]/g, '')
+
+  const readPagePropertyString = (
+    page: PageEntity | BlockEntity | null | undefined,
+    expectedKey: string,
+  ): string | null => {
+    if (!page?.properties) return null
+
+    const normalizedExpected = normalizePropertyLookupKey(expectedKey)
+
+    for (const [key, value] of Object.entries(page.properties)) {
+      if (normalizePropertyLookupKey(key) !== normalizedExpected) continue
+
+      if (typeof value === 'string') {
+        const trimmed = value.trim()
+        return trimmed.length > 0 ? trimmed : null
+      }
+
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return String(value)
+      }
+
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (typeof item === 'string') {
+            const trimmed = item.trim()
+            if (trimmed.length > 0) return trimmed
+          }
+        }
+      }
+    }
+
+    return null
+  }
+
+  const getPageEntityName = (
+    page: PageEntity | BlockEntity | null | undefined,
+  ): string | null => {
+    if (!page) return null
+
+    if (!('name' in page) || typeof page.name !== 'string') {
+      return null
+    }
+
+    const originalName = (
+      page as PageEntity & { originalName?: string | null }
+    ).originalName
+    const candidate =
+      typeof originalName === 'string' && originalName.trim().length > 0
+        ? originalName
+        : page.name
+
+    if (typeof candidate !== 'string') return null
+    const trimmed = candidate.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+
+  const isManagedPageNameInNamespace = (
+    pageName: string | null | undefined,
+    namespacePrefix: string,
+  ) =>
+    typeof pageName === 'string' &&
+    pageName.startsWith(`${namespacePrefix}/`)
+
+  const pruneRecentManagedPageActivity = (now = Date.now()) => {
+    recentManagedPageActivityRef.current = recentManagedPageActivityRef.current.filter(
+      (entry) => {
+        const latestObservedAt = Math.max(
+          entry.lastViewedAt ?? 0,
+          entry.lastWrittenAt ?? 0,
+        )
+        return (
+          latestObservedAt > 0 &&
+          now - latestObservedAt <= autoSyncProtectedActivityWindowMs
+        )
+      },
+    )
+  }
+
+  const recordManagedPageActivity = ({
+    pageName,
+    readerDocumentId,
+    kind,
+    observedAt = Date.now(),
+  }: {
+    pageName: string | null
+    readerDocumentId: string | null
+    kind: 'view' | 'write'
+    observedAt?: number
+  }) => {
+    if (!pageName && !readerDocumentId) return
+
+    pruneRecentManagedPageActivity(observedAt)
+
+    const existing = recentManagedPageActivityRef.current.find(
+      (entry) =>
+        (readerDocumentId != null &&
+          entry.readerDocumentId != null &&
+          entry.readerDocumentId === readerDocumentId) ||
+        (pageName != null && entry.pageName != null && entry.pageName === pageName),
+    )
+
+    if (existing) {
+      existing.pageName = pageName ?? existing.pageName
+      existing.readerDocumentId = readerDocumentId ?? existing.readerDocumentId
+      if (kind === 'view') {
+        existing.lastViewedAt = observedAt
+      } else {
+        existing.lastWrittenAt = observedAt
+      }
+      return
+    }
+
+    recentManagedPageActivityRef.current.push({
+      pageName,
+      readerDocumentId,
+      lastViewedAt: kind === 'view' ? observedAt : null,
+      lastWrittenAt: kind === 'write' ? observedAt : null,
+    })
+  }
+
+  const captureCurrentManagedPageActivity = async (
+    namespacePrefix: string,
+  ): Promise<{
+    pageName: string | null
+    readerDocumentId: string | null
+  } | null> => {
+    if (!isAutoSyncForegroundReady()) return null
+
+    const currentPage = await logseq.Editor.getCurrentPage()
+    const pageName = getPageEntityName(currentPage)
+    if (!isManagedPageNameInNamespace(pageName, namespacePrefix)) {
+      return null
+    }
+
+    const readerDocumentId = readPagePropertyString(currentPage, 'rw-reader-id')
+    recordManagedPageActivity({
+      pageName,
+      readerDocumentId,
+      kind: 'view',
+    })
+
+    return {
+      pageName,
+      readerDocumentId,
+    }
+  }
+
+  const resolveAutoSyncProtectedWriteMatch = ({
+    previewBook,
+    namespacePrefix,
+    currentOpenPage,
+  }: {
+    previewBook: ReaderPreviewBook
+    namespacePrefix: string
+    currentOpenPage: { pageName: string | null; readerDocumentId: string | null } | null
+  }): AutoSyncProtectedWriteMatch | null => {
+    const now = Date.now()
+    pruneRecentManagedPageActivity(now)
+
+    const pageTitle = previewBook.document.title?.trim().length
+      ? previewBook.document.title
+      : previewBook.document.id
+    const pageNamePlan = buildManagedPageNamePlanV1({
+      pageTitle,
+      namespacePrefix,
+      managedId: previewBook.document.id,
+      format: 'org',
+    })
+    const candidatePageNames = new Set(
+      [pageNamePlan.preferredPageName, pageNamePlan.disambiguatedPageName].filter(
+        (value): value is string => typeof value === 'string' && value.length > 0,
+      ),
+    )
+
+    if (currentOpenPage) {
+      if (
+        currentOpenPage.readerDocumentId != null &&
+        currentOpenPage.readerDocumentId === previewBook.document.id
+      ) {
+        return {
+          reason: 'current_page_open',
+          pageName: currentOpenPage.pageName,
+          readerDocumentId: currentOpenPage.readerDocumentId,
+          observedAt: now,
+        }
+      }
+
+      if (
+        currentOpenPage.pageName != null &&
+        candidatePageNames.has(currentOpenPage.pageName)
+      ) {
+        return {
+          reason: 'current_page_open',
+          pageName: currentOpenPage.pageName,
+          readerDocumentId: currentOpenPage.readerDocumentId,
+          observedAt: now,
+        }
+      }
+    }
+
+    for (const entry of recentManagedPageActivityRef.current) {
+      const matchesDocument =
+        entry.readerDocumentId != null &&
+        entry.readerDocumentId === previewBook.document.id
+      const matchesPageName =
+        entry.pageName != null && candidatePageNames.has(entry.pageName)
+
+      if (!matchesDocument && !matchesPageName) continue
+
+      if (
+        entry.lastViewedAt != null &&
+        now - entry.lastViewedAt <= autoSyncProtectedActivityWindowMs
+      ) {
+        return {
+          reason: 'recently_viewed',
+          pageName: entry.pageName,
+          readerDocumentId: entry.readerDocumentId,
+          observedAt: entry.lastViewedAt,
+        }
+      }
+
+      if (
+        entry.lastWrittenAt != null &&
+        now - entry.lastWrittenAt <= autoSyncProtectedActivityWindowMs
+      ) {
+        return {
+          reason: 'recently_written',
+          pageName: entry.pageName,
+          readerDocumentId: entry.readerDocumentId,
+          observedAt: entry.lastWrittenAt,
+        }
+      }
+    }
+
+    return null
+  }
+
+  const isAutoSyncForegroundReady = () =>
+    document.visibilityState === 'visible' && document.hasFocus()
+
+  const clearPendingAutoSyncSchedule = () => {
+    if (pendingAutoSyncScheduleRef.current == null) {
+      return
+    }
+
+    if (pendingAutoSyncScheduleRef.current.kind === 'idle') {
+      window.cancelIdleCallback?.(pendingAutoSyncScheduleRef.current.handle)
+    } else {
+      window.clearTimeout(pendingAutoSyncScheduleRef.current.handle)
+    }
+
+    pendingAutoSyncScheduleRef.current = null
+  }
+
+  const scheduleAutoSyncAttempt = (source: 'startup' | 'interval' | 'resume') => {
+    if (!isAutoSyncForegroundReady()) {
+      return
+    }
+
+    clearPendingAutoSyncSchedule()
+
+    if (typeof window.requestIdleCallback === 'function') {
+      const handle = window.requestIdleCallback(
+        () => {
+          pendingAutoSyncScheduleRef.current = null
+          void attemptAutoSync(source)
+        },
+        { timeout: autoSyncIdleTimeoutMs },
+      )
+      pendingAutoSyncScheduleRef.current = { kind: 'idle', handle }
+      return
+    }
+
+    const handle = window.setTimeout(() => {
+      pendingAutoSyncScheduleRef.current = null
+      void attemptAutoSync(source)
+    }, autoSyncIdleTimeoutMs)
+    pendingAutoSyncScheduleRef.current = { kind: 'timeout', handle }
+  }
+
+  const didIncrementalRunLookSuspicious = ({
+    loadStats,
+    usedCursorFallback,
+    previousFormalSummary,
+  }: {
+    loadStats: ReaderPreviewLoadStats
+    usedCursorFallback: boolean
+    previousFormalSummary: GraphLastFormalSyncSummaryV1 | null
+  }) => {
+    if (usedCursorFallback) return true
+    if (loadStats.pagesTargeted >= autoSyncLargeWriteThreshold) return true
+    if (loadStats.highlightPagesScanned >= 10) return true
+    if (loadStats.highlightsScanned >= 1000) return true
+
+    if (
+      previousFormalSummary != null &&
+      (previousFormalSummary.status !== 'success' ||
+        previousFormalSummary.errorCount > 0)
+    ) {
+      return true
+    }
+
+    return false
+  }
+
+  const buildManagedSyncWriteGuard = ({
+    mode,
+    runTrigger,
+    pagesTargeted,
+    loadStats,
+    usedCursorFallback,
+    previousFormalSummary,
+  }: {
+    mode: ReaderSyncMode
+    runTrigger: ReaderSyncRunTrigger
+    pagesTargeted: number
+    loadStats: ReaderPreviewLoadStats
+    usedCursorFallback: boolean
+    previousFormalSummary: GraphLastFormalSyncSummaryV1 | null
+  }) => {
+    if (mode !== 'incremental-window' && runTrigger === 'auto') {
+      return null
+    }
+
+    const reasons: string[] = []
+    const suspiciousIncrementalReplay =
+      mode === 'incremental-window' &&
+      didIncrementalRunLookSuspicious({
+        loadStats,
+        usedCursorFallback,
+        previousFormalSummary,
+      })
+
+    if (runTrigger === 'auto') {
+      if (pagesTargeted > autoSyncLargeWriteThreshold) {
+        reasons.push(
+          `automatic Incremental Sync wants to rewrite ${pagesTargeted} page(s)`,
+        )
+      }
+      if (suspiciousIncrementalReplay) {
+        reasons.push('this run looks larger than a normal incremental window')
+      }
+    } else if (pagesTargeted > manualLargeWriteThreshold) {
+      reasons.push(`manual sync wants to rewrite ${pagesTargeted} page(s)`)
+    }
+
+    if (reasons.length === 0) {
+      return {
+        requiresConfirmation: false,
+        shouldWarn: runTrigger === 'auto' && pagesTargeted > autoSyncCautionWriteThreshold,
+        reasons: [],
+      }
+    }
+
+    return {
+      requiresConfirmation: true,
+      shouldWarn: false,
+      reasons,
+    }
+  }
+
   const shouldAdvanceReaderSyncCursor = ({
     mode,
     blockingSyncErrorsForRun,
@@ -3196,6 +3623,7 @@ export const ReadwiseContainer = () => {
       statusPrefix: 'Incremental sync',
       syncHeaderMode: 'formal',
       mode: 'incremental-window',
+      runTrigger: 'manual',
     })
   }
 
@@ -3241,6 +3669,7 @@ export const ReadwiseContainer = () => {
       statusPrefix: 'Cached rebuild',
       syncHeaderMode: 'formal',
       mode: 'cached-full-rebuild',
+      runTrigger: 'manual',
     })
   }
 
@@ -3253,6 +3682,7 @@ export const ReadwiseContainer = () => {
       statusPrefix: 'Refresh local snapshot',
       syncHeaderMode: 'formal',
       mode: 'snapshot-only-refresh',
+      runTrigger: 'manual',
     })
   }
 
@@ -3299,8 +3729,154 @@ export const ReadwiseContainer = () => {
       statusPrefix: 'Full refresh',
       syncHeaderMode: 'formal',
       mode: 'full-library-scan',
+      runTrigger: 'manual',
     })
   }
+
+  const attemptAutoSync = async (source: 'startup' | 'interval' | 'resume') => {
+    if (!logseq.settings?.autoSyncEnabled) return
+    if (!latestPropsReadyRef.current) return
+    if (autoSyncInFlightRef.current) return
+    if (!isAutoSyncForegroundReady()) return
+
+    const currentStatus = latestStatusRef.current
+    if (currentStatus === 'fetching' || currentStatus === 'syncing') {
+      return
+    }
+
+    const intervalMinutes = resolveAutoSyncIntervalMinutes()
+    const intervalMs = intervalMinutes * 60 * 1000
+    const now = Date.now()
+
+    if (
+      lastAutoSyncAttemptAtRef.current != null &&
+      now - lastAutoSyncAttemptAtRef.current < intervalMs
+    ) {
+      return
+    }
+
+    if (
+      lastAutoSyncPromptAtRef.current != null &&
+      now - lastAutoSyncPromptAtRef.current < intervalMs
+    ) {
+      return
+    }
+
+    const currentReaderSyncState =
+      latestReaderSyncStateRef.current ?? (await loadGraphReaderSyncStateV1())
+    if (currentReaderSyncState?.updatedAfter == null) {
+      logReadwiseInfo(
+        formalSyncLogPrefix,
+        'auto sync is enabled but not armed because no saved incremental cursor exists yet',
+        {
+          source,
+          intervalMinutes,
+        },
+      )
+      return
+    }
+
+    const conflicts = await detectFormalSyncConflicts()
+    if (conflicts != null) {
+      logReadwiseWarn(
+        formalSyncLogPrefix,
+        'auto sync skipped because conflicting managed pages still exist',
+        {
+          source,
+          conflictLabels: conflicts.map((conflict) => conflict.label),
+        },
+      )
+      return
+    }
+
+    autoSyncInFlightRef.current = true
+    lastAutoSyncAttemptAtRef.current = now
+
+    try {
+      logReadwiseInfo(formalSyncLogPrefix, 'starting automatic incremental sync', {
+        source,
+        intervalMinutes,
+        updatedAfter: currentReaderSyncState.updatedAfter,
+      })
+      await runReaderManagedSync({
+        namespacePrefix: formalNamespaceRoot,
+        logPrefix: formalSyncLogPrefix,
+        statusPrefix: 'Auto Sync',
+        syncHeaderMode: 'formal',
+        mode: 'incremental-window',
+        runTrigger: 'auto',
+      })
+    } finally {
+      autoSyncInFlightRef.current = false
+    }
+  }
+
+  useEffect(() => {
+    if (!propsReady || !logseq.settings?.autoSyncEnabled) {
+      return undefined
+    }
+
+    const sampleCurrentManagedPage = () => {
+      if (!isAutoSyncForegroundReady()) return
+      void captureCurrentManagedPageActivity(formalNamespaceRoot)
+    }
+
+    const pollTimer = window.setInterval(
+      sampleCurrentManagedPage,
+      autoSyncObservedPagePollMs,
+    )
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        sampleCurrentManagedPage()
+      }
+    }
+    const handleFocus = () => {
+      sampleCurrentManagedPage()
+    }
+
+    sampleCurrentManagedPage()
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', handleFocus)
+
+    return () => {
+      window.clearInterval(pollTimer)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [propsReady, logseq.settings?.autoSyncEnabled])
+
+  useEffect(() => {
+    if (!propsReady || !logseq.settings?.autoSyncEnabled) {
+      return undefined
+    }
+
+    const intervalMs = resolveAutoSyncIntervalMinutes() * 60 * 1000
+    const startupTimer = window.setTimeout(() => {
+      scheduleAutoSyncAttempt('startup')
+    }, autoSyncStartupDelayMs)
+    const intervalTimer = window.setInterval(() => {
+      scheduleAutoSyncAttempt('interval')
+    }, intervalMs)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        scheduleAutoSyncAttempt('resume')
+      }
+    }
+    const handleFocus = () => {
+      scheduleAutoSyncAttempt('resume')
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', handleFocus)
+
+    return () => {
+      window.clearTimeout(startupTimer)
+      window.clearInterval(intervalTimer)
+      clearPendingAutoSyncSchedule()
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [propsReady, logseq.settings?.autoSyncEnabled, logseq.settings?.syncIntervalMinutes])
 
   const handleAuditManagedIds = async () => {
     clearRunIssues()
@@ -4642,6 +5218,7 @@ export const ReadwiseContainer = () => {
     statusPrefix,
     syncHeaderMode,
     mode,
+    runTrigger = 'manual',
     resumeState,
     automaticResumeAttempt = 0,
     runStartedAtMs,
@@ -4651,6 +5228,7 @@ export const ReadwiseContainer = () => {
     statusPrefix: string
     syncHeaderMode: 'formal' | 'preview'
     mode: ReaderSyncMode
+    runTrigger?: ReaderSyncRunTrigger
     resumeState?: ReaderPreviewLoadResumeState
     automaticResumeAttempt?: number
     runStartedAtMs?: number
@@ -4668,12 +5246,15 @@ export const ReadwiseContainer = () => {
       mode === 'full-library-scan' || mode === 'cached-full-rebuild'
         ? resolveConfiguredReaderFullScanTargetDocuments()
         : null
+    const previousFormalSummary =
+      syncHeaderMode === 'formal' ? await loadGraphLastFormalSyncSummaryV1() : null
     const debugHighlightPageLimit =
       mode === 'cached-full-rebuild'
         ? null
         : resolveConfiguredReaderDebugHighlightPageLimit()
     let readerSyncStateBeforeRun =
       syncHeaderMode === 'formal' ? await loadGraphReaderSyncStateV1() : null
+    let usedCursorFallback = false
     if (
       syncHeaderMode === 'formal' &&
       mode === 'incremental-window' &&
@@ -4688,6 +5269,7 @@ export const ReadwiseContainer = () => {
             committedAt: cacheState.cachedAt,
             source: 'incremental_sync',
           }
+          usedCursorFallback = true
           logReadwiseInfo(
             logPrefix,
             'using IndexedDB highlight cache timestamp as incremental cursor fallback',
@@ -4734,6 +5316,7 @@ export const ReadwiseContainer = () => {
           statusPrefix,
           syncHeaderMode,
           mode,
+          runTrigger,
         }),
     }
     clearRunIssues()
@@ -4777,6 +5360,13 @@ export const ReadwiseContainer = () => {
     const resolvedRetryReaderDocumentIds = new Set<string>()
     const queuedRetryEntriesToUpsert = new Map<string, ReaderSyncRetryPageEntryV1>()
     let retryQueueUpdateFailed = false
+    const deferredProtectedWrites: Array<{
+      readerDocumentId: string
+      pageTitle: string
+      pageName: string | null
+      reason: AutoSyncProtectedWriteMatch['reason']
+      observedAt: number | null
+    }> = []
     const runStartedAt = runStartedAtMs ?? Date.now()
     let loadStats: ReaderPreviewLoadStats = {
       highlightPagesScanned: 0,
@@ -5184,8 +5774,129 @@ export const ReadwiseContainer = () => {
               ? `${statusPrefix}: no cached Reader pages were available.`
               : `${statusPrefix}: no Reader pages were available.`,
         )
+        if (runTrigger === 'auto') {
+          logReadwiseInfo(logPrefix, 'auto sync completed with no page writes required', {
+            mode,
+            source: 'no_changed_pages',
+          })
+        }
         logReadwiseInfo(logPrefix, 'no pages available')
         return
+      }
+
+      const writeGuard = buildManagedSyncWriteGuard({
+        mode,
+        runTrigger,
+        pagesTargeted: previewBooks.length,
+        loadStats,
+        usedCursorFallback,
+        previousFormalSummary,
+      })
+
+      if (writeGuard?.shouldWarn) {
+        logReadwiseWarn(
+          logPrefix,
+          'automatic incremental sync is larger than a normal small-window run',
+          {
+            mode,
+            runTrigger,
+            pagesTargeted: previewBooks.length,
+            highlightPagesScanned: loadStats.highlightPagesScanned,
+            highlightsScanned: loadStats.highlightsScanned,
+            usedCursorFallback,
+          },
+        )
+      }
+
+      if (writeGuard?.requiresConfirmation) {
+        const reasonSummary = writeGuard.reasons.join('; ')
+        const confirmMessage =
+          runTrigger === 'auto'
+            ? [
+                `Auto Sync paused before writing ${previewBooks.length} page(s).`,
+                '',
+                `Reason: ${reasonSummary}.`,
+                `Highlights scanned: ${loadStats.highlightsScanned}.`,
+                `Highlight pages scanned: ${loadStats.highlightPagesScanned}.`,
+                '',
+                'Press OK to continue writing pages now.',
+                'Press Cancel to skip this automatic run.',
+              ].join('\n')
+            : [
+                `${statusPrefix} is about to write ${previewBooks.length} page(s).`,
+                '',
+                `Reason: ${reasonSummary}.`,
+                `Highlights scanned: ${loadStats.highlightsScanned}.`,
+                `Highlight pages scanned: ${loadStats.highlightPagesScanned}.`,
+                '',
+                'Press OK to continue.',
+                'Press Cancel to stop before page writes.',
+              ].join('\n')
+        logReadwiseWarn(logPrefix, 'managed sync is awaiting write confirmation', {
+          mode,
+          runTrigger,
+          pagesTargeted: previewBooks.length,
+          reasonSummary,
+          usedCursorFallback,
+          highlightPagesScanned: loadStats.highlightPagesScanned,
+          highlightsScanned: loadStats.highlightsScanned,
+          previousFormalSummaryStatus: previousFormalSummary?.status ?? null,
+          previousFormalSummaryErrorCount: previousFormalSummary?.errorCount ?? null,
+        })
+        setStatusMessage(
+          `${statusPrefix}: waiting for confirmation before writing ${previewBooks.length} page(s).`,
+        )
+        if (runTrigger === 'auto') {
+          lastAutoSyncPromptAtRef.current = Date.now()
+          await logseq.UI.showMsg(
+            `Auto Sync paused because ${previewBooks.length} page(s) would be rewritten. Review the confirmation dialog before continuing.`,
+            'warning',
+          )
+        }
+
+        const shouldContinue = window.confirm(confirmMessage)
+        if (!shouldContinue) {
+          if (runTrigger === 'auto') {
+            const shouldDisableAutoSync = window.confirm(
+              'Auto Sync skipped this run. Press OK to disable Auto Sync. Press Cancel to keep Auto Sync enabled and skip only this run.',
+            )
+            if (shouldDisableAutoSync) {
+              await logseq.updateSettings({ autoSyncEnabled: false })
+              await logseq.UI.showMsg('Auto Sync disabled.', 'warning')
+            }
+          }
+
+          setStatus('completed')
+          setCurrent(0)
+          setTotal(0)
+          setCurrentBook('')
+          setRunIssueContext((previous) =>
+            previous == null
+              ? previous
+              : {
+                  ...previous,
+                  completedAt: new Date().toISOString(),
+                  processedItems: 0,
+                  issuesCount: 0,
+                  stats: {
+                    highlightPagesScanned: loadStats.highlightPagesScanned,
+                    highlightsScanned: loadStats.highlightsScanned,
+                    parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+                    pagesTargeted: previewBooks.length,
+                    pagesProcessed: 0,
+                    fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+                    fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+                    writePagesDurationMs: 0,
+                  },
+                },
+          )
+          setStatusMessage(
+            runTrigger === 'auto'
+              ? `Auto Sync skipped before page writes because ${previewBooks.length} page(s) required confirmation.`
+              : `${statusPrefix}: cancelled before writing ${previewBooks.length} page(s).`,
+          )
+          return
+        }
       }
 
       setCurrent(0)
@@ -5200,6 +5911,11 @@ export const ReadwiseContainer = () => {
             : `${statusPrefix}: syncing ${previewBooks.length} Reader page(s) from full-library highlight groups into ${namespacePrefix}...`,
       )
       const writePagesStartedAt = Date.now()
+      let currentOpenManagedPage =
+        runTrigger === 'auto'
+          ? await captureCurrentManagedPageActivity(namespacePrefix)
+          : null
+      let lastProtectedPageSampleAt = Date.now()
 
       for (let index = 0; index < previewBooks.length; index += 1) {
         if (cancelledRef.current) return
@@ -5207,6 +5923,65 @@ export const ReadwiseContainer = () => {
         const previewBook = previewBooks[index]!
         const pageTitle = previewBook.document.title ?? previewBook.document.id
         setCurrentBook(pageTitle)
+
+        if (runTrigger === 'auto') {
+          if (Date.now() - lastProtectedPageSampleAt >= 3000) {
+            currentOpenManagedPage =
+              await captureCurrentManagedPageActivity(namespacePrefix)
+            lastProtectedPageSampleAt = Date.now()
+          }
+
+          const protectedWrite = resolveAutoSyncProtectedWriteMatch({
+            previewBook,
+            namespacePrefix,
+            currentOpenPage: currentOpenManagedPage,
+          })
+
+          if (protectedWrite) {
+            const existingRetryEntry = queuedRetryEntriesByDocumentId.get(
+              previewBook.document.id,
+            )
+            const nowIso = new Date().toISOString()
+            const observedAtLabel =
+              protectedWrite.observedAt != null
+                ? new Date(protectedWrite.observedAt).toISOString()
+                : null
+            const deferredMessage =
+              protectedWrite.reason === 'current_page_open'
+                ? `Deferred auto sync write because the target page is currently open.`
+                : protectedWrite.reason === 'recently_viewed'
+                  ? `Deferred auto sync write because the target page was viewed recently.`
+                  : `Deferred auto sync write because the target page was written recently.`
+
+            queuedRetryEntriesToUpsert.set(previewBook.document.id, {
+              readerDocumentId: previewBook.document.id,
+              pageName: existingRetryEntry?.pageName ?? protectedWrite.pageName ?? pageTitle,
+              category: 'warning',
+              message: deferredMessage,
+              queuedAt: existingRetryEntry?.queuedAt ?? nowIso,
+              lastSeenAt: nowIso,
+            })
+            deferredProtectedWrites.push({
+              readerDocumentId: previewBook.document.id,
+              pageTitle,
+              pageName: protectedWrite.pageName,
+              reason: protectedWrite.reason,
+              observedAt: protectedWrite.observedAt,
+            })
+            logReadwiseInfo(
+              logPrefix,
+              'deferred auto sync write for active managed page',
+              {
+                pageTitle,
+                readerDocumentId: previewBook.document.id,
+                deferredReason: protectedWrite.reason,
+                pageName: protectedWrite.pageName,
+                observedAt: observedAtLabel,
+              },
+            )
+            continue
+          }
+        }
 
         try {
           const pageSyncResult = await syncRenderedReaderPreviewPage(
@@ -5235,6 +6010,11 @@ export const ReadwiseContainer = () => {
           if (queuedRetryEntriesByDocumentId.has(previewBook.document.id)) {
             resolvedRetryReaderDocumentIds.add(previewBook.document.id)
           }
+          recordManagedPageActivity({
+            pageName: pageSyncResult.pageName,
+            readerDocumentId: previewBook.document.id,
+            kind: 'write',
+          })
         } catch (err: unknown) {
           const message = describeUnknownError(err)
           logReadwiseError(logPrefix, 'failed to sync rendered Reader page', {
@@ -5282,10 +6062,41 @@ export const ReadwiseContainer = () => {
         )
       }
       writePagesDurationMs = Date.now() - writePagesStartedAt
+
+      if (deferredProtectedWrites.length > 0) {
+        const deferredSummary = deferredProtectedWrites
+          .slice(0, 10)
+          .map((entry, index) => {
+            const observedAtFact =
+              entry.observedAt != null
+                ? ` observedAt=${new Date(entry.observedAt).toISOString()}`
+                : ''
+            return `entry=${index + 1} reason=${entry.reason} book=${entry.pageTitle} readerDocumentId=${entry.readerDocumentId}${entry.pageName ? ` pageName=${entry.pageName}` : ''}${observedAtFact}`
+          })
+        appendRunIssue({
+          book:
+            deferredProtectedWrites.length === 1
+              ? deferredProtectedWrites[0]?.pageTitle ?? 'Auto Sync deferred writes'
+              : 'Auto Sync deferred writes',
+          category: 'warning',
+          summary:
+            'Automatic sync skipped active pages so the current page and recently active pages are not rewritten mid-session.',
+          suggestedAction:
+            'No manual action is required. These pages were queued for a later retry after they are no longer active.',
+          message: `Auto Sync deferred ${deferredProtectedWrites.length} page(s) because they are currently open or recently active.`,
+          debugFacts: [
+            `deferredWriteCount=${deferredProtectedWrites.length}`,
+            ...deferredSummary,
+          ],
+          namespacePrefix,
+        })
+      }
+
       logReadwiseInfo(logPrefix, 'write timing diagnostics', {
         pagesWrittenAttempted: previewBooks.length,
         pagesProcessed: loadStats.pagesProcessed,
         writePagesDurationMs,
+        deferredProtectedWrites: deferredProtectedWrites.length,
         averagePageWriteDurationMs:
           previewBooks.length > 0
             ? Math.round(writePagesDurationMs / previewBooks.length)
@@ -5488,7 +6299,8 @@ export const ReadwiseContainer = () => {
               ...previous,
               completedAt: new Date().toISOString(),
               processedItems: loadStats.pagesProcessed,
-              issuesCount: syncErrorsForRun.length,
+              issuesCount:
+                syncErrorsForRun.length + (deferredProtectedWrites.length > 0 ? 1 : 0),
               stats: {
                 highlightPagesScanned: loadStats.highlightPagesScanned,
                 highlightsScanned: loadStats.highlightsScanned,
@@ -5508,14 +6320,38 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         syncErrorsForRun.length > 0
           ? `${statusPrefix}: completed with ${syncErrorsForRun.length} error(s).`
-          : `${statusPrefix}: complete. ${previewBooks.length} page(s) written to ${namespacePrefix}.${debugHighlightPageLimit != null ? ` Debug cap ${debugHighlightPageLimit} was active.` : ''}${staleDeletionSuffix}${incompleteSnapshotSuffix}`,
+          : deferredProtectedWrites.length > 0
+            ? `${statusPrefix}: complete. ${loadStats.pagesProcessed} page(s) written to ${namespacePrefix}; ${deferredProtectedWrites.length} active page(s) were deferred for a later retry.${debugHighlightPageLimit != null ? ` Debug cap ${debugHighlightPageLimit} was active.` : ''}${staleDeletionSuffix}${incompleteSnapshotSuffix}`
+            : `${statusPrefix}: complete. ${loadStats.pagesProcessed} page(s) written to ${namespacePrefix}.${debugHighlightPageLimit != null ? ` Debug cap ${debugHighlightPageLimit} was active.` : ''}${staleDeletionSuffix}${incompleteSnapshotSuffix}`,
       )
+      if (runTrigger === 'auto') {
+        if (syncErrorsForRun.length > 0) {
+          await logseq.UI.showMsg(
+            `Auto Sync completed with ${syncErrorsForRun.length} error(s).`,
+            'warning',
+          )
+        } else if (deferredProtectedWrites.length > 0) {
+          await logseq.UI.showMsg(
+            loadStats.pagesProcessed > 0
+              ? `Auto Sync updated ${loadStats.pagesProcessed} page(s) and deferred ${deferredProtectedWrites.length} active page(s).`
+              : `Auto Sync deferred ${deferredProtectedWrites.length} active page(s).`,
+            'warning',
+          )
+        } else if (loadStats.pagesProcessed > 0) {
+          await logseq.UI.showMsg(
+            `Auto Sync updated ${loadStats.pagesProcessed} page(s).`,
+            'success',
+          )
+        }
+      }
       logReadwiseInfo(logPrefix, 'sync completed', {
         mode,
         graphId: graphContext.graphId,
         namespacePrefix,
         processedBooks: previewBooks.length,
+        pagesProcessed: loadStats.pagesProcessed,
         errorCount: syncErrorsForRun.length,
+        deferredProtectedWrites: deferredProtectedWrites.length,
       })
     } catch (err: unknown) {
       if (isReaderPreviewLoadResumeError(err)) {
@@ -5569,6 +6405,7 @@ export const ReadwiseContainer = () => {
             statusPrefix,
             syncHeaderMode,
             mode,
+            runTrigger,
             resumeState: err.resumeState,
             automaticResumeAttempt: automaticResumeAttempt + 1,
             runStartedAtMs: runStartedAt,
@@ -5586,6 +6423,7 @@ export const ReadwiseContainer = () => {
               statusPrefix,
               syncHeaderMode,
               mode,
+              runTrigger,
               resumeState: err.resumeState,
               runStartedAtMs: runStartedAt,
             }),
@@ -5649,6 +6487,12 @@ export const ReadwiseContainer = () => {
           ? `${statusPrefix} failed: ${describeUnknownError(err)}. Retry will resume ${describeReaderResumeTarget(err.resumeState)}.`
           : `${statusPrefix} failed: ${describeUnknownError(err)}`,
       )
+      if (runTrigger === 'auto') {
+        await logseq.UI.showMsg(
+          `Auto Sync failed: ${describeUnknownError(err)}`,
+          'warning',
+        )
+      }
     }
   }
 

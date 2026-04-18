@@ -10,6 +10,30 @@ export const settingsSchema: SettingSchemaDesc[] = [
     default: '',
   },
   {
+    key: 'automationSection',
+    type: 'heading',
+    title: 'Automation',
+    description:
+      'Auto Sync only becomes active after one successful manual Incremental Sync or Full Refresh establishes a saved cursor.',
+    default: null,
+  },
+  {
+    key: 'autoSyncEnabled',
+    type: 'boolean',
+    title: 'Enable Auto Sync',
+    description:
+      'Default on. The plugin checks whether Incremental Sync should run automatically, but only after a valid saved cursor exists.',
+    default: true,
+  },
+  {
+    key: 'syncIntervalMinutes',
+    type: 'number',
+    title: 'Auto Sync Interval (minutes)',
+    description:
+      'How often the plugin checks whether an automatic Incremental Sync should run. Default 15.',
+    default: 15,
+  },
+  {
     key: 'debugSection',
     type: 'heading',
     title: 'Debug',

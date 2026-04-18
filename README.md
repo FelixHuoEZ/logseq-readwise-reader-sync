@@ -11,11 +11,12 @@ This project is published as an independent plugin release line. If it is publis
 - Managed page identity is `rw-reader-id`, not page title alone.
 - The plugin records the current Reader sync cursor and latest formal sync summary in `Readwise Sync State`.
 - Legacy checkpoint state, if needed, lives in `Readwise Legacy Sync State`.
-- Planned automatic-sync guardrails are documented in [docs/auto-sync-guardrails-spec.md](./docs/auto-sync-guardrails-spec.md). That document is a product spec, not a statement that the full behavior is already implemented.
+- Auto Sync is available with saved-cursor gating, suspicious-run confirmation, and active-page write deferral. The guardrail rationale is documented in [docs/auto-sync-guardrails-spec.md](./docs/auto-sync-guardrails-spec.md).
 
 ## Features
 
 - Reader v3 incremental sync with explicit progress, ETA, and structured logging
+- Optional Auto Sync for day-to-day incremental runs, with confirmation before suspiciously large page rewrites
 - Manual `Full Refresh` for whole-library rebuilds
 - `Refresh Local Snapshot Only` for rebuilding the local full-library snapshot without rewriting managed pages
 - Current-page tools for `Rebuild Current Page From Cache` and `Refresh Current Page Metadata`
@@ -29,7 +30,7 @@ This project is published as an independent plugin release line. If it is publis
 
 ## Known Tradeoff
 
-`Incremental Sync` uses the saved Reader cursor and only scans changed highlights. `Full Refresh` still scans the full Reader highlight library and can take minutes on large libraries. `Refresh Local Snapshot Only` runs the full highlight scan too, but stops after refreshing the local snapshot and does not rewrite managed pages. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates a full-library scan, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
+`Incremental Sync` uses the saved Reader cursor and only scans changed highlights. `Full Refresh` still scans the full Reader highlight library and can take minutes on large libraries. `Refresh Local Snapshot Only` runs the full highlight scan too, but stops after refreshing the local snapshot and does not rewrite managed pages. Auto Sync only runs `Incremental Sync`; it never promotes itself to `Full Refresh` or snapshot-only maintenance work. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates a full-library scan, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
 
 ## Sync Scope Difference From The Official Plugin
 
@@ -49,7 +50,11 @@ This project is published as an independent plugin release line. If it is publis
 
 1. Open plugin settings.
 2. Paste your Readwise access token from [readwise.io/access_token](https://readwise.io/access_token).
-3. Leave the Debug section at defaults for normal use:
+3. Leave the Automation section at defaults for normal use:
+   - `Enable Auto Sync = on`
+   - `Auto Sync Interval (minutes) = 15`
+4. Auto Sync only arms itself after one successful manual `Incremental Sync` or `Full Refresh` has established a saved cursor.
+5. Leave the Debug section at defaults for normal use:
    - `Log Level = warn`
    - `Reader Full Scan Target Documents = 20`
    - `Reader Full Scan Debug Highlight Page Limit = 0`
@@ -61,12 +66,14 @@ Do not run this project and another Readwise Logseq plugin against the same grap
 1. Open the plugin panel.
 2. Click `Incremental Sync` for the normal day-to-day path.
 3. Use `Full Refresh` when you need a fresh whole-library rebuild.
-4. Open `Maintenance Tools > Snapshots` and use `Refresh Local Snapshot Only` when you want a fresh local snapshot without rewriting pages.
-5. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
-6. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
-7. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
-8. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
-9. Wait for the plugin to:
+4. Leave Auto Sync enabled if you want the plugin to periodically check whether a safe automatic `Incremental Sync` should run.
+5. If Auto Sync detects a suspiciously large rewrite set, review the confirmation dialog before allowing page writes to continue.
+6. Open `Maintenance Tools > Snapshots` and use `Refresh Local Snapshot Only` when you want a fresh local snapshot without rewriting pages.
+7. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
+8. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
+9. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
+10. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
+11. Wait for the plugin to:
    - scan Reader highlights or load the cached highlight snapshot
    - group them by parent document
    - fetch the target parent documents
@@ -104,6 +111,12 @@ Maintenance tools are grouped by purpose:
   - session test pages, preview pages, and restore/clear helpers
 - `Debug`
   - short-lived debug sync pages and cleanup
+
+Auto Sync itself is configured in plugin settings, not inside `Maintenance Tools`. Its protection flow still matters during debugging:
+
+- automatic runs only arm after a saved cursor exists
+- suspiciously large automatic rewrite sets pause before page writes and ask for confirmation
+- automatic writes to pages that are open or recently active are deferred instead of being forced immediately
 
 Debug settings affect different phases:
 

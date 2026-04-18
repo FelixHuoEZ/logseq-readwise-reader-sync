@@ -524,10 +524,10 @@ export const loadReaderPreviewBooks = async (
     seenHighlightIds: [...seenHighlightIds],
     latestHighlightByParent: [...latestHighlightByParent.entries()],
     totalHighlights,
-    pageNumber,
-    pageCursor,
-    initialTotalPages,
-    initialTotalResults,
+    pageNumber: extra.pageNumber ?? pageNumber,
+    pageCursor: extra.pageCursor ?? pageCursor,
+    initialTotalPages: extra.initialTotalPages ?? initialTotalPages,
+    initialTotalResults: extra.initialTotalResults ?? initialTotalResults,
     fetchHighlightsDurationMs: Date.now() - fetchHighlightsStartedAt,
     selectedParentIds: extra.selectedParentIds ?? [],
     previewBooks: extra.previewBooks ?? [],
@@ -750,14 +750,6 @@ export const loadReaderPreviewBooks = async (
 
       seenNoteIds.add(noteDocument.id)
 
-      if (
-        typeof noteDocument.updated_at === 'string' &&
-        (latestHighlightUpdatedAt == null ||
-          noteDocument.updated_at > latestHighlightUpdatedAt)
-      ) {
-        latestHighlightUpdatedAt = noteDocument.updated_at
-      }
-
       const text = getDocumentContentText(noteDocument)
       if (text.length === 0) return false
 
@@ -778,20 +770,37 @@ export const loadReaderPreviewBooks = async (
 
       const nextPageNumber = pageNumber + 1
       const pageStartedAt = Date.now()
-      const response = await listReaderDocumentsWithRetry(
-        client,
-        {
-          category: 'note',
-          limit: 100,
-          pageCursor: notePageCursor ?? undefined,
-          updatedAfter: options.updatedAfter,
-        },
-        {
-          logPrefix: options.logPrefix,
-          stage: 'fetch-highlights',
-          pageNumber: nextPageNumber,
-        },
-      )
+      let response: Awaited<ReturnType<ReadwiseClient['listReaderDocuments']>>
+
+      try {
+        response = await listReaderDocumentsWithRetry(
+          client,
+          {
+            category: 'note',
+            limit: 100,
+            pageCursor: notePageCursor ?? undefined,
+            updatedAfter: options.updatedAfter,
+          },
+          {
+            logPrefix: options.logPrefix,
+            stage: 'fetch-highlights',
+            pageNumber: nextPageNumber,
+          },
+        )
+      } catch (error) {
+        throw new ReaderPreviewLoadResumeError(
+          describeUnknownError(error),
+          buildResumeState('fetch-highlights', {
+            // Note-only failures should retry from a clean fetch-highlights pass.
+            // This keeps the existing resume model simple and avoids advancing
+            // note state without a stable serialized note-page cursor.
+            pageNumber: 0,
+            pageCursor: null,
+            initialTotalPages: null,
+            initialTotalResults: null,
+          }),
+        )
+      }
 
       pageNumber = nextPageNumber
 

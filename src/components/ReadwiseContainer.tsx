@@ -95,6 +95,7 @@ import {
 type ReaderSyncEtaPhase =
   | 'fetch-highlights'
   | 'fetch-notes'
+  | 'refresh-snapshot'
   | 'fetch-documents'
   | 'write-pages'
 type ReaderSyncMode = ReaderPreviewLoadMode
@@ -477,7 +478,11 @@ export const ReadwiseContainer = () => {
       }
     }
 
-    if (phase === 'fetch-highlights' || phase === 'fetch-notes') {
+    if (
+      phase === 'fetch-highlights' ||
+      phase === 'fetch-notes' ||
+      phase === 'refresh-snapshot'
+    ) {
       const adaptiveHorizonMs =
         rawEtaMs == null
           ? 10_000
@@ -5485,8 +5490,8 @@ export const ReadwiseContainer = () => {
                     readerSyncUpdatedAfter,
                   )}, identified ${uniqueParents} changed parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`
                 : mode === 'snapshot-only-refresh'
-                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s), and refreshed the local snapshot from ${progress.totalHighlights ?? 0} highlight(s). No page writes will run.`
-                : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`,
+                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s) and identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s). Preparing the local snapshot refresh. No page writes will run.`
+                  : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`,
             )
             return
           }
@@ -5510,8 +5515,30 @@ export const ReadwiseContainer = () => {
                     readerSyncUpdatedAfter,
                   )}, attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} changed parent document(s).`
                 : mode === 'snapshot-only-refresh'
-                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s), attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s), and refreshed the local snapshot. No page writes will run.`
+                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s) and attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s). Finalizing the local snapshot refresh. No page writes will run.`
                   : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s), attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s).`,
+            )
+            return
+          }
+
+          if (progress.phase === 'refresh-snapshot') {
+            const uniqueParents = progress.uniqueParents ?? 0
+            const completed = progress.completed ?? 0
+            const total = progress.total ?? 0
+            setStatus('fetching')
+            setCurrent(completed)
+            setTotal(total)
+            setCurrentBook('')
+            updateReaderSyncEta(
+              'refresh-snapshot',
+              'snapshot refresh',
+              completed,
+              total,
+            )
+            setStatusMessage(
+              mode === 'snapshot-only-refresh'
+                ? `${statusPrefix}: attaching ${progress.totalNotes ?? 0} comment(s) back onto ${uniqueParents} parent document(s) and refreshing the local snapshot... ${completed} / ${total}. No page writes will run.`
+                : `${statusPrefix}: attaching ${progress.totalNotes ?? 0} comment(s) back onto ${uniqueParents} parent document(s) and finalizing the Reader highlight cache... ${completed} / ${total}.`,
             )
             return
           }
@@ -6688,6 +6715,8 @@ export const ReadwiseContainer = () => {
       : status === 'fetching'
         ? etaSnapshot?.phase === 'fetch-notes'
           ? 'Scanning Reader notes'
+          : etaSnapshot?.phase === 'refresh-snapshot'
+            ? 'Refreshing local snapshot'
           : 'Scanning Reader highlights'
         : status === 'syncing'
           ? 'Rebuilding managed pages'
@@ -6697,14 +6726,14 @@ export const ReadwiseContainer = () => {
               ? 'Reader sync completed'
               : 'Reader sync stopped'
   const statusPhaseLabel =
-    etaSnapshot?.label ??
-    (status === 'fetching'
-      ? 'remote scan'
-      : status === 'syncing'
-        ? 'page writes'
-        : status === 'completed'
-          ? 'latest run'
-          : '')
+    status === 'completed'
+      ? ''
+      : etaSnapshot?.label ??
+        (status === 'fetching'
+          ? 'remote scan'
+          : status === 'syncing'
+            ? 'page writes'
+            : '')
   const statusDetail =
     status === 'idle'
       ? statusMessage || idleCursorSummary
@@ -6715,6 +6744,8 @@ export const ReadwiseContainer = () => {
       : status === 'fetching'
         ? etaSnapshot?.phase === 'fetch-notes'
           ? 'Scanning Reader note pages and attaching comments back onto highlights.'
+          : etaSnapshot?.phase === 'refresh-snapshot'
+            ? 'Attaching Reader notes back onto highlights and refreshing the local snapshot.'
           : 'Scanning Reader highlight pages and grouping by parent document.'
         : ''
   const activeHelpPopover = pinnedHelpPopover ?? hoveredHelpPopover
@@ -6769,8 +6800,10 @@ export const ReadwiseContainer = () => {
         : ''
   const progressPercentLabel = total > 0 ? `${progressPct}%` : ''
   const progressEtaLabel =
-    liveEstimatedRemainingMs != null ? `ETA ${formatDuration(liveEstimatedRemainingMs)}` : ''
-  const progressPhaseLabel = etaSnapshot?.label ?? ''
+    status === 'completed' || liveEstimatedRemainingMs == null
+      ? ''
+      : `ETA ${formatDuration(liveEstimatedRemainingMs)}`
+  const progressPhaseLabel = status === 'completed' ? '' : etaSnapshot?.label ?? ''
   const statusPanelClassName = [
     'rw-status-panel',
     `rw-status-panel-${status}`,

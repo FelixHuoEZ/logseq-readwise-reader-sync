@@ -84,7 +84,11 @@ export interface ReaderPreviewLoadResult {
 }
 
 export interface LoadReaderPreviewBooksProgress {
-  phase: 'fetch-highlights' | 'fetch-notes' | 'fetch-documents'
+  phase:
+    | 'fetch-highlights'
+    | 'fetch-notes'
+    | 'refresh-snapshot'
+    | 'fetch-documents'
   pageNumber?: number
   totalPages?: number
   totalResults?: number
@@ -892,6 +896,23 @@ export const loadReaderPreviewBooks = async (
       (highlightId) => !highlightsById.has(highlightId),
     )
 
+    let unresolvedNoteParentHighlightIds = noteParentHighlightIds
+    let refreshSnapshotStepTotal = 1 + (previewCache ? 1 : 0)
+    let refreshSnapshotStepCompleted = 0
+
+    const emitRefreshSnapshotProgress = () => {
+      options.onProgress?.({
+        phase: 'refresh-snapshot',
+        completed: refreshSnapshotStepCompleted,
+        total: refreshSnapshotStepTotal,
+        uniqueParents: targetParentIds.length,
+        totalHighlights,
+        totalNotes,
+      })
+    }
+
+    emitRefreshSnapshotProgress()
+
     if (noteParentHighlightIds.length > 0 && previewCache) {
       try {
         const cachedHighlights = await previewCache.getCachedHighlightsByIds(
@@ -913,13 +934,18 @@ export const loadReaderPreviewBooks = async (
           )
         }
       }
+
+      unresolvedNoteParentHighlightIds = [...noteDocumentsByHighlightId.keys()].filter(
+        (highlightId) => !highlightsById.has(highlightId),
+      )
     }
 
-    const unresolvedNoteParentHighlightIds = [...noteDocumentsByHighlightId.keys()].filter(
-      (highlightId) => !highlightsById.has(highlightId),
-    )
+    refreshSnapshotStepTotal =
+      1 + unresolvedNoteParentHighlightIds.length + (previewCache ? 1 : 0)
+    refreshSnapshotStepCompleted += 1
+    emitRefreshSnapshotProgress()
 
-    for (const highlightId of unresolvedNoteParentHighlightIds) {
+    for (const [index, highlightId] of unresolvedNoteParentHighlightIds.entries()) {
       try {
         const response = await listReaderDocumentsWithRetry(
           client,
@@ -949,6 +975,12 @@ export const loadReaderPreviewBooks = async (
           )
         }
       }
+
+      refreshSnapshotStepCompleted = Math.min(
+        refreshSnapshotStepTotal,
+        1 + index + 1,
+      )
+      emitRefreshSnapshotProgress()
     }
 
     let mergedHighlightNoteCount = 0
@@ -1017,6 +1049,9 @@ export const loadReaderPreviewBooks = async (
           })
         }
       }
+
+      refreshSnapshotStepCompleted = refreshSnapshotStepTotal
+      emitRefreshSnapshotProgress()
     }
   }
 

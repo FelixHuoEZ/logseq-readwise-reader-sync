@@ -63,7 +63,7 @@ export const settingsSchema: SettingSchemaDesc[] = [
     type: 'number',
     title: 'Reader Full Scan Debug Highlight Page Limit',
     description:
-      'Debug-only cap for Reader highlight pages scanned before grouping by parent_id. Roughly 100 highlights per page. Keep 0 for normal use.',
+      'Debug-only cap for Reader highlight and note pages scanned before grouping by parent_id. Roughly 100 Reader items per page. Keep 0 for normal use.',
     default: 0,
   },
 ]

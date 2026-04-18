@@ -92,7 +92,11 @@ import {
   summarizeRunIssueCategories,
 } from './run-issues'
 
-type ReaderSyncEtaPhase = 'fetch-highlights' | 'fetch-documents' | 'write-pages'
+type ReaderSyncEtaPhase =
+  | 'fetch-highlights'
+  | 'fetch-notes'
+  | 'fetch-documents'
+  | 'write-pages'
 type ReaderSyncMode = ReaderPreviewLoadMode
 type ReaderSyncRunTrigger = 'manual' | 'auto'
 
@@ -473,7 +477,7 @@ export const ReadwiseContainer = () => {
       }
     }
 
-    if (phase === 'fetch-highlights') {
+    if (phase === 'fetch-highlights' || phase === 'fetch-notes') {
       const adaptiveHorizonMs =
         rawEtaMs == null
           ? 10_000
@@ -5487,6 +5491,31 @@ export const ReadwiseContainer = () => {
             return
           }
 
+          if (progress.phase === 'fetch-notes') {
+            const uniqueParents = progress.uniqueParents ?? 0
+            const totalPages = progress.totalPages ?? progress.pageNumber ?? 0
+            setStatus('fetching')
+            setCurrent(progress.pageNumber ?? 0)
+            setTotal(totalPages)
+            setCurrentBook('')
+            updateReaderSyncEta(
+              'fetch-notes',
+              'note scan',
+              progress.pageNumber ?? 0,
+              totalPages,
+            )
+            setStatusMessage(
+              mode === 'incremental-window'
+                ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s) ${buildReaderSyncUpdatedAfterSummary(
+                    readerSyncUpdatedAfter,
+                  )}, attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} changed parent document(s).`
+                : mode === 'snapshot-only-refresh'
+                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s), attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s), and refreshed the local snapshot. No page writes will run.`
+                  : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s), attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s).`,
+            )
+            return
+          }
+
           setStatus('syncing')
           setCurrent(progress.completed ?? 0)
           setTotal(progress.total ?? 0)
@@ -6657,7 +6686,9 @@ export const ReadwiseContainer = () => {
     status === 'idle'
       ? 'Last sync cursor'
       : status === 'fetching'
-        ? 'Scanning Reader highlights'
+        ? etaSnapshot?.phase === 'fetch-notes'
+          ? 'Scanning Reader notes'
+          : 'Scanning Reader highlights'
         : status === 'syncing'
           ? 'Rebuilding managed pages'
           : status === 'completed' && errors.length > 0
@@ -6668,7 +6699,7 @@ export const ReadwiseContainer = () => {
   const statusPhaseLabel =
     etaSnapshot?.label ??
     (status === 'fetching'
-      ? 'highlight scan'
+      ? 'remote scan'
       : status === 'syncing'
         ? 'page writes'
         : status === 'completed'
@@ -6682,7 +6713,9 @@ export const ReadwiseContainer = () => {
     status === 'syncing'
       ? currentBook
       : status === 'fetching'
-        ? 'Scanning Reader highlight pages and grouping by parent document.'
+        ? etaSnapshot?.phase === 'fetch-notes'
+          ? 'Scanning Reader note pages and attaching comments back onto highlights.'
+          : 'Scanning Reader highlight pages and grouping by parent document.'
         : ''
   const activeHelpPopover = pinnedHelpPopover ?? hoveredHelpPopover
   const shortManagedPagesSummary =
@@ -6697,19 +6730,19 @@ export const ReadwiseContainer = () => {
   const highlightScanHelpNotes =
     configuredReaderDebugHighlightPageLimit > 0
       ? [
-          'Debug cap active for any remote Reader highlight scan.',
+          'Debug cap active for remote Reader highlight and note scans.',
           'Full Refresh stays intentionally incomplete while the cap is on.',
           'A truncated run does not refresh the local cached snapshot.',
-          'Roughly 100 highlights arrive per remote page.',
+          'Roughly 100 Reader items arrive per remote page.',
         ]
       : [
-          'Incremental Sync scans changed Reader highlights only.',
-          'Full Refresh scans the full Reader highlight library.',
+          'Incremental Sync scans changed Reader highlights and notes.',
+          'Full Refresh scans the full Reader highlight and note library.',
         ]
   const librarySyncHelpNotes = [
-    'Incremental Sync pulls changed Reader highlights, refreshes parent metadata for matched documents, and rewrites managed pages in ReadwiseHighlights/<title>.',
-    'Full Refresh rescans the full Reader highlight library, refreshes parent metadata, and replaces the local full-library snapshot used for future rebuilds and deletion calibration.',
-    'Full Refresh uses the Debug settings. A truncated highlight scan does not refresh the local cached snapshot.',
+    'Incremental Sync pulls changed Reader highlights and notes, refreshes parent metadata for matched documents, and rewrites managed pages in ReadwiseHighlights/<title>.',
+    'Full Refresh rescans the full Reader highlight and note library, refreshes parent metadata, and replaces the local full-library snapshot used for future rebuilds and deletion calibration.',
+    'Full Refresh uses the Debug settings. A truncated remote scan does not refresh the local cached snapshot.',
   ]
   const currentPageHelpNotes = [
     'Rebuild Current Page From Cache uses rw-reader-id, reads the cached highlight snapshot for that parent, and rewrites only the current managed page.',
@@ -6720,14 +6753,14 @@ export const ReadwiseContainer = () => {
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
-    'Refresh Local Snapshot Only rescans the full Reader highlight library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
+    'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
     'Preview Current Page Legacy ID Migration scans Readwise managed pages for UUID mappings, then previews only the current page or whiteboard rewrites before apply.',
   ]
   const highlightScanDetailLabel =
     configuredReaderDebugHighlightPageLimit > 0
-      ? 'Debug cap active for remote highlight scans.'
-      : 'Incremental scans changes; Full Refresh scans the full library.'
+      ? 'Debug cap active for remote highlight and note scans.'
+      : 'Incremental scans changes; Full Refresh scans the full Reader library.'
   const progressCountLabel =
     total > 0
       ? `${current} / ${total}`
@@ -6964,10 +6997,10 @@ export const ReadwiseContainer = () => {
               {showHighlightScanSummary && (
                 <div className="rw-summary-card">
                   <div className="rw-summary-heading">
-                    <div className="rw-summary-label">Highlight scan</div>
+                    <div className="rw-summary-label">Remote scan</div>
                     {renderHelpPanel(
                       'highlight-scan',
-                      'Highlight Scan',
+                      'Remote Scan',
                       highlightScanHelpNotes,
                     )}
                   </div>

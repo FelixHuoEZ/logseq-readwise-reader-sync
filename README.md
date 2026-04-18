@@ -11,6 +11,7 @@ This project is published as an independent plugin release line. If it is publis
 - Managed page identity is `rw-reader-id`, not page title alone.
 - The plugin records the current Reader sync cursor and latest formal sync summary in `Readwise Sync State`.
 - Legacy checkpoint state, if needed, lives in `Readwise Legacy Sync State`.
+- Planned automatic-sync guardrails are documented in [docs/auto-sync-guardrails-spec.md](./docs/auto-sync-guardrails-spec.md). That document is a product spec, not a statement that the full behavior is already implemented.
 
 ## Features
 

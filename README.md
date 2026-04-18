@@ -127,6 +127,8 @@ Use the highlight page limit only for short debug runs. Set it back to `0` for r
 
 See [docs/repair-managed-pages-spec.md](./docs/repair-managed-pages-spec.md) for the detailed recovery rules, analyzed failure classes, and the guardrails for these repair flows.
 
+For release-time validation, see [docs/manual-regression-checklist.md](./docs/manual-regression-checklist.md).
+
 ## Development
 
 ```bash

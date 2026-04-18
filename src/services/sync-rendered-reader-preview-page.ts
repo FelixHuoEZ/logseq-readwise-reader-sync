@@ -39,6 +39,13 @@ const toYmd = (value: string | null | undefined) => {
 const normalizeTagNames = (value: Record<string, unknown> | null | undefined) =>
   Object.keys(value ?? {}).filter((name) => name.trim().length > 0)
 
+const normalizeOptionalText = (value: string | null | undefined) => {
+  if (typeof value !== 'string') return null
+
+  const normalized = value.trim()
+  return normalized.length > 0 ? normalized : null
+}
+
 const buildMetadataEntries = (
   previewBook: ReaderPreviewBook,
   syncDate: string,
@@ -69,14 +76,12 @@ const buildSemanticHighlights = (
     highlightId: highlight.id,
     uuid: computeCompatibleHighlightUuid(highlight.url),
     text: highlight.content?.trim() ?? '',
+    imageUrl: normalizeOptionalText(highlight.image_url),
     locationLabel: highlight.url ? 'View Highlight' : null,
     locationUrl: highlight.url ?? null,
     createdDate: toYmd(highlight.created_at) ?? '',
     tags: normalizeTagNames(highlight.tags),
-    note:
-      typeof highlight.notes === 'string' && highlight.notes.trim().length > 0
-        ? highlight.notes.trim()
-        : null,
+    note: normalizeOptionalText(highlight.notes),
   }))
 
 const buildReaderPreviewSemanticPage = (

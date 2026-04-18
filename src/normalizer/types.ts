@@ -10,6 +10,7 @@ export interface NormalizedHighlight {
   bookId: number
   isDeleted: boolean
   text: string
+  imageUrl: string | null
   note: string | null
   location: number | null
   locationType: string | null

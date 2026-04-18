@@ -7,6 +7,11 @@ import {
 } from '../logging'
 import type { ReaderDocument } from '../types'
 import type { ReadwiseClient } from './index'
+import {
+  decideReaderDocumentHighlightDetailsStrategy,
+  tryEnrichReaderDocumentHighlightsViaMcp,
+  reuseCachedReaderDocumentHighlightDetails,
+} from './reader-document-highlights'
 
 export type ReaderPreviewLoadMode =
   | 'full-library-scan'
@@ -36,6 +41,12 @@ export interface ReaderPreviewLoadStats {
   completeHighlightSnapshotRefreshed: boolean
   parentMetadataCacheHits: number
   parentMetadataRemoteFetches: number
+  documentHighlightDetailCalls: number
+  documentHighlightDetailSkippedNoParentMetadata: number
+  documentHighlightDetailSkippedNoRichMedia: number
+  documentHighlightDetailSkippedVideo: number
+  documentHighlightDetailSkippedResolved: number
+  documentHighlightDetailMissingInReader: number
   fetchHighlightsDurationMs: number
   fetchDocumentsDurationMs: number
 }
@@ -108,6 +119,7 @@ export interface LoadReaderPreviewBooksOptions {
   resumeState?: ReaderPreviewLoadResumeState
   previewCache?: GraphReaderSyncCacheV1 | null
   parentMetadataMode?: ReaderParentMetadataMode
+  readerAuthToken?: string | null
   logPrefix?: string
   onProgress?: (progress: LoadReaderPreviewBooksProgress) => void
 }
@@ -116,6 +128,7 @@ export interface LoadReaderPreviewBooksByParentIdsOptions {
   parentIds: readonly string[]
   previewCache: GraphReaderSyncCacheV1
   parentMetadataMode?: ReaderParentMetadataMode
+  readerAuthToken?: string | null
   logPrefix?: string
   highlightCoverage?: ReaderPreviewLoadMode
 }
@@ -125,6 +138,11 @@ export interface LoadReaderPreviewBooksByParentIdsResult {
   unresolvedParentIds: string[]
   parentMetadataCacheHits: number
   parentMetadataRemoteFetches: number
+  documentHighlightDetailCalls: number
+  documentHighlightDetailSkippedNoRichMedia: number
+  documentHighlightDetailSkippedVideo: number
+  documentHighlightDetailSkippedResolved: number
+  documentHighlightDetailMissingInReader: number
   fetchDocumentsDurationMs: number
 }
 
@@ -294,6 +312,11 @@ export const loadReaderPreviewBooksByParentIds = async (
       unresolvedParentIds: [],
       parentMetadataCacheHits: 0,
       parentMetadataRemoteFetches: 0,
+      documentHighlightDetailCalls: 0,
+      documentHighlightDetailSkippedNoRichMedia: 0,
+      documentHighlightDetailSkippedVideo: 0,
+      documentHighlightDetailSkippedResolved: 0,
+      documentHighlightDetailMissingInReader: 0,
       fetchDocumentsDurationMs: 0,
     }
   }
@@ -303,8 +326,14 @@ export const loadReaderPreviewBooksByParentIds = async (
   const unresolvedParentIds: string[] = []
   let parentMetadataCacheHits = 0
   let parentMetadataRemoteFetches = 0
+  let documentHighlightDetailCalls = 0
+  let documentHighlightDetailSkippedNoRichMedia = 0
+  let documentHighlightDetailSkippedVideo = 0
+  let documentHighlightDetailSkippedResolved = 0
+  let documentHighlightDetailMissingInReader = 0
   let highlightsByParent = new Map<string, ReaderDocument[]>()
   let cachedParentDocuments = new Map<string, ReaderDocument>()
+  const enrichedHighlightsToPersist: ReaderDocument[] = []
 
   try {
     highlightsByParent = await options.previewCache.loadGroupedHighlightsByParent(parentIds)
@@ -325,6 +354,11 @@ export const loadReaderPreviewBooksByParentIds = async (
       unresolvedParentIds: parentIds,
       parentMetadataCacheHits,
       parentMetadataRemoteFetches,
+      documentHighlightDetailCalls,
+      documentHighlightDetailSkippedNoRichMedia,
+      documentHighlightDetailSkippedVideo,
+      documentHighlightDetailSkippedResolved,
+      documentHighlightDetailMissingInReader,
       fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
     }
   }
@@ -387,6 +421,7 @@ export const loadReaderPreviewBooksByParentIds = async (
           {
             id: parentId,
             limit: 1,
+            withHtmlContent: true,
           },
           {
             logPrefix: options.logPrefix,
@@ -424,11 +459,64 @@ export const loadReaderPreviewBooksByParentIds = async (
       continue
     }
 
-    books.push({
+    const enrichedHighlightsResult = await tryEnrichReaderDocumentHighlightsViaMcp({
+      token: options.readerAuthToken,
       document,
       highlights,
+      logPrefix: options.logPrefix,
+    })
+
+    if (enrichedHighlightsResult.attempted) {
+      documentHighlightDetailCalls += 1
+    }
+    if (enrichedHighlightsResult.missingInReader) {
+      documentHighlightDetailMissingInReader += 1
+    }
+    switch (enrichedHighlightsResult.skippedReason) {
+      case 'video':
+        documentHighlightDetailSkippedVideo += 1
+        break
+      case 'no_rich_media':
+        documentHighlightDetailSkippedNoRichMedia += 1
+        break
+      case 'already_resolved':
+        documentHighlightDetailSkippedResolved += 1
+        break
+      default:
+        break
+    }
+
+    const resolvedHighlights = [...enrichedHighlightsResult.highlights].sort(
+      sortByCreatedAtAscending,
+    )
+
+    if (enrichedHighlightsResult.changedCount > 0) {
+      highlightsByParent.set(parentId, resolvedHighlights)
+      enrichedHighlightsToPersist.push(...resolvedHighlights)
+    }
+
+    books.push({
+      document,
+      highlights: resolvedHighlights,
       highlightCoverage: options.highlightCoverage ?? 'cached-full-rebuild',
     })
+  }
+
+  if (enrichedHighlightsToPersist.length > 0) {
+    try {
+      await options.previewCache.putHighlights(enrichedHighlightsToPersist)
+    } catch (error) {
+      if (options.logPrefix) {
+        logReadwiseWarn(
+          options.logPrefix,
+          'failed to persist enriched Reader highlights for queued retry pages',
+          {
+            highlightCount: enrichedHighlightsToPersist.length,
+            formattedError: describeUnknownError(error),
+          },
+        )
+      }
+    }
   }
 
   if (fetchedParentDocuments.length > 0) {
@@ -453,6 +541,11 @@ export const loadReaderPreviewBooksByParentIds = async (
     unresolvedParentIds,
     parentMetadataCacheHits,
     parentMetadataRemoteFetches,
+    documentHighlightDetailCalls,
+    documentHighlightDetailSkippedNoRichMedia,
+    documentHighlightDetailSkippedVideo,
+    documentHighlightDetailSkippedResolved,
+    documentHighlightDetailMissingInReader,
     fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
   }
 }
@@ -513,6 +606,12 @@ export const loadReaderPreviewBooks = async (
   let completeHighlightSnapshotRefreshed = false
   let parentMetadataCacheHits = 0
   let parentMetadataRemoteFetches = 0
+  let documentHighlightDetailCalls = 0
+  let documentHighlightDetailSkippedNoParentMetadata = 0
+  let documentHighlightDetailSkippedNoRichMedia = 0
+  let documentHighlightDetailSkippedVideo = 0
+  let documentHighlightDetailSkippedResolved = 0
+  let documentHighlightDetailMissingInReader = 0
   const fetchHighlightsStartedAt =
     Date.now() - (resumeState?.fetchHighlightsDurationMs ?? 0)
 
@@ -671,6 +770,7 @@ export const loadReaderPreviewBooks = async (
             limit: 100,
             pageCursor: highlightPageCursor ?? undefined,
             updatedAfter: options.updatedAfter,
+            withHtmlContent: true,
           },
           {
             logPrefix: options.logPrefix,
@@ -952,6 +1052,7 @@ export const loadReaderPreviewBooks = async (
           {
             id: highlightId,
             limit: 1,
+            withHtmlContent: true,
           },
           {
             logPrefix: options.logPrefix,
@@ -1007,6 +1108,176 @@ export const loadReaderPreviewBooks = async (
         mergedHighlightNoteCount,
         unresolvedHighlightNoteCount,
       })
+    }
+
+    if (
+      mode === 'snapshot-only-refresh' &&
+      typeof options.readerAuthToken === 'string' &&
+      options.readerAuthToken.trim().length > 0 &&
+      targetParentIds.length > 0
+    ) {
+      let cachedHighlightsById = new Map<string, ReaderDocument>()
+      let cachedParentDocuments = new Map<string, ReaderDocument>()
+
+      if (previewCache) {
+        const currentHighlightIds = flattenHighlightsByParent(highlightsByParent).map(
+          (highlight) => highlight.id,
+        )
+
+        if (currentHighlightIds.length > 0) {
+          try {
+            cachedHighlightsById = await previewCache.getCachedHighlightsByIds(
+              currentHighlightIds,
+            )
+          } catch (error) {
+            if (options.logPrefix) {
+              logReadwiseWarn(
+                options.logPrefix,
+                'failed to load cached enriched Reader highlights before snapshot MCP gating',
+                {
+                  highlightCount: currentHighlightIds.length,
+                  formattedError: describeUnknownError(error),
+                },
+              )
+            }
+          }
+        }
+
+        try {
+          cachedParentDocuments = await previewCache.getCachedParentDocuments(
+            targetParentIds,
+          )
+        } catch (error) {
+          if (options.logPrefix) {
+            logReadwiseWarn(
+              options.logPrefix,
+              'failed to load cached parent metadata before snapshot MCP gating',
+              {
+                parentCount: targetParentIds.length,
+                formattedError: describeUnknownError(error),
+              },
+            )
+          }
+        }
+      }
+
+      const unresolvedSnapshotParentIds: string[] = []
+      let cacheReuseChangedHighlightCount = 0
+
+      for (const parentId of targetParentIds) {
+        const highlights = highlightsByParent.get(parentId) ?? []
+        if (highlights.length === 0) continue
+
+        const cachedReuseResult = reuseCachedReaderDocumentHighlightDetails(
+          highlights,
+          cachedHighlightsById,
+        )
+
+        if (cachedReuseResult.changedCount > 0) {
+          highlightsByParent.set(parentId, cachedReuseResult.highlights)
+
+          for (const highlight of cachedReuseResult.highlights) {
+            highlightsById.set(highlight.id, highlight)
+          }
+
+          cacheReuseChangedHighlightCount += cachedReuseResult.changedCount
+        }
+
+        const cachedDocument = cachedParentDocuments.get(parentId) ?? null
+        const detailStrategy = decideReaderDocumentHighlightDetailsStrategy({
+          document: cachedDocument,
+          highlights: cachedReuseResult.highlights,
+        })
+
+        if (!detailStrategy.shouldEnrich) {
+          switch (detailStrategy.reason) {
+            case 'missing_parent_metadata':
+              documentHighlightDetailSkippedNoParentMetadata += 1
+              break
+            case 'no_rich_media':
+              documentHighlightDetailSkippedNoRichMedia += 1
+              break
+            case 'video':
+              documentHighlightDetailSkippedVideo += 1
+              break
+            case 'already_resolved':
+              documentHighlightDetailSkippedResolved += 1
+              break
+            default:
+              break
+          }
+          continue
+        }
+
+        unresolvedSnapshotParentIds.push(parentId)
+      }
+
+      if (options.logPrefix) {
+        logReadwiseDebug(
+          options.logPrefix,
+          'prepared snapshot-only MCP enrichment targets',
+          {
+            targetParentCount: targetParentIds.length,
+            cachedParentMetadataCount: cachedParentDocuments.size,
+            cacheReuseChangedHighlightCount,
+            documentHighlightDetailSkippedResolved,
+            unresolvedParentCount: unresolvedSnapshotParentIds.length,
+            documentHighlightDetailSkippedNoRichMedia,
+            documentHighlightDetailSkippedNoParentMetadata,
+            documentHighlightDetailSkippedVideo,
+          },
+        )
+      }
+
+      refreshSnapshotStepTotal += unresolvedSnapshotParentIds.length
+      emitRefreshSnapshotProgress()
+
+      for (const [index, parentId] of unresolvedSnapshotParentIds.entries()) {
+        const highlights = highlightsByParent.get(parentId) ?? []
+        const cachedDocument = cachedParentDocuments.get(parentId) ?? null
+
+        if (cachedDocument && highlights.length > 0) {
+          const enrichmentResult = await tryEnrichReaderDocumentHighlightsViaMcp({
+            token: options.readerAuthToken,
+            document: cachedDocument,
+            highlights,
+            logPrefix: options.logPrefix,
+          })
+
+          if (enrichmentResult.attempted) {
+            documentHighlightDetailCalls += 1
+          }
+          if (enrichmentResult.missingInReader) {
+            documentHighlightDetailMissingInReader += 1
+          }
+
+          if (enrichmentResult.changedCount > 0) {
+            highlightsByParent.set(parentId, enrichmentResult.highlights)
+
+            for (const highlight of enrichmentResult.highlights) {
+              highlightsById.set(highlight.id, highlight)
+            }
+
+            if (options.logPrefix) {
+              logReadwiseDebug(
+                options.logPrefix,
+                'enriched Reader snapshot highlights via MCP',
+                {
+                  readerDocumentId: parentId,
+                  fetchedHighlights: enrichmentResult.fetchedCount,
+                  changedHighlights: enrichmentResult.changedCount,
+                },
+              )
+            }
+          }
+        }
+
+        refreshSnapshotStepCompleted = Math.min(
+          refreshSnapshotStepTotal,
+          1 + unresolvedNoteParentHighlightIds.length + index + 1,
+        )
+        emitRefreshSnapshotProgress()
+      }
     }
 
     if (previewCache) {
@@ -1073,6 +1344,12 @@ export const loadReaderPreviewBooks = async (
         completeHighlightSnapshotRefreshed,
         parentMetadataCacheHits: 0,
         parentMetadataRemoteFetches: 0,
+        documentHighlightDetailCalls,
+        documentHighlightDetailSkippedNoParentMetadata,
+        documentHighlightDetailSkippedNoRichMedia,
+        documentHighlightDetailSkippedVideo,
+        documentHighlightDetailSkippedResolved,
+        documentHighlightDetailMissingInReader,
         fetchHighlightsDurationMs,
         fetchDocumentsDurationMs: 0,
       },
@@ -1096,19 +1373,46 @@ export const loadReaderPreviewBooks = async (
   const fetchDocumentsStartedAt =
     Date.now() - (resumeState?.fetchDocumentsDurationMs ?? 0)
   const fetchedParentDocuments: ReaderDocument[] = []
+  const enrichedHighlightsToPersist: ReaderDocument[] = []
   let cachedParentDocuments = new Map<string, ReaderDocument>()
+  let cachedHighlightsById = new Map<string, ReaderDocument>()
 
-  if (previewCache && parentMetadataMode === 'cache_first') {
-    try {
-      cachedParentDocuments = await previewCache.getCachedParentDocuments(
-        selectedParentIds,
-      )
-    } catch (error) {
-      if (options.logPrefix) {
-        logReadwiseWarn(options.logPrefix, 'failed to load Reader parent metadata cache', {
-          parentCount: selectedParentIds.length,
-          formattedError: describeUnknownError(error),
-        })
+  if (previewCache) {
+    if (parentMetadataMode === 'cache_first') {
+      try {
+        cachedParentDocuments = await previewCache.getCachedParentDocuments(
+          selectedParentIds,
+        )
+      } catch (error) {
+        if (options.logPrefix) {
+          logReadwiseWarn(options.logPrefix, 'failed to load Reader parent metadata cache', {
+            parentCount: selectedParentIds.length,
+            formattedError: describeUnknownError(error),
+          })
+        }
+      }
+    }
+
+    const selectedHighlightIds = selectedParentIds.flatMap(
+      (parentId) => (highlightsByParent.get(parentId) ?? []).map((highlight) => highlight.id),
+    )
+
+    if (selectedHighlightIds.length > 0) {
+      try {
+        cachedHighlightsById = await previewCache.getCachedHighlightsByIds(
+          selectedHighlightIds,
+        )
+      } catch (error) {
+        if (options.logPrefix) {
+          logReadwiseWarn(
+            options.logPrefix,
+            'failed to load cached enriched Reader highlights before parent fetch',
+            {
+              highlightCount: selectedHighlightIds.length,
+              formattedError: describeUnknownError(error),
+            },
+          )
+        }
       }
     }
   }
@@ -1139,6 +1443,7 @@ export const loadReaderPreviewBooks = async (
           {
             id: parentId,
             limit: 1,
+            withHtmlContent: true,
           },
           {
             logPrefix: options.logPrefix,
@@ -1174,13 +1479,58 @@ export const loadReaderPreviewBooks = async (
 
     if (!document) continue
 
+    const cacheReuseResult = reuseCachedReaderDocumentHighlightDetails(
+      highlightsByParent.get(parentId) ?? [],
+      cachedHighlightsById,
+    )
+    const highlights = [...cacheReuseResult.highlights].sort(
+      sortByCreatedAtAscending,
+    )
+
+    if (cacheReuseResult.changedCount > 0) {
+      highlightsByParent.set(parentId, highlights)
+    }
+
+    const enrichedHighlightsResult = await tryEnrichReaderDocumentHighlightsViaMcp({
+      token: options.readerAuthToken,
+      document,
+      highlights,
+      logPrefix: options.logPrefix,
+    })
+    const resolvedHighlights = [...enrichedHighlightsResult.highlights].sort(
+      sortByCreatedAtAscending,
+    )
+
+    if (
+      cacheReuseResult.changedCount > 0 ||
+      enrichedHighlightsResult.changedCount > 0
+    ) {
+      highlightsByParent.set(parentId, resolvedHighlights)
+      enrichedHighlightsToPersist.push(...resolvedHighlights)
+    }
+
     previewBooks.push({
       document,
-      highlights: [...(highlightsByParent.get(parentId) ?? [])].sort(
-        sortByCreatedAtAscending,
-      ),
+      highlights: resolvedHighlights,
       highlightCoverage: mode,
     })
+  }
+
+  if (previewCache && enrichedHighlightsToPersist.length > 0) {
+    try {
+      await previewCache.putHighlights(enrichedHighlightsToPersist)
+    } catch (error) {
+      if (options.logPrefix) {
+        logReadwiseWarn(
+          options.logPrefix,
+          'failed to persist enriched Reader highlights after parent fetch',
+          {
+            highlightCount: enrichedHighlightsToPersist.length,
+            formattedError: describeUnknownError(error),
+          },
+        )
+      }
+    }
   }
 
   if (previewCache && fetchedParentDocuments.length > 0) {
@@ -1212,6 +1562,12 @@ export const loadReaderPreviewBooks = async (
       completeHighlightSnapshotRefreshed,
       parentMetadataCacheHits,
       parentMetadataRemoteFetches,
+      documentHighlightDetailCalls,
+      documentHighlightDetailSkippedNoParentMetadata,
+      documentHighlightDetailSkippedNoRichMedia,
+      documentHighlightDetailSkippedVideo,
+      documentHighlightDetailSkippedResolved,
+      documentHighlightDetailMissingInReader,
       fetchHighlightsDurationMs,
       fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
     },

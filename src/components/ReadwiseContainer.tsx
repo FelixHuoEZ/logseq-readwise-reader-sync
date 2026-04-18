@@ -6,6 +6,7 @@ import { format } from 'date-fns'
 
 import {
   createReadwiseClient,
+  tryEnrichReaderDocumentHighlightsViaMcp,
   loadReaderPreviewBooks,
   loadReaderPreviewBooksByParentIds,
   isReaderPreviewLoadResumeError,
@@ -2199,6 +2200,7 @@ export const ReadwiseContainer = () => {
         const response = await client.listReaderDocuments({
           id: documentId,
           limit: 1,
+          withHtmlContent: true,
         })
         return response.results[0] ?? null
       } catch (error) {
@@ -4335,6 +4337,7 @@ export const ReadwiseContainer = () => {
             {
               pageResolveMode: 'reader_id_then_title',
               identityNamespaceRoot: formalNamespaceRoot,
+              readerAuthToken: token,
             },
           )
           repairedCount += 1
@@ -5113,6 +5116,25 @@ export const ReadwiseContainer = () => {
         await previewCache.putParentDocuments([document])
       }
 
+      const enrichmentResult =
+        action === 'refresh-metadata'
+          ? await tryEnrichReaderDocumentHighlightsViaMcp({
+              token,
+              document,
+              highlights,
+              logPrefix: formalSyncLogPrefix,
+            })
+          : null
+      const resolvedHighlights = enrichmentResult?.highlights ?? highlights
+
+      if (
+        action === 'refresh-metadata' &&
+        enrichmentResult != null &&
+        enrichmentResult.changedCount > 0
+      ) {
+        await previewCache.putHighlights(resolvedHighlights)
+      }
+
       setCurrent(1)
       updateReaderSyncEta('fetch-documents', 'parent document fetch', 1, 1)
 
@@ -5124,7 +5146,7 @@ export const ReadwiseContainer = () => {
       const pageSyncResult = await syncRenderedReaderPreviewPage(
         {
           document,
-          highlights,
+          highlights: resolvedHighlights,
           highlightCoverage: 'cached-full-rebuild',
         },
         formalNamespaceRoot,
@@ -5391,6 +5413,12 @@ export const ReadwiseContainer = () => {
       completeHighlightSnapshotRefreshed: false,
       parentMetadataCacheHits: 0,
       parentMetadataRemoteFetches: 0,
+      documentHighlightDetailCalls: 0,
+      documentHighlightDetailSkippedNoParentMetadata: 0,
+      documentHighlightDetailSkippedNoRichMedia: 0,
+      documentHighlightDetailSkippedVideo: 0,
+      documentHighlightDetailSkippedResolved: 0,
+      documentHighlightDetailMissingInReader: 0,
       fetchHighlightsDurationMs: 0,
       fetchDocumentsDurationMs: 0,
     }
@@ -5449,6 +5477,7 @@ export const ReadwiseContainer = () => {
         previewCache,
         parentMetadataMode:
           mode === 'incremental-window' ? 'cache_first' : 'always_refresh',
+        readerAuthToken: token,
         logPrefix,
         onProgress: (progress) => {
           if (cancelledRef.current) return
@@ -5578,6 +5607,17 @@ export const ReadwiseContainer = () => {
           loadStats.completeHighlightSnapshotRefreshed,
         parentMetadataCacheHits: loadStats.parentMetadataCacheHits,
         parentMetadataRemoteFetches: loadStats.parentMetadataRemoteFetches,
+        documentHighlightDetailCalls: loadStats.documentHighlightDetailCalls,
+        documentHighlightDetailSkippedNoParentMetadata:
+          loadStats.documentHighlightDetailSkippedNoParentMetadata,
+        documentHighlightDetailSkippedNoRichMedia:
+          loadStats.documentHighlightDetailSkippedNoRichMedia,
+        documentHighlightDetailSkippedVideo:
+          loadStats.documentHighlightDetailSkippedVideo,
+        documentHighlightDetailSkippedResolved:
+          loadStats.documentHighlightDetailSkippedResolved,
+        documentHighlightDetailMissingInReader:
+          loadStats.documentHighlightDetailMissingInReader,
         fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
         fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
         averageHighlightPageDurationMs:
@@ -5623,6 +5663,7 @@ export const ReadwiseContainer = () => {
             parentIds: queuedRetryParentIdsToReload,
             previewCache,
             parentMetadataMode: 'cache_first',
+            readerAuthToken: token,
             logPrefix,
             highlightCoverage: 'cached-full-rebuild',
           })
@@ -5634,6 +5675,16 @@ export const ReadwiseContainer = () => {
               queuedRetryLoadResult.parentMetadataCacheHits
             loadStats.parentMetadataRemoteFetches +=
               queuedRetryLoadResult.parentMetadataRemoteFetches
+            loadStats.documentHighlightDetailCalls +=
+              queuedRetryLoadResult.documentHighlightDetailCalls
+            loadStats.documentHighlightDetailSkippedNoRichMedia +=
+              queuedRetryLoadResult.documentHighlightDetailSkippedNoRichMedia
+            loadStats.documentHighlightDetailSkippedVideo +=
+              queuedRetryLoadResult.documentHighlightDetailSkippedVideo
+            loadStats.documentHighlightDetailSkippedResolved +=
+              queuedRetryLoadResult.documentHighlightDetailSkippedResolved
+            loadStats.documentHighlightDetailMissingInReader +=
+              queuedRetryLoadResult.documentHighlightDetailMissingInReader
             loadStats.fetchDocumentsDurationMs +=
               queuedRetryLoadResult.fetchDocumentsDurationMs
           }
@@ -5697,6 +5748,30 @@ export const ReadwiseContainer = () => {
         const incompleteSnapshotSuffix = !loadStats.completeHighlightSnapshotRefreshed
           ? ' Local highlight snapshot was left unchanged because this run did not exhaust the full Reader highlight library.'
           : ''
+        const detailEnrichmentSummarySegments = [
+          loadStats.documentHighlightDetailCalls > 0
+            ? `MCP detail calls ${loadStats.documentHighlightDetailCalls}`
+            : null,
+          loadStats.documentHighlightDetailSkippedResolved > 0
+            ? `cache-resolved ${loadStats.documentHighlightDetailSkippedResolved}`
+            : null,
+          loadStats.documentHighlightDetailSkippedNoRichMedia > 0
+            ? `no-rich-media skipped ${loadStats.documentHighlightDetailSkippedNoRichMedia}`
+            : null,
+          loadStats.documentHighlightDetailSkippedVideo > 0
+            ? `video skipped ${loadStats.documentHighlightDetailSkippedVideo}`
+            : null,
+          loadStats.documentHighlightDetailSkippedNoParentMetadata > 0
+            ? `missing-metadata skipped ${loadStats.documentHighlightDetailSkippedNoParentMetadata}`
+            : null,
+          loadStats.documentHighlightDetailMissingInReader > 0
+            ? `Reader details missing ${loadStats.documentHighlightDetailMissingInReader}`
+            : null,
+        ].filter((value): value is string => value != null)
+        const detailEnrichmentSuffix =
+          detailEnrichmentSummarySegments.length > 0
+            ? ` Detail enrich: ${detailEnrichmentSummarySegments.join(', ')}.`
+            : ''
 
         setStatus('completed')
         setCurrent(0)
@@ -5723,7 +5798,7 @@ export const ReadwiseContainer = () => {
               },
         )
         setStatusMessage(
-          `${statusPrefix}: refreshed the local full-library snapshot from ${loadStats.highlightsScanned} highlight(s) across ${loadStats.highlightPagesScanned} remote page(s). Managed pages were not rewritten.${incompleteSnapshotSuffix}`,
+          `${statusPrefix}: refreshed the local full-library snapshot from ${loadStats.highlightsScanned} highlight(s) across ${loadStats.highlightPagesScanned} remote page(s). Managed pages were not rewritten.${detailEnrichmentSuffix}${incompleteSnapshotSuffix}`,
         )
         logReadwiseInfo(logPrefix, 'snapshot refresh completed', {
           mode,
@@ -5731,6 +5806,17 @@ export const ReadwiseContainer = () => {
           highlightsScanned: loadStats.highlightsScanned,
           highlightPagesScanned: loadStats.highlightPagesScanned,
           parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+          documentHighlightDetailCalls: loadStats.documentHighlightDetailCalls,
+          documentHighlightDetailSkippedResolved:
+            loadStats.documentHighlightDetailSkippedResolved,
+          documentHighlightDetailSkippedNoRichMedia:
+            loadStats.documentHighlightDetailSkippedNoRichMedia,
+          documentHighlightDetailSkippedVideo:
+            loadStats.documentHighlightDetailSkippedVideo,
+          documentHighlightDetailSkippedNoParentMetadata:
+            loadStats.documentHighlightDetailSkippedNoParentMetadata,
+          documentHighlightDetailMissingInReader:
+            loadStats.documentHighlightDetailMissingInReader,
           completeHighlightSnapshotRefreshed:
             loadStats.completeHighlightSnapshotRefreshed,
         })

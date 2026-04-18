@@ -3,8 +3,10 @@ misc
 
 # Logs
 logs
+debug/
 .release/
 logseq-readwise-plugin.zip
+logseq-readwise-reader-sync.zip
 logseq-readwise-sync-fork.zip
 *.log
 npm-debug.log*

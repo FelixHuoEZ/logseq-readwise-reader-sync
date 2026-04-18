@@ -12,6 +12,14 @@ interface CurrentPageSnapshotV1 {
   content: string
 }
 
+export interface CurrentPageFileContentV1 {
+  page: PageEntity
+  pageName: string
+  pageAliases: string[]
+  relativeFilePath: string
+  content: string
+}
+
 export interface CurrentPageDiffResult {
   changed: boolean
   pageName: string
@@ -604,6 +612,26 @@ export const captureCurrentPageFileSnapshotV1 = async () => {
     lineCount: content.split('\n').length,
   }
 }
+
+export const loadCurrentPageFileContentV1 =
+  async (): Promise<CurrentPageFileContentV1> => {
+    const page = await resolveCurrentPageEntity()
+    const resolved = await resolveCurrentPageFile(page)
+    const graph = await logseq.App.getCurrentGraph()
+    const resolvedContent = await readResolvedGraphFileContent(
+      resolved.relativeFilePath,
+      graph?.path ?? null,
+      resolved.diagnostics,
+    )
+
+    return {
+      page,
+      pageName: resolved.pageName,
+      pageAliases: resolved.pageAliases,
+      relativeFilePath: resolved.relativeFilePath,
+      content: resolvedContent.content,
+    }
+  }
 
 export const diffCurrentPageFileSnapshotV1 = async (): Promise<CurrentPageDiffResult> => {
   const rawSnapshot = await logseq.FileStorage.getItem(CURRENT_PAGE_SNAPSHOT_KEY)

@@ -1,6 +1,7 @@
 export * from './append-highlights'
 export * from './audit-managed-reader-pages'
 export * from './formal-test-pages'
+export * from './force-reparse-pages'
 export * from './managed-page-integrity'
 export * from './migrate-legacy-block-refs'
 export * from './page-file-diff'

@@ -7939,6 +7939,9 @@ export const ReadwiseContainer = () => {
                   <button className="rw-btn" onClick={handleRefreshCurrentPageMetadata}>
                     Refresh Current Page Metadata
                   </button>
+                  <button className="rw-btn" onClick={handleForceReparseCurrentPage}>
+                    Force Reparse Current Page
+                  </button>
                 </div>
               </div>
 
@@ -8034,13 +8037,13 @@ export const ReadwiseContainer = () => {
                         <div className="rw-maintenance-section-header">
                           <div className="rw-maintenance-section-title">Snapshots</div>
                           <div className="rw-maintenance-section-note">
-                            Refresh the local highlight snapshot, rebuild managed pages from
-                            cache, or capture raw page state for diff-based debugging.
+                            Refresh the local highlight snapshot, force Logseq to reparse
+                            managed pages, or capture raw page state for diff-based debugging.
                           </div>
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handleCachedFullRebuild}>
-                            Cached Rebuild Managed Pages
+                          <button className="rw-btn" onClick={handleForceReparseManagedPages}>
+                            Force Reparse Managed Pages
                           </button>
                           <button className="rw-btn" onClick={handleRefreshLocalSnapshotOnly}>
                             Refresh Local Snapshot Only

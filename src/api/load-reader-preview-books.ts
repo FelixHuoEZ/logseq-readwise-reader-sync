@@ -47,8 +47,23 @@ export interface ReaderPreviewLoadStats {
   documentHighlightDetailSkippedVideo: number
   documentHighlightDetailSkippedResolved: number
   documentHighlightDetailMissingInReader: number
+  documentHighlightDetailOutcomes: ReaderDocumentHighlightDetailOutcome[]
   fetchHighlightsDurationMs: number
   fetchDocumentsDurationMs: number
+}
+
+export type ReaderDocumentHighlightDetailOutcomeReason =
+  | 'cache_resolved'
+  | 'no_rich_media'
+  | 'video'
+  | 'missing_parent_metadata'
+  | 'missing_in_reader'
+
+export interface ReaderDocumentHighlightDetailOutcome {
+  readerDocumentId: string
+  title: string | null
+  category: string | null
+  reason: ReaderDocumentHighlightDetailOutcomeReason
 }
 
 export type ReaderPreviewLoadPhase = 'fetch-highlights' | 'fetch-documents'
@@ -143,6 +158,7 @@ export interface LoadReaderPreviewBooksByParentIdsResult {
   documentHighlightDetailSkippedVideo: number
   documentHighlightDetailSkippedResolved: number
   documentHighlightDetailMissingInReader: number
+  documentHighlightDetailOutcomes: ReaderDocumentHighlightDetailOutcome[]
   fetchDocumentsDurationMs: number
 }
 
@@ -301,6 +317,19 @@ const getLatestUpdatedAt = (documents: Iterable<ReaderDocument>) => {
 const flattenHighlightsByParent = (highlightsByParent: Map<string, ReaderDocument[]>) =>
   [...highlightsByParent.values()].flat()
 
+const appendReaderDocumentHighlightDetailOutcome = (
+  entries: ReaderDocumentHighlightDetailOutcome[],
+  entry: ReaderDocumentHighlightDetailOutcome,
+) => {
+  const alreadyPresent = entries.some(
+    (existingEntry) =>
+      existingEntry.readerDocumentId === entry.readerDocumentId &&
+      existingEntry.reason === entry.reason,
+  )
+  if (alreadyPresent) return
+  entries.push(entry)
+}
+
 export const loadReaderPreviewBooksByParentIds = async (
   client: ReadwiseClient,
   options: LoadReaderPreviewBooksByParentIdsOptions,
@@ -317,6 +346,7 @@ export const loadReaderPreviewBooksByParentIds = async (
       documentHighlightDetailSkippedVideo: 0,
       documentHighlightDetailSkippedResolved: 0,
       documentHighlightDetailMissingInReader: 0,
+      documentHighlightDetailOutcomes: [],
       fetchDocumentsDurationMs: 0,
     }
   }
@@ -331,6 +361,7 @@ export const loadReaderPreviewBooksByParentIds = async (
   let documentHighlightDetailSkippedVideo = 0
   let documentHighlightDetailSkippedResolved = 0
   let documentHighlightDetailMissingInReader = 0
+  const documentHighlightDetailOutcomes: ReaderDocumentHighlightDetailOutcome[] = []
   let highlightsByParent = new Map<string, ReaderDocument[]>()
   let cachedParentDocuments = new Map<string, ReaderDocument>()
   const enrichedHighlightsToPersist: ReaderDocument[] = []
@@ -349,18 +380,19 @@ export const loadReaderPreviewBooksByParentIds = async (
       )
     }
 
-    return {
-      books: [],
-      unresolvedParentIds: parentIds,
-      parentMetadataCacheHits,
-      parentMetadataRemoteFetches,
-      documentHighlightDetailCalls,
-      documentHighlightDetailSkippedNoRichMedia,
-      documentHighlightDetailSkippedVideo,
-      documentHighlightDetailSkippedResolved,
-      documentHighlightDetailMissingInReader,
-      fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
-    }
+      return {
+        books: [],
+        unresolvedParentIds: parentIds,
+        parentMetadataCacheHits,
+        parentMetadataRemoteFetches,
+        documentHighlightDetailCalls,
+        documentHighlightDetailSkippedNoRichMedia,
+        documentHighlightDetailSkippedVideo,
+        documentHighlightDetailSkippedResolved,
+        documentHighlightDetailMissingInReader,
+        documentHighlightDetailOutcomes,
+        fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
+      }
   }
 
   if (parentMetadataMode === 'cache_first') {
@@ -471,16 +503,40 @@ export const loadReaderPreviewBooksByParentIds = async (
     }
     if (enrichedHighlightsResult.missingInReader) {
       documentHighlightDetailMissingInReader += 1
+      appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+        readerDocumentId: document.id,
+        title: typeof document.title === 'string' ? document.title : null,
+        category: typeof document.category === 'string' ? document.category : null,
+        reason: 'missing_in_reader',
+      })
     }
     switch (enrichedHighlightsResult.skippedReason) {
       case 'video':
         documentHighlightDetailSkippedVideo += 1
+        appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+          readerDocumentId: document.id,
+          title: typeof document.title === 'string' ? document.title : null,
+          category: typeof document.category === 'string' ? document.category : null,
+          reason: 'video',
+        })
         break
       case 'no_rich_media':
         documentHighlightDetailSkippedNoRichMedia += 1
+        appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+          readerDocumentId: document.id,
+          title: typeof document.title === 'string' ? document.title : null,
+          category: typeof document.category === 'string' ? document.category : null,
+          reason: 'no_rich_media',
+        })
         break
       case 'already_resolved':
         documentHighlightDetailSkippedResolved += 1
+        appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+          readerDocumentId: document.id,
+          title: typeof document.title === 'string' ? document.title : null,
+          category: typeof document.category === 'string' ? document.category : null,
+          reason: 'cache_resolved',
+        })
         break
       default:
         break
@@ -546,6 +602,7 @@ export const loadReaderPreviewBooksByParentIds = async (
     documentHighlightDetailSkippedVideo,
     documentHighlightDetailSkippedResolved,
     documentHighlightDetailMissingInReader,
+    documentHighlightDetailOutcomes,
     fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
   }
 }
@@ -612,6 +669,7 @@ export const loadReaderPreviewBooks = async (
   let documentHighlightDetailSkippedVideo = 0
   let documentHighlightDetailSkippedResolved = 0
   let documentHighlightDetailMissingInReader = 0
+  const documentHighlightDetailOutcomes: ReaderDocumentHighlightDetailOutcome[] = []
   const fetchHighlightsStartedAt =
     Date.now() - (resumeState?.fetchHighlightsDurationMs ?? 0)
 
@@ -1193,15 +1251,75 @@ export const loadReaderPreviewBooks = async (
           switch (detailStrategy.reason) {
             case 'missing_parent_metadata':
               documentHighlightDetailSkippedNoParentMetadata += 1
+              appendReaderDocumentHighlightDetailOutcome(
+                documentHighlightDetailOutcomes,
+                {
+                  readerDocumentId: parentId,
+                  title:
+                    typeof cachedDocument?.title === 'string'
+                      ? cachedDocument.title
+                      : null,
+                  category:
+                    typeof cachedDocument?.category === 'string'
+                      ? cachedDocument.category
+                      : null,
+                  reason: 'missing_parent_metadata',
+                },
+              )
               break
             case 'no_rich_media':
               documentHighlightDetailSkippedNoRichMedia += 1
+              appendReaderDocumentHighlightDetailOutcome(
+                documentHighlightDetailOutcomes,
+                {
+                  readerDocumentId: parentId,
+                  title:
+                    typeof cachedDocument?.title === 'string'
+                      ? cachedDocument.title
+                      : null,
+                  category:
+                    typeof cachedDocument?.category === 'string'
+                      ? cachedDocument.category
+                      : null,
+                  reason: 'no_rich_media',
+                },
+              )
               break
             case 'video':
               documentHighlightDetailSkippedVideo += 1
+              appendReaderDocumentHighlightDetailOutcome(
+                documentHighlightDetailOutcomes,
+                {
+                  readerDocumentId: parentId,
+                  title:
+                    typeof cachedDocument?.title === 'string'
+                      ? cachedDocument.title
+                      : null,
+                  category:
+                    typeof cachedDocument?.category === 'string'
+                      ? cachedDocument.category
+                      : null,
+                  reason: 'video',
+                },
+              )
               break
             case 'already_resolved':
               documentHighlightDetailSkippedResolved += 1
+              appendReaderDocumentHighlightDetailOutcome(
+                documentHighlightDetailOutcomes,
+                {
+                  readerDocumentId: parentId,
+                  title:
+                    typeof cachedDocument?.title === 'string'
+                      ? cachedDocument.title
+                      : null,
+                  category:
+                    typeof cachedDocument?.category === 'string'
+                      ? cachedDocument.category
+                      : null,
+                  reason: 'cache_resolved',
+                },
+              )
               break
             default:
               break
@@ -1249,6 +1367,21 @@ export const loadReaderPreviewBooks = async (
           }
           if (enrichmentResult.missingInReader) {
             documentHighlightDetailMissingInReader += 1
+            appendReaderDocumentHighlightDetailOutcome(
+              documentHighlightDetailOutcomes,
+              {
+                readerDocumentId: parentId,
+                title:
+                  typeof cachedDocument.title === 'string'
+                    ? cachedDocument.title
+                    : null,
+                category:
+                  typeof cachedDocument.category === 'string'
+                    ? cachedDocument.category
+                    : null,
+                reason: 'missing_in_reader',
+              },
+            )
           }
 
           if (enrichmentResult.changedCount > 0) {
@@ -1350,6 +1483,7 @@ export const loadReaderPreviewBooks = async (
         documentHighlightDetailSkippedVideo,
         documentHighlightDetailSkippedResolved,
         documentHighlightDetailMissingInReader,
+        documentHighlightDetailOutcomes,
         fetchHighlightsDurationMs,
         fetchDocumentsDurationMs: 0,
       },
@@ -1497,6 +1631,50 @@ export const loadReaderPreviewBooks = async (
       highlights,
       logPrefix: options.logPrefix,
     })
+
+    if (enrichedHighlightsResult.attempted) {
+      documentHighlightDetailCalls += 1
+    }
+    if (enrichedHighlightsResult.missingInReader) {
+      documentHighlightDetailMissingInReader += 1
+      appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+        readerDocumentId: document.id,
+        title: typeof document.title === 'string' ? document.title : null,
+        category: typeof document.category === 'string' ? document.category : null,
+        reason: 'missing_in_reader',
+      })
+    }
+    switch (enrichedHighlightsResult.skippedReason) {
+      case 'video':
+        documentHighlightDetailSkippedVideo += 1
+        appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+          readerDocumentId: document.id,
+          title: typeof document.title === 'string' ? document.title : null,
+          category: typeof document.category === 'string' ? document.category : null,
+          reason: 'video',
+        })
+        break
+      case 'no_rich_media':
+        documentHighlightDetailSkippedNoRichMedia += 1
+        appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+          readerDocumentId: document.id,
+          title: typeof document.title === 'string' ? document.title : null,
+          category: typeof document.category === 'string' ? document.category : null,
+          reason: 'no_rich_media',
+        })
+        break
+      case 'already_resolved':
+        documentHighlightDetailSkippedResolved += 1
+        appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+          readerDocumentId: document.id,
+          title: typeof document.title === 'string' ? document.title : null,
+          category: typeof document.category === 'string' ? document.category : null,
+          reason: 'cache_resolved',
+        })
+        break
+      default:
+        break
+    }
     const resolvedHighlights = [...enrichedHighlightsResult.highlights].sort(
       sortByCreatedAtAscending,
     )
@@ -1568,6 +1746,7 @@ export const loadReaderPreviewBooks = async (
       documentHighlightDetailSkippedVideo,
       documentHighlightDetailSkippedResolved,
       documentHighlightDetailMissingInReader,
+      documentHighlightDetailOutcomes,
       fetchHighlightsDurationMs,
       fetchDocumentsDurationMs: Date.now() - fetchDocumentsStartedAt,
     },

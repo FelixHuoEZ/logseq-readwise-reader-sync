@@ -1,71 +1,81 @@
 import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
 import './ReadwiseContainer.css'
 
-import { useEffect, useRef, useState } from 'react'
 import { format } from 'date-fns'
+import { useEffect, useRef, useState } from 'react'
 
 import {
   createReadwiseClient,
-  tryEnrichReaderDocumentHighlightsViaMcp,
+  isReaderPreviewLoadResumeError,
   loadReaderPreviewBooks,
   loadReaderPreviewBooksByParentIds,
-  isReaderPreviewLoadResumeError,
+  type ReaderDocumentHighlightDetailOutcome,
   type ReaderPreviewBook,
   type ReaderPreviewLoadMode,
   type ReaderPreviewLoadResumeState,
   type ReaderPreviewLoadStats,
+  tryEnrichReaderDocumentHighlightsViaMcp,
 } from '../api'
-import {
-  type GraphLastFormalSyncSummaryV1,
-  type GraphCheckpointSourceV1,
-  type GraphReaderSyncStateV1,
-  loadGraphCheckpointStateV1,
-  loadCurrentGraphContextV1,
-  loadGraphLastFormalSyncSummaryV1,
-  loadGraphReaderRetryFallbackEntriesV1,
-  loadGraphReaderSyncStateV1,
-  normalizeComparableUrlV1,
-  removeGraphReaderRetryFallbackEntriesV1,
-  saveGraphLastFormalSyncSummaryV1,
-  saveGraphCheckpointStateV1,
-  saveGraphReaderRetryFallbackEntriesV1,
-  saveGraphReaderSyncStateV1,
-} from '../graph'
 import {
   createGraphReaderSyncCacheV1,
   type ReaderSyncCacheSummaryV1,
   type ReaderSyncRetryPageEntryV1,
 } from '../cache'
 import {
+  type GraphCheckpointSourceV1,
+  type GraphLastFormalSyncSummaryV1,
+  type GraphReaderSyncStateV1,
+  loadCurrentGraphContextV1,
+  loadGraphCheckpointStateV1,
+  loadGraphLastFormalSyncSummaryV1,
+  loadGraphReaderRetryFallbackEntriesV1,
+  loadGraphReaderSyncStateV1,
+  normalizeComparableUrlV1,
+  removeGraphReaderRetryFallbackEntriesV1,
+  saveGraphCheckpointStateV1,
+  saveGraphLastFormalSyncSummaryV1,
+  saveGraphReaderRetryFallbackEntriesV1,
+  saveGraphReaderSyncStateV1,
+} from '../graph'
+import {
+  describeUnknownError,
+  logReadwiseDebug,
+  logReadwiseError,
+  logReadwiseInfo,
+  logReadwiseWarn,
+} from '../logging'
+import {
   assertManagedPageFileNameWithinLimits,
   auditManagedReaderPagesV1,
   backupFormalTestPages,
   buildLegacyBlockRefMappingV1,
   buildManagedPageNamePlanV1,
+  type CurrentPageDiffResult,
+  type CurrentPageLegacyIdRewriteEntryV1,
   captureCurrentPageFileSnapshotV1,
+  clearFormalTestPages,
   clearManagedPagesByNamespacePrefix,
   clearManagedPagesBySessionNamespaceRoot,
-  clearFormalTestPages,
-  type CurrentPageDiffResult,
   diffCurrentPageFileSnapshotV1,
+  forceReparseCurrentPageV1,
+  forceReparseManagedPagesByNamespaceV1,
   inspectManagedPageIntegrityV1,
+  type LegacyBlockRefPreviewEntryV1,
   listManagedPagesByNamespacePrefix,
   listManagedPagesBySessionNamespaceRoot,
   loadActiveFormalTestSessionManifestV1,
-  migrateLegacyBlockRefsV1,
+  type ManagedReaderPageAuditEntryV1,
   migrateCurrentPageLegacyIdsV1,
-  previewLegacyBlockRefsV1,
+  migrateLegacyBlockRefsV1,
   previewCurrentPageLegacyIdsV1,
-  rotateActiveFormalTestSessionNamespaceV1,
+  previewLegacyBlockRefsV1,
   restoreLatestFormalTestPageBackup,
+  rotateActiveFormalTestSessionNamespaceV1,
   saveFormalTestSessionManifestV1,
   setupProps,
   syncRenderedDebugPage,
-  syncRenderedReaderPreviewPage,
   syncRenderedPage,
-  type CurrentPageLegacyIdRewriteEntryV1,
-  type LegacyBlockRefPreviewEntryV1,
-  type ManagedReaderPageAuditEntryV1,
+  syncRenderedReaderPreviewPage,
 } from '../services'
 import { deriveNextUpdatedAfterV1 } from '../sync'
 import type {
@@ -77,19 +87,12 @@ import type {
   SyncStatus,
 } from '../types'
 import {
-  describeUnknownError,
-  logReadwiseDebug,
-  logReadwiseError,
-  logReadwiseInfo,
-  logReadwiseWarn,
-} from '../logging'
-import {
   buildRunIssuesBundle,
   diagnoseRunIssue,
   formatRunIssueCategoryLabel,
-  shouldRunIssueBlockReaderSyncCursor,
   type RunIssue,
   type RunIssueBundleContext,
+  shouldRunIssueBlockReaderSyncCursor,
   summarizeRunIssueCategories,
 } from './run-issues'
 
@@ -199,6 +202,14 @@ interface CurrentPageLegacyIdApplyResult {
   rewritesApplied: number
 }
 
+interface ReaderDetailEnrichReportResult {
+  modeLabel: string
+  highlightsScanned: number
+  highlightPagesScanned: number
+  documentHighlightDetailCalls: number
+  outcomeEntries: ReaderDocumentHighlightDetailOutcome[]
+}
+
 interface ManagedPageRepairScanEntryResult {
   pageName: string
   candidate?: ManagedPageRepairCandidate
@@ -289,6 +300,8 @@ export const ReadwiseContainer = () => {
     useState<CurrentPageLegacyIdPreviewResult | null>(null)
   const [currentPageLegacyIdApplyResult, setCurrentPageLegacyIdApplyResult] =
     useState<CurrentPageLegacyIdApplyResult | null>(null)
+  const [readerDetailEnrichReportResult, setReaderDetailEnrichReportResult] =
+    useState<ReaderDetailEnrichReportResult | null>(null)
   const [pageDiffResult, setPageDiffResult] =
     useState<CurrentPageDiffResult | null>(null)
   const [cacheSummaryResult, setCacheSummaryResult] =
@@ -1965,6 +1978,58 @@ export const ReadwiseContainer = () => {
       result.afterFullText,
     ].join('\n')
 
+  const formatReaderDetailEnrichOutcomeReason = (
+    reason: ReaderDocumentHighlightDetailOutcome['reason'],
+  ) => {
+    switch (reason) {
+      case 'cache_resolved':
+        return 'cache-resolved'
+      case 'no_rich_media':
+        return 'no-rich-media'
+      case 'video':
+        return 'video-like'
+      case 'missing_parent_metadata':
+        return 'missing-parent-metadata'
+      case 'missing_in_reader':
+        return 'missing-in-reader'
+      default:
+        return reason
+    }
+  }
+
+  const buildReaderDetailEnrichReportBundle = (
+    result: ReaderDetailEnrichReportResult,
+  ) => {
+    const outcomeCounts = result.outcomeEntries.reduce<Record<string, number>>(
+      (counts, entry) => {
+        const key = formatReaderDetailEnrichOutcomeReason(entry.reason)
+        counts[key] = (counts[key] ?? 0) + 1
+        return counts
+      },
+      {},
+    )
+
+    return [
+      'Reader Detail Enrich Report',
+      `Mode: ${result.modeLabel}`,
+      `Highlights Scanned: ${result.highlightsScanned}`,
+      `Remote Pages Scanned: ${result.highlightPagesScanned}`,
+      `MCP Detail Calls: ${result.documentHighlightDetailCalls}`,
+      `Outcome Entries: ${result.outcomeEntries.length}`,
+      '',
+      'Outcome Counts:',
+      ...Object.entries(outcomeCounts)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([reason, count]) => `- ${reason}: ${count}`),
+      '',
+      'Entries:',
+      ...result.outcomeEntries.map(
+        (entry, index) =>
+          `${index + 1}. reason=${formatReaderDetailEnrichOutcomeReason(entry.reason)} title=${entry.title ?? '(untitled)'} readerDocumentId=${entry.readerDocumentId}${entry.category ? ` category=${entry.category}` : ''}`,
+      ),
+    ].join('\n')
+  }
+
   const resetLiveRunIssueMetrics = () => {
     liveRunIssueMetricsRef.current = {
       processedItems: null,
@@ -2030,6 +2095,7 @@ export const ReadwiseContainer = () => {
     setRunIssueContext(null)
     setCurrentPageLegacyIdPreviewResult(null)
     setCurrentPageLegacyIdApplyResult(null)
+    setReaderDetailEnrichReportResult(null)
     if (!options?.preservePendingLegacyBlockRefMigration) {
       setPendingLegacyBlockRefMigration(null)
     }
@@ -2096,6 +2162,15 @@ export const ReadwiseContainer = () => {
         context: buildLiveRunIssueContext(),
       }),
       'Current-page legacy id preview',
+    )
+  }
+
+  const handleCopyReaderDetailEnrichReport = async () => {
+    if (!readerDetailEnrichReportResult) return
+
+    await copyText(
+      buildReaderDetailEnrichReportBundle(readerDetailEnrichReportResult),
+      'Reader detail enrich report',
     )
   }
 
@@ -3695,6 +3770,158 @@ export const ReadwiseContainer = () => {
       mode: 'snapshot-only-refresh',
       runTrigger: 'manual',
     })
+  }
+
+  const handleForceReparseCurrentPage = async () => {
+    clearRunIssues()
+    setPageDiffResult(null)
+    setCacheSummaryResult(null)
+    setCurrent(0)
+    setTotal(1)
+    setCurrentBook('')
+    setStatus('syncing')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Force reparse current page',
+      namespacePrefix: null,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: 1,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    setStatusMessage('Touching the current page file so Logseq reparses it...')
+
+    try {
+      const result = await forceReparseCurrentPageV1()
+      setCurrent(1)
+      setCurrentBook(result.pageName)
+      setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: 1,
+              issuesCount: 0,
+            },
+      )
+      setStatusMessage(
+        `Forced Logseq to reparse ${result.pageName} by touching ${result.relativeFilePath}.`,
+      )
+    } catch (err: unknown) {
+      logReadwiseError(formalSyncLogPrefix, 'force reparse current page failed', err)
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: 0,
+              issuesCount: 1,
+            },
+      )
+      setStatusMessage(
+        `Force reparse current page failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
+  const handleForceReparseManagedPages = async () => {
+    clearRunIssues()
+    setPageDiffResult(null)
+    setCacheSummaryResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('syncing')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Force reparse managed pages',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    setStatusMessage(
+      `Touching managed page files under ${formalNamespaceRoot} so Logseq reparses them...`,
+    )
+
+    try {
+      const result = await forceReparseManagedPagesByNamespaceV1(formalNamespaceRoot, {
+        onProgress: ({ total, completed, pageName }) => {
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageName ?? '')
+          setStatusMessage(
+            total > 0
+              ? `Touching managed page files under ${formalNamespaceRoot}... ${completed} / ${total}.`
+              : `No managed pages matched ${formalNamespaceRoot}.`,
+          )
+        },
+      })
+      const issues: RunIssue[] = result.failedPages.map((page) => ({
+        book: page.pageName,
+        message: page.message,
+        summary:
+          'The plugin could not touch and restore this managed page file, so Logseq was not forced to reparse it.',
+        suggestedAction:
+          'Inspect the file path and retry after resolving the page-level write problem.',
+        debugFacts: page.relativeFilePath ? [`relativeFilePath=${page.relativeFilePath}`] : [],
+        namespacePrefix: formalNamespaceRoot,
+        pageName: page.pageName,
+      }))
+
+      replaceRunIssues(issues)
+      setStatus(result.failedPages.length > 0 ? 'error' : 'completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: result.touchedPages,
+              issuesCount: issues.length,
+              stats: {
+                pagesTargeted: result.matchedPages,
+                pagesProcessed: result.touchedPages,
+              },
+            },
+      )
+      setStatusMessage(
+        result.matchedPages === 0
+          ? `No managed pages matched ${formalNamespaceRoot}.`
+          : result.failedPages.length > 0
+            ? `Forced reparse on ${result.touchedPages} managed page(s); ${result.failedPages.length} page(s) failed.`
+            : `Forced Logseq to reparse ${result.touchedPages} managed page(s) under ${formalNamespaceRoot}.`,
+      )
+    } catch (err: unknown) {
+      logReadwiseError(formalSyncLogPrefix, 'force reparse managed pages failed', err)
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: 0,
+              issuesCount: 1,
+            },
+      )
+      setStatusMessage(
+        `Force reparse managed pages failed: ${describeUnknownError(err)}`,
+      )
+    }
   }
 
   const handleFullReconcile = async () => {
@@ -5419,6 +5646,7 @@ export const ReadwiseContainer = () => {
       documentHighlightDetailSkippedVideo: 0,
       documentHighlightDetailSkippedResolved: 0,
       documentHighlightDetailMissingInReader: 0,
+      documentHighlightDetailOutcomes: [],
       fetchHighlightsDurationMs: 0,
       fetchDocumentsDurationMs: 0,
     }
@@ -5685,6 +5913,9 @@ export const ReadwiseContainer = () => {
               queuedRetryLoadResult.documentHighlightDetailSkippedResolved
             loadStats.documentHighlightDetailMissingInReader +=
               queuedRetryLoadResult.documentHighlightDetailMissingInReader
+            loadStats.documentHighlightDetailOutcomes.push(
+              ...queuedRetryLoadResult.documentHighlightDetailOutcomes,
+            )
             loadStats.fetchDocumentsDurationMs +=
               queuedRetryLoadResult.fetchDocumentsDurationMs
           }
@@ -5772,11 +6003,35 @@ export const ReadwiseContainer = () => {
           detailEnrichmentSummarySegments.length > 0
             ? ` Detail enrich: ${detailEnrichmentSummarySegments.join(', ')}.`
             : ''
+        const sortedDetailOutcomes = [...loadStats.documentHighlightDetailOutcomes].sort(
+          (left, right) => {
+            const reasonCompare = formatReaderDetailEnrichOutcomeReason(
+              left.reason,
+            ).localeCompare(formatReaderDetailEnrichOutcomeReason(right.reason))
+            if (reasonCompare !== 0) return reasonCompare
+
+            const titleCompare = (left.title ?? '').localeCompare(right.title ?? '')
+            if (titleCompare !== 0) return titleCompare
+
+            return left.readerDocumentId.localeCompare(right.readerDocumentId)
+          },
+        )
 
         setStatus('completed')
         setCurrent(0)
         setTotal(0)
         setCurrentBook('')
+        setReaderDetailEnrichReportResult(
+          sortedDetailOutcomes.length > 0
+            ? {
+                modeLabel: statusPrefix,
+                highlightsScanned: loadStats.highlightsScanned,
+                highlightPagesScanned: loadStats.highlightPagesScanned,
+                documentHighlightDetailCalls: loadStats.documentHighlightDetailCalls,
+                outcomeEntries: sortedDetailOutcomes,
+              }
+            : null,
+        )
         setRunIssueContext((previous) =>
           previous == null
             ? previous
@@ -6864,12 +7119,14 @@ export const ReadwiseContainer = () => {
   const currentPageHelpNotes = [
     'Rebuild Current Page From Cache uses rw-reader-id, reads the cached highlight snapshot for that parent, and rewrites only the current managed page.',
     "Refresh Current Page Metadata re-fetches the current page's parent metadata from Reader, combines it with cached highlights, and rewrites only the current managed page.",
+    'Force Reparse Current Page temporarily touches the current page file and restores the original content so Logseq reparses it even when the rendered text itself did not change.',
     'These are the common page-level recovery actions. Low-frequency migration and audit workflows live under Maintenance Tools.',
   ]
   const maintenanceToolsHelpNotes = [
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
+    'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
     'Preview Current Page Legacy ID Migration scans Readwise managed pages for UUID mappings, then previews only the current page or whiteboard rewrites before apply.',
@@ -7280,6 +7537,86 @@ export const ReadwiseContainer = () => {
                   <strong>{currentPageLegacyIdApplyResult.rewritesApplied}</strong>
                 </div>
               </div>
+            </div>
+          )}
+
+          {readerDetailEnrichReportResult && (
+            <div className="rw-feedback-block rw-preview-panel">
+              <div className="rw-section-header">
+                <div>
+                  <div className="rw-section-title">Detail Enrich Report</div>
+                  <div className="rw-section-meta">
+                    {readerDetailEnrichReportResult.outcomeEntries.length}{' '}
+                    {readerDetailEnrichReportResult.outcomeEntries.length === 1
+                      ? 'outcome entry'
+                      : 'outcome entries'}{' '}
+                    from the last snapshot refresh
+                  </div>
+                </div>
+                <div className="rw-section-actions">
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() => void handleCopyReaderDetailEnrichReport()}
+                  >
+                    Copy Detail Report
+                  </button>
+                </div>
+              </div>
+              <div className="rw-preview-summary">
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Mode</span>
+                  <strong>{readerDetailEnrichReportResult.modeLabel}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Highlights scanned</span>
+                  <strong>{readerDetailEnrichReportResult.highlightsScanned}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Remote pages</span>
+                  <strong>{readerDetailEnrichReportResult.highlightPagesScanned}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">MCP calls</span>
+                  <strong>
+                    {readerDetailEnrichReportResult.documentHighlightDetailCalls}
+                  </strong>
+                </div>
+              </div>
+              <div className="rw-preview-note">
+                This report lists the documents that were cache-resolved, skipped,
+                or fell back because Reader detail data was unavailable.
+              </div>
+              <div className="rw-preview-list">
+                {readerDetailEnrichReportResult.outcomeEntries
+                  .slice(0, 60)
+                  .map((entry) => (
+                    <div
+                      key={`${entry.reason}:${entry.readerDocumentId}`}
+                      className="rw-preview-item"
+                    >
+                      <div className="rw-preview-item-head">
+                        <span className="rw-preview-kind">
+                          {formatReaderDetailEnrichOutcomeReason(entry.reason)}
+                        </span>
+                      </div>
+                      <div className="rw-preview-block">
+                        {entry.title ?? '(untitled)'}
+                      </div>
+                      <div className="rw-preview-block">
+                        readerDocumentId={entry.readerDocumentId}
+                      </div>
+                      {entry.category && (
+                        <div className="rw-preview-block">category={entry.category}</div>
+                      )}
+                    </div>
+                  ))}
+              </div>
+              {readerDetailEnrichReportResult.outcomeEntries.length > 60 && (
+                <div className="rw-preview-note">
+                  Showing the first 60 entries. Use Copy Detail Report for the full
+                  list.
+                </div>
+              )}
             </div>
           )}
 
@@ -7697,11 +8034,14 @@ export const ReadwiseContainer = () => {
                         <div className="rw-maintenance-section-header">
                           <div className="rw-maintenance-section-title">Snapshots</div>
                           <div className="rw-maintenance-section-note">
-                            Refresh the local highlight snapshot or capture raw page state for
-                            diff-based debugging.
+                            Refresh the local highlight snapshot, rebuild managed pages from
+                            cache, or capture raw page state for diff-based debugging.
                           </div>
                         </div>
                         <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handleCachedFullRebuild}>
+                            Cached Rebuild Managed Pages
+                          </button>
                           <button className="rw-btn" onClick={handleRefreshLocalSnapshotOnly}>
                             Refresh Local Snapshot Only
                           </button>

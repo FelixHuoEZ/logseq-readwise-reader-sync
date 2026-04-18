@@ -84,12 +84,13 @@ export interface ReaderPreviewLoadResult {
 }
 
 export interface LoadReaderPreviewBooksProgress {
-  phase: 'fetch-highlights' | 'fetch-documents'
+  phase: 'fetch-highlights' | 'fetch-notes' | 'fetch-documents'
   pageNumber?: number
   totalPages?: number
   totalResults?: number
   uniqueParents?: number
   totalHighlights?: number
+  totalNotes?: number
   completed?: number
   total?: number
   pageTitle?: string | null
@@ -206,7 +207,7 @@ const listReaderDocumentsWithRetry = async (
   params: Parameters<ReadwiseClient['listReaderDocuments']>[0],
   options: {
     logPrefix?: string
-    stage: 'fetch-highlights' | 'fetch-documents'
+    stage: 'fetch-highlights' | 'fetch-notes' | 'fetch-documents'
     pageNumber?: number
     parentId?: string
   },
@@ -245,6 +246,10 @@ const listReaderDocumentsWithRetry = async (
       ? `Reader highlight scan request${
           options.pageNumber != null ? ` at page ${options.pageNumber}` : ''
         }`
+      : options.stage === 'fetch-notes'
+        ? `Reader note scan request${
+            options.pageNumber != null ? ` at page ${options.pageNumber}` : ''
+          }`
       : `Reader parent document fetch${
           options.parentId ? ` for ${options.parentId}` : ''
         }`
@@ -487,11 +492,17 @@ export const loadReaderPreviewBooks = async (
   const latestHighlightByParent = new Map<string, ReaderDocument>(
     resumeState?.latestHighlightByParent ?? [],
   )
+  const resumePhase = resumeState?.phase ?? 'fetch-highlights'
   let totalHighlights = resumeState?.totalHighlights ?? 0
-  let pageNumber = resumeState?.pageNumber ?? 0
-  let pageCursor = resumeState?.pageCursor ?? null
-  let initialTotalPages = resumeState?.initialTotalPages ?? null
-  let initialTotalResults = resumeState?.initialTotalResults ?? null
+  let highlightPageNumber = resumeState?.pageNumber ?? 0
+  let highlightPageCursor =
+    resumePhase === 'fetch-highlights' ? resumeState?.pageCursor ?? null : null
+  let highlightInitialTotalPages = resumeState?.initialTotalPages ?? null
+  let highlightInitialTotalResults = resumeState?.initialTotalResults ?? null
+  let notePageNumber = 0
+  let notePageCursor: string | null = null
+  let noteInitialTotalPages: number | null = null
+  let noteInitialTotalResults: number | null = null
   let latestHighlightUpdatedAt = getLatestUpdatedAt(latestHighlightByParent.values())
   let usedCachedHighlightSnapshot = false
   let staleHighlightDeletionRisk = false
@@ -524,10 +535,11 @@ export const loadReaderPreviewBooks = async (
     seenHighlightIds: [...seenHighlightIds],
     latestHighlightByParent: [...latestHighlightByParent.entries()],
     totalHighlights,
-    pageNumber: extra.pageNumber ?? pageNumber,
-    pageCursor: extra.pageCursor ?? pageCursor,
-    initialTotalPages: extra.initialTotalPages ?? initialTotalPages,
-    initialTotalResults: extra.initialTotalResults ?? initialTotalResults,
+    pageNumber: extra.pageNumber ?? highlightPageNumber,
+    pageCursor: extra.pageCursor ?? highlightPageCursor,
+    initialTotalPages: extra.initialTotalPages ?? highlightInitialTotalPages,
+    initialTotalResults:
+      extra.initialTotalResults ?? highlightInitialTotalResults,
     fetchHighlightsDurationMs: Date.now() - fetchHighlightsStartedAt,
     selectedParentIds: extra.selectedParentIds ?? [],
     previewBooks: extra.previewBooks ?? [],
@@ -596,7 +608,7 @@ export const loadReaderPreviewBooks = async (
 
   if (
     mode === 'cached-full-rebuild' &&
-    (resumeState?.phase ?? 'fetch-highlights') === 'fetch-highlights'
+    resumePhase === 'fetch-highlights'
   ) {
     if (!previewCache) {
       throw new Error('Cached rebuild requires local Reader cache support.')
@@ -629,22 +641,21 @@ export const loadReaderPreviewBooks = async (
       uniqueParents: targetParentIds.length,
       totalHighlights,
     })
-  } else if ((resumeState?.phase ?? 'fetch-highlights') === 'fetch-highlights') {
-    let remoteHighlightScanExhaustive = false
-    let remoteNoteScanExhaustive = true
-    let notePageCursor: string | null = null
-    let noteInitialTotalPages: number | null = null
-    let noteInitialTotalResults: number | null = null
+  } else {
+    let remoteHighlightScanExhaustive = resumePhase !== 'fetch-highlights'
+    let remoteNoteScanExhaustive = resumePhase === 'fetch-documents'
+    let totalNotes = 0
 
-    while (true) {
+    if (resumePhase === 'fetch-highlights') {
+      while (true) {
       if (
         effectiveMaxHighlightPages != null &&
-        pageNumber >= effectiveMaxHighlightPages
+        highlightPageNumber >= effectiveMaxHighlightPages
       ) {
         break
       }
 
-      const nextPageNumber = pageNumber + 1
+      const nextPageNumber = highlightPageNumber + 1
       const pageStartedAt = Date.now()
       let response: Awaited<ReturnType<ReadwiseClient['listReaderDocuments']>>
 
@@ -654,7 +665,7 @@ export const loadReaderPreviewBooks = async (
           {
             category: 'highlight',
             limit: 100,
-            pageCursor: pageCursor ?? undefined,
+            pageCursor: highlightPageCursor ?? undefined,
             updatedAfter: options.updatedAfter,
           },
           {
@@ -670,14 +681,14 @@ export const loadReaderPreviewBooks = async (
         )
       }
 
-      pageNumber = nextPageNumber
+      highlightPageNumber = nextPageNumber
 
-      if (initialTotalPages == null) {
-        initialTotalPages =
+      if (highlightInitialTotalPages == null) {
+        highlightInitialTotalPages =
           typeof response.count === 'number' && response.count > 0
             ? Math.ceil(response.count / 100)
             : null
-        initialTotalResults =
+        highlightInitialTotalResults =
           typeof response.count === 'number' && response.count > 0
             ? response.count
             : null
@@ -688,8 +699,10 @@ export const loadReaderPreviewBooks = async (
       }
 
       const estimatedTotalPages = Math.max(
-        initialTotalPages ?? effectiveMaxHighlightPages ?? pageNumber,
-        pageNumber,
+        highlightInitialTotalPages ??
+          effectiveMaxHighlightPages ??
+          highlightPageNumber,
+        highlightPageNumber,
       )
       const displayTotalPages =
         effectiveMaxHighlightPages != null
@@ -698,30 +711,30 @@ export const loadReaderPreviewBooks = async (
 
       if (options.logPrefix) {
         logReadwiseDebug(options.logPrefix, 'fetched highlight page', {
-          pageNumber,
+          pageNumber: highlightPageNumber,
           estimatedTotalPages: displayTotalPages,
-          estimatedTotalResults: initialTotalResults,
+          estimatedTotalResults: highlightInitialTotalResults,
           responseResultCount: response.results.length,
           totalHighlights,
           uniqueParents: targetParentIds.length,
           hasNextPage: !!response.nextPageCursor,
           cappedByDebugLimit:
             effectiveMaxHighlightPages != null &&
-            pageNumber >= effectiveMaxHighlightPages,
+            highlightPageNumber >= effectiveMaxHighlightPages,
           pageDurationMs: Date.now() - pageStartedAt,
         })
       }
 
       options.onProgress?.({
         phase: 'fetch-highlights',
-        pageNumber,
+        pageNumber: highlightPageNumber,
         totalPages: displayTotalPages,
-        totalResults: initialTotalResults ?? undefined,
+        totalResults: highlightInitialTotalResults ?? undefined,
         uniqueParents: targetParentIds.length,
         totalHighlights,
       })
 
-      pageCursor = response.nextPageCursor
+      highlightPageCursor = response.nextPageCursor
 
       if (!response.nextPageCursor) {
         remoteHighlightScanExhaustive = true
@@ -735,6 +748,7 @@ export const loadReaderPreviewBooks = async (
       ) {
         break
       }
+    }
     }
 
     const noteDocumentsByHighlightId = new Map<string, ReaderDocument[]>()
@@ -753,22 +767,24 @@ export const loadReaderPreviewBooks = async (
       const text = getDocumentContentText(noteDocument)
       if (text.length === 0) return false
 
+      totalNotes += 1
       const existingNotes = noteDocumentsByHighlightId.get(highlightId) ?? []
       existingNotes.push(noteDocument)
       noteDocumentsByHighlightId.set(highlightId, existingNotes)
       return true
     }
 
-    while (true) {
+    if (resumePhase === 'fetch-highlights') {
+      while (true) {
       if (
         effectiveMaxHighlightPages != null &&
-        pageNumber >= effectiveMaxHighlightPages
+        notePageNumber >= effectiveMaxHighlightPages
       ) {
         remoteNoteScanExhaustive = false
         break
       }
 
-      const nextPageNumber = pageNumber + 1
+      const nextPageNumber = notePageNumber + 1
       const pageStartedAt = Date.now()
       let response: Awaited<ReturnType<ReadwiseClient['listReaderDocuments']>>
 
@@ -783,7 +799,7 @@ export const loadReaderPreviewBooks = async (
           },
           {
             logPrefix: options.logPrefix,
-            stage: 'fetch-highlights',
+            stage: 'fetch-notes',
             pageNumber: nextPageNumber,
           },
         )
@@ -802,7 +818,7 @@ export const loadReaderPreviewBooks = async (
         )
       }
 
-      pageNumber = nextPageNumber
+      notePageNumber = nextPageNumber
 
       if (noteInitialTotalPages == null) {
         noteInitialTotalPages =
@@ -820,8 +836,8 @@ export const loadReaderPreviewBooks = async (
       }
 
       const estimatedTotalPages = Math.max(
-        (initialTotalPages ?? 0) + (noteInitialTotalPages ?? 0),
-        pageNumber,
+        noteInitialTotalPages ?? effectiveMaxHighlightPages ?? notePageNumber,
+        notePageNumber,
       )
       const displayTotalPages =
         effectiveMaxHighlightPages != null
@@ -830,33 +846,34 @@ export const loadReaderPreviewBooks = async (
 
       if (options.logPrefix) {
         logReadwiseDebug(options.logPrefix, 'fetched note page', {
-          pageNumber,
+          pageNumber: notePageNumber,
           estimatedTotalPages: displayTotalPages,
-          estimatedTotalResults:
-            (initialTotalResults ?? 0) + (noteInitialTotalResults ?? 0),
+          estimatedTotalResults: noteInitialTotalResults,
           responseResultCount: response.results.length,
           trackedHighlightNotes: noteDocumentsByHighlightId.size,
+          totalNotes,
           hasNextPage: !!response.nextPageCursor,
           cappedByDebugLimit:
             effectiveMaxHighlightPages != null &&
-            pageNumber >= effectiveMaxHighlightPages,
+            notePageNumber >= effectiveMaxHighlightPages,
           pageDurationMs: Date.now() - pageStartedAt,
         })
       }
 
       options.onProgress?.({
-        phase: 'fetch-highlights',
-        pageNumber,
+        phase: 'fetch-notes',
+        pageNumber: notePageNumber,
         totalPages: displayTotalPages,
-        totalResults:
-          (initialTotalResults ?? 0) + (noteInitialTotalResults ?? 0) || undefined,
+        totalResults: noteInitialTotalResults ?? undefined,
         uniqueParents: targetParentIds.length,
         totalHighlights,
+        totalNotes,
       })
 
       notePageCursor = response.nextPageCursor
 
       if (!response.nextPageCursor) {
+        remoteNoteScanExhaustive = true
         break
       }
 
@@ -869,13 +886,6 @@ export const loadReaderPreviewBooks = async (
         break
       }
     }
-
-    if (noteInitialTotalPages != null) {
-      initialTotalPages = (initialTotalPages ?? 0) + noteInitialTotalPages
-    }
-
-    if (noteInitialTotalResults != null) {
-      initialTotalResults = (initialTotalResults ?? 0) + noteInitialTotalResults
     }
 
     const noteParentHighlightIds = [...noteDocumentsByHighlightId.keys()].filter(
@@ -985,9 +995,9 @@ export const loadReaderPreviewBooks = async (
               {
                 mode,
                 highlightCount: allHighlights.length,
-                highlightPagesScanned: pageNumber,
+                highlightPagesScanned: highlightPageNumber,
                 maxHighlightPages: effectiveMaxHighlightPages,
-                hasMoreRemotePages: pageCursor != null,
+                hasMoreRemotePages: highlightPageCursor != null,
                 hasMoreRemoteNotePages: notePageCursor != null,
               },
             )
@@ -1015,13 +1025,13 @@ export const loadReaderPreviewBooks = async (
     return {
       books: [],
       stats: {
-        highlightPagesScanned: pageNumber,
+        highlightPagesScanned: highlightPageNumber,
         highlightsScanned: totalHighlights,
         parentDocumentsIdentified: targetParentIds.length,
         pagesTargeted: 0,
         pagesProcessed: 0,
-        estimatedHighlightPages: initialTotalPages,
-        estimatedHighlightResults: initialTotalResults,
+        estimatedHighlightPages: highlightInitialTotalPages,
+        estimatedHighlightResults: highlightInitialTotalResults,
         latestHighlightUpdatedAt,
         usedCachedHighlightSnapshot,
         staleHighlightDeletionRisk,
@@ -1035,7 +1045,9 @@ export const loadReaderPreviewBooks = async (
   }
 
   const selectedParentIds =
-    resumeState?.phase === 'fetch-documents' && resumeState.selectedParentIds.length > 0
+    resumePhase === 'fetch-documents' &&
+    resumeState != null &&
+    resumeState.selectedParentIds.length > 0
       ? [...resumeState.selectedParentIds]
       : (() => {
           const sorted = sortedParentIds()
@@ -1043,7 +1055,9 @@ export const loadReaderPreviewBooks = async (
         })()
   const previewBooks = [...(resumeState?.previewBooks ?? [])]
   let documentIndex =
-    resumeState?.phase === 'fetch-documents' ? resumeState.documentIndex : 0
+    resumePhase === 'fetch-documents' && resumeState != null
+      ? resumeState.documentIndex
+      : 0
   const fetchDocumentsStartedAt =
     Date.now() - (resumeState?.fetchDocumentsDurationMs ?? 0)
   const fetchedParentDocuments: ReaderDocument[] = []
@@ -1150,13 +1164,13 @@ export const loadReaderPreviewBooks = async (
   return {
     books: previewBooks,
     stats: {
-      highlightPagesScanned: pageNumber,
+      highlightPagesScanned: highlightPageNumber,
       highlightsScanned: totalHighlights,
       parentDocumentsIdentified: targetParentIds.length,
       pagesTargeted: selectedParentIds.length,
       pagesProcessed: previewBooks.length,
-      estimatedHighlightPages: initialTotalPages,
-      estimatedHighlightResults: initialTotalResults,
+      estimatedHighlightPages: highlightInitialTotalPages,
+      estimatedHighlightResults: highlightInitialTotalResults,
       latestHighlightUpdatedAt,
       usedCachedHighlightSnapshot,
       staleHighlightDeletionRisk,

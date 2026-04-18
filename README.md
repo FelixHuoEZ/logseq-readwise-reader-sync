@@ -30,7 +30,7 @@ This project is published as an independent plugin release line. If it is publis
 
 ## Known Tradeoff
 
-`Incremental Sync` uses the saved Reader cursor and only scans changed highlights. `Full Refresh` still scans the full Reader highlight library and can take minutes on large libraries. `Refresh Local Snapshot Only` runs the full highlight scan too, but stops after refreshing the local snapshot and does not rewrite managed pages. Auto Sync only runs `Incremental Sync`; it never promotes itself to `Full Refresh` or snapshot-only maintenance work. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates a full-library scan, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
+`Incremental Sync` uses the saved Reader cursor and only scans changed highlights and notes. `Full Refresh` still scans the full Reader highlight and note library and can take minutes on large libraries. `Refresh Local Snapshot Only` runs the same full remote scan too, but stops after refreshing the local snapshot and does not rewrite managed pages. Auto Sync only runs `Incremental Sync`; it never promotes itself to `Full Refresh` or snapshot-only maintenance work. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates a full-library scan, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
 
 ## Sync Scope Difference From The Official Plugin
 
@@ -74,7 +74,7 @@ Do not run this project and another Readwise Logseq plugin against the same grap
 9. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
 10. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
 11. Wait for the plugin to:
-   - scan Reader highlights or load the cached highlight snapshot
+   - scan Reader highlights and notes, or load the cached highlight snapshot
    - group them by parent document
    - fetch the target parent documents
    - rewrite managed pages
@@ -124,9 +124,9 @@ Debug settings affect different phases:
   - limits how many managed pages `Full Refresh` rewrites
   - mainly reduces parent-document fetch and page-write time
 - `Reader Full Scan Debug Highlight Page Limit`
-  - limits how many Reader highlight pages `Incremental Sync` and `Full Refresh` scan
-  - mainly reduces highlight-scan time
-  - roughly `100` highlights per page
+  - limits how many Reader highlight and note pages `Incremental Sync` and `Full Refresh` scan
+  - mainly reduces remote-scan time
+  - roughly `100` Reader items per page
   - if it truncates `Full Refresh`, the local cached highlight snapshot is not refreshed
 
 Use the highlight page limit only for short debug runs. Set it back to `0` for real formal sync.

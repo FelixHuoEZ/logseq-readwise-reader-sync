@@ -317,6 +317,23 @@ const getLatestUpdatedAt = (documents: Iterable<ReaderDocument>) => {
 const flattenHighlightsByParent = (highlightsByParent: Map<string, ReaderDocument[]>) =>
   [...highlightsByParent.values()].flat()
 
+const mergeHighlightsForParent = (
+  cachedHighlights: readonly ReaderDocument[],
+  incomingHighlights: readonly ReaderDocument[],
+) => {
+  const mergedById = new Map<string, ReaderDocument>()
+
+  for (const highlight of cachedHighlights) {
+    mergedById.set(highlight.id, highlight)
+  }
+
+  for (const highlight of incomingHighlights) {
+    mergedById.set(highlight.id, highlight)
+  }
+
+  return [...mergedById.values()]
+}
+
 const appendReaderDocumentHighlightDetailOutcome = (
   entries: ReaderDocumentHighlightDetailOutcome[],
   entry: ReaderDocumentHighlightDetailOutcome,
@@ -1508,10 +1525,30 @@ export const loadReaderPreviewBooks = async (
     Date.now() - (resumeState?.fetchDocumentsDurationMs ?? 0)
   const fetchedParentDocuments: ReaderDocument[] = []
   const enrichedHighlightsToPersist: ReaderDocument[] = []
+  let cachedHighlightsByParent = new Map<string, ReaderDocument[]>()
   let cachedParentDocuments = new Map<string, ReaderDocument>()
   let cachedHighlightsById = new Map<string, ReaderDocument>()
 
   if (previewCache) {
+    if (mode === 'incremental-window' && selectedParentIds.length > 0) {
+      try {
+        cachedHighlightsByParent = await previewCache.loadGroupedHighlightsByParent(
+          selectedParentIds,
+        )
+      } catch (error) {
+        if (options.logPrefix) {
+          logReadwiseWarn(
+            options.logPrefix,
+            'failed to load cached grouped highlights before incremental page rebuild',
+            {
+              parentCount: selectedParentIds.length,
+              formattedError: describeUnknownError(error),
+            },
+          )
+        }
+      }
+    }
+
     if (parentMetadataMode === 'cache_first') {
       try {
         cachedParentDocuments = await previewCache.getCachedParentDocuments(
@@ -1613,8 +1650,16 @@ export const loadReaderPreviewBooks = async (
 
     if (!document) continue
 
+    const mergedParentHighlights =
+      mode === 'incremental-window'
+        ? mergeHighlightsForParent(
+            cachedHighlightsByParent.get(parentId) ?? [],
+            highlightsByParent.get(parentId) ?? [],
+          )
+        : [...(highlightsByParent.get(parentId) ?? [])]
+
     const cacheReuseResult = reuseCachedReaderDocumentHighlightDetails(
-      highlightsByParent.get(parentId) ?? [],
+      mergedParentHighlights,
       cachedHighlightsById,
     )
     const highlights = [...cacheReuseResult.highlights].sort(

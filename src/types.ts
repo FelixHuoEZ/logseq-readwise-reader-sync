@@ -29,6 +29,7 @@ export interface ExportedHighlight {
   is_favorite: boolean
   is_discard: boolean
   readwise_url: string
+  image_url?: string | null
 }
 
 export interface ExportedBook {

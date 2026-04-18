@@ -2,6 +2,7 @@ import type { GraphReaderSyncCacheV1 } from '../cache/reader-sync-cache'
 import {
   describeUnknownError,
   logReadwiseDebug,
+  logReadwiseInfo,
   logReadwiseWarn,
 } from '../logging'
 import type { ReaderDocument } from '../types'
@@ -128,8 +129,58 @@ const sortByCreatedAtAscending = (left: ReaderDocument, right: ReaderDocument) =
 const sortByUpdatedAtDescending = (left: ReaderDocument, right: ReaderDocument) =>
   right.updated_at.localeCompare(left.updated_at)
 
-const getHighlightText = (document: ReaderDocument) =>
+const getDocumentContentText = (document: ReaderDocument) =>
   typeof document.content === 'string' ? document.content.trim() : ''
+
+const getDocumentNotesText = (document: ReaderDocument) =>
+  typeof document.notes === 'string' ? document.notes.trim() : ''
+
+const joinUniqueNonEmptySections = (
+  values: readonly (string | null | undefined)[],
+): string | null => {
+  const seen = new Set<string>()
+  const sections: string[] = []
+
+  for (const value of values) {
+    const trimmed = typeof value === 'string' ? value.trim() : ''
+    if (trimmed.length === 0 || seen.has(trimmed)) continue
+
+    seen.add(trimmed)
+    sections.push(trimmed)
+  }
+
+  return sections.length > 0 ? sections.join('\n\n') : null
+}
+
+const mergeHighlightWithAttachedNotes = (
+  highlight: ReaderDocument,
+  noteDocuments: readonly ReaderDocument[],
+): ReaderDocument => {
+  const sortedNotes = [...noteDocuments].sort(sortByCreatedAtAscending)
+  const mergedNotes = joinUniqueNonEmptySections(
+    sortedNotes.length > 0
+      ? sortedNotes.map((note) => getDocumentContentText(note))
+      : [getDocumentNotesText(highlight)],
+  )
+  const latestNoteUpdatedAt = getLatestUpdatedAt(sortedNotes)
+  const mergedUpdatedAt =
+    latestNoteUpdatedAt != null && latestNoteUpdatedAt > highlight.updated_at
+      ? latestNoteUpdatedAt
+      : highlight.updated_at
+
+  if (
+    mergedNotes === getDocumentNotesText(highlight) &&
+    mergedUpdatedAt === highlight.updated_at
+  ) {
+    return highlight
+  }
+
+  return {
+    ...highlight,
+    notes: mergedNotes,
+    updated_at: mergedUpdatedAt,
+  }
+}
 
 const uniqueParentIds = (parentIds: readonly string[]) =>
   [...new Set(parentIds.filter((parentId) => typeof parentId === 'string' && parentId.length > 0))]
@@ -426,6 +477,12 @@ export const loadReaderPreviewBooks = async (
   const highlightsByParent = new Map<string, ReaderDocument[]>(
     resumeState?.highlightsByParent ?? [],
   )
+  const highlightsById = new Map<string, ReaderDocument>()
+  for (const highlights of highlightsByParent.values()) {
+    for (const highlight of highlights) {
+      highlightsById.set(highlight.id, highlight)
+    }
+  }
   const seenHighlightIds = new Set(resumeState?.seenHighlightIds ?? [])
   const latestHighlightByParent = new Map<string, ReaderDocument>(
     resumeState?.latestHighlightByParent ?? [],
@@ -478,18 +535,12 @@ export const loadReaderPreviewBooks = async (
     fetchDocumentsDurationMs: extra.fetchDocumentsDurationMs ?? 0,
   })
 
-  const ingestHighlight = (highlight: ReaderDocument) => {
+  const upsertResolvedHighlight = (highlight: ReaderDocument) => {
     const parentId =
       typeof highlight.parent_id === 'string' && highlight.parent_id.length > 0
         ? highlight.parent_id
         : null
-    if (!parentId || seenHighlightIds.has(highlight.id)) return false
-
-    const text = getHighlightText(highlight)
-    if (text.length === 0) return false
-
-    seenHighlightIds.add(highlight.id)
-    totalHighlights += 1
+    if (!parentId) return false
 
     if (
       typeof highlight.updated_at === 'string' &&
@@ -504,16 +555,43 @@ export const loadReaderPreviewBooks = async (
       targetParentIds.push(parentId)
     }
 
-    const existing = highlightsByParent.get(parentId) ?? []
-    existing.push(highlight)
-    highlightsByParent.set(parentId, existing)
+    const existingHighlights = highlightsByParent.get(parentId) ?? []
+    const existingIndex = existingHighlights.findIndex(
+      (existingHighlight) => existingHighlight.id === highlight.id,
+    )
+
+    if (existingIndex >= 0) {
+      existingHighlights[existingIndex] = highlight
+    } else {
+      existingHighlights.push(highlight)
+      if (!seenHighlightIds.has(highlight.id)) {
+        seenHighlightIds.add(highlight.id)
+        totalHighlights += 1
+      }
+    }
+
+    highlightsByParent.set(parentId, existingHighlights)
+    highlightsById.set(highlight.id, highlight)
 
     const latestExisting = latestHighlightByParent.get(parentId)
-    if (!latestExisting || highlight.updated_at > latestExisting.updated_at) {
+    if (
+      !latestExisting ||
+      latestExisting.id === highlight.id ||
+      highlight.updated_at > latestExisting.updated_at
+    ) {
       latestHighlightByParent.set(parentId, highlight)
     }
 
     return true
+  }
+
+  const ingestHighlight = (highlight: ReaderDocument) => {
+    if (seenHighlightIds.has(highlight.id)) return false
+
+    const text = getDocumentContentText(highlight)
+    if (text.length === 0) return false
+
+    return upsertResolvedHighlight(highlight)
   }
 
   if (
@@ -553,6 +631,10 @@ export const loadReaderPreviewBooks = async (
     })
   } else if ((resumeState?.phase ?? 'fetch-highlights') === 'fetch-highlights') {
     let remoteHighlightScanExhaustive = false
+    let remoteNoteScanExhaustive = true
+    let notePageCursor: string | null = null
+    let noteInitialTotalPages: number | null = null
+    let noteInitialTotalResults: number | null = null
 
     while (true) {
       if (
@@ -655,12 +737,233 @@ export const loadReaderPreviewBooks = async (
       }
     }
 
+    const noteDocumentsByHighlightId = new Map<string, ReaderDocument[]>()
+    const seenNoteIds = new Set<string>()
+
+    const recordHighlightNote = (noteDocument: ReaderDocument) => {
+      const highlightId =
+        typeof noteDocument.parent_id === 'string' &&
+        noteDocument.parent_id.length > 0
+          ? noteDocument.parent_id
+          : null
+      if (!highlightId || seenNoteIds.has(noteDocument.id)) return false
+
+      seenNoteIds.add(noteDocument.id)
+
+      if (
+        typeof noteDocument.updated_at === 'string' &&
+        (latestHighlightUpdatedAt == null ||
+          noteDocument.updated_at > latestHighlightUpdatedAt)
+      ) {
+        latestHighlightUpdatedAt = noteDocument.updated_at
+      }
+
+      const text = getDocumentContentText(noteDocument)
+      if (text.length === 0) return false
+
+      const existingNotes = noteDocumentsByHighlightId.get(highlightId) ?? []
+      existingNotes.push(noteDocument)
+      noteDocumentsByHighlightId.set(highlightId, existingNotes)
+      return true
+    }
+
+    while (true) {
+      if (
+        effectiveMaxHighlightPages != null &&
+        pageNumber >= effectiveMaxHighlightPages
+      ) {
+        remoteNoteScanExhaustive = false
+        break
+      }
+
+      const nextPageNumber = pageNumber + 1
+      const pageStartedAt = Date.now()
+      const response = await listReaderDocumentsWithRetry(
+        client,
+        {
+          category: 'note',
+          limit: 100,
+          pageCursor: notePageCursor ?? undefined,
+          updatedAfter: options.updatedAfter,
+        },
+        {
+          logPrefix: options.logPrefix,
+          stage: 'fetch-highlights',
+          pageNumber: nextPageNumber,
+        },
+      )
+
+      pageNumber = nextPageNumber
+
+      if (noteInitialTotalPages == null) {
+        noteInitialTotalPages =
+          typeof response.count === 'number' && response.count > 0
+            ? Math.ceil(response.count / 100)
+            : null
+        noteInitialTotalResults =
+          typeof response.count === 'number' && response.count > 0
+            ? response.count
+            : null
+      }
+
+      for (const noteDocument of response.results) {
+        recordHighlightNote(noteDocument)
+      }
+
+      const estimatedTotalPages = Math.max(
+        (initialTotalPages ?? 0) + (noteInitialTotalPages ?? 0),
+        pageNumber,
+      )
+      const displayTotalPages =
+        effectiveMaxHighlightPages != null
+          ? Math.min(estimatedTotalPages, effectiveMaxHighlightPages)
+          : estimatedTotalPages
+
+      if (options.logPrefix) {
+        logReadwiseDebug(options.logPrefix, 'fetched note page', {
+          pageNumber,
+          estimatedTotalPages: displayTotalPages,
+          estimatedTotalResults:
+            (initialTotalResults ?? 0) + (noteInitialTotalResults ?? 0),
+          responseResultCount: response.results.length,
+          trackedHighlightNotes: noteDocumentsByHighlightId.size,
+          hasNextPage: !!response.nextPageCursor,
+          cappedByDebugLimit:
+            effectiveMaxHighlightPages != null &&
+            pageNumber >= effectiveMaxHighlightPages,
+          pageDurationMs: Date.now() - pageStartedAt,
+        })
+      }
+
+      options.onProgress?.({
+        phase: 'fetch-highlights',
+        pageNumber,
+        totalPages: displayTotalPages,
+        totalResults:
+          (initialTotalResults ?? 0) + (noteInitialTotalResults ?? 0) || undefined,
+        uniqueParents: targetParentIds.length,
+        totalHighlights,
+      })
+
+      notePageCursor = response.nextPageCursor
+
+      if (!response.nextPageCursor) {
+        break
+      }
+
+      if (
+        mode === 'incremental-window' &&
+        maxDocuments != null &&
+        targetParentIds.length >= maxDocuments
+      ) {
+        remoteNoteScanExhaustive = false
+        break
+      }
+    }
+
+    if (noteInitialTotalPages != null) {
+      initialTotalPages = (initialTotalPages ?? 0) + noteInitialTotalPages
+    }
+
+    if (noteInitialTotalResults != null) {
+      initialTotalResults = (initialTotalResults ?? 0) + noteInitialTotalResults
+    }
+
+    const noteParentHighlightIds = [...noteDocumentsByHighlightId.keys()].filter(
+      (highlightId) => !highlightsById.has(highlightId),
+    )
+
+    if (noteParentHighlightIds.length > 0 && previewCache) {
+      try {
+        const cachedHighlights = await previewCache.getCachedHighlightsByIds(
+          noteParentHighlightIds,
+        )
+
+        for (const highlight of cachedHighlights.values()) {
+          ingestHighlight(highlight)
+        }
+      } catch (error) {
+        if (options.logPrefix) {
+          logReadwiseWarn(
+            options.logPrefix,
+            'failed to load cached highlights for changed Reader notes',
+            {
+              requestedHighlightCount: noteParentHighlightIds.length,
+              formattedError: describeUnknownError(error),
+            },
+          )
+        }
+      }
+    }
+
+    const unresolvedNoteParentHighlightIds = [...noteDocumentsByHighlightId.keys()].filter(
+      (highlightId) => !highlightsById.has(highlightId),
+    )
+
+    for (const highlightId of unresolvedNoteParentHighlightIds) {
+      try {
+        const response = await listReaderDocumentsWithRetry(
+          client,
+          {
+            id: highlightId,
+            limit: 1,
+          },
+          {
+            logPrefix: options.logPrefix,
+            stage: 'fetch-documents',
+            parentId: highlightId,
+          },
+        )
+        const highlight = response.results[0] ?? null
+        if (highlight) {
+          ingestHighlight(highlight)
+        }
+      } catch (error) {
+        if (options.logPrefix) {
+          logReadwiseWarn(
+            options.logPrefix,
+            'failed to fetch a highlight referenced by a changed Reader note',
+            {
+              highlightId,
+              formattedError: describeUnknownError(error),
+            },
+          )
+        }
+      }
+    }
+
+    let mergedHighlightNoteCount = 0
+    let unresolvedHighlightNoteCount = 0
+
+    for (const [highlightId, noteDocuments] of noteDocumentsByHighlightId.entries()) {
+      const highlight = highlightsById.get(highlightId)
+      if (!highlight) {
+        unresolvedHighlightNoteCount += 1
+        continue
+      }
+
+      const mergedHighlight = mergeHighlightWithAttachedNotes(
+        highlight,
+        noteDocuments,
+      )
+      upsertResolvedHighlight(mergedHighlight)
+      mergedHighlightNoteCount += 1
+    }
+
+    if (options.logPrefix && noteDocumentsByHighlightId.size > 0) {
+      logReadwiseInfo(options.logPrefix, 'merged Reader note documents into highlights', {
+        trackedHighlightsWithNotes: noteDocumentsByHighlightId.size,
+        mergedHighlightNoteCount,
+        unresolvedHighlightNoteCount,
+      })
+    }
+
     if (previewCache) {
       const allHighlights = flattenHighlightsByParent(highlightsByParent)
 
       try {
         if (mode === 'full-library-scan' || mode === 'snapshot-only-refresh') {
-          if (remoteHighlightScanExhaustive) {
+          if (remoteHighlightScanExhaustive && remoteNoteScanExhaustive) {
             await previewCache.replaceHighlightsFromFullScan(
               allHighlights,
               latestHighlightUpdatedAt,
@@ -676,6 +979,7 @@ export const loadReaderPreviewBooks = async (
                 highlightPagesScanned: pageNumber,
                 maxHighlightPages: effectiveMaxHighlightPages,
                 hasMoreRemotePages: pageCursor != null,
+                hasMoreRemoteNotePages: notePageCursor != null,
               },
             )
           }

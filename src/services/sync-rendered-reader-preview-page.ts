@@ -1,7 +1,12 @@
 import { format, isValid, parseISO } from 'date-fns'
 
 import type { ReaderPreviewBook } from '../api'
+import { tryEnrichReaderDocumentHighlightsViaMcp } from '../api/reader-document-highlights'
 import { logReadwiseDebug, logReadwiseInfo } from '../logging'
+import {
+  extractReaderHighlightContentSegments,
+  normalizeReaderImageUrl,
+} from '../reader/extract-reader-highlight-content-segments'
 import {
   buildRenderHashInput,
   computeRenderHash,
@@ -73,17 +78,29 @@ const buildMetadataEntries = (
 const buildSemanticHighlights = (
   previewBook: ReaderPreviewBook,
 ): SemanticHighlight[] =>
-  previewBook.highlights.map((highlight) => ({
-    highlightId: highlight.id,
-    uuid: computeCompatibleHighlightUuid(highlight.url),
-    text: highlight.content?.trim() ?? '',
-    imageUrl: normalizeOptionalText(highlight.image_url),
-    locationLabel: highlight.url ? 'View Highlight' : null,
-    locationUrl: highlight.url ?? null,
-    createdDate: toYmd(highlight.created_at) ?? '',
-    tags: normalizeTagNames(highlight.tags),
-    note: normalizeOptionalText(highlight.notes),
-  }))
+  previewBook.highlights.map((highlight) => {
+    const primaryText = highlight.content?.trim() ?? ''
+    const highlightSegments = extractReaderHighlightContentSegments({
+      richContent: highlight.render_content ?? highlight.content,
+      imageUrl: highlight.image_url,
+      htmlContent: highlight.html_content,
+      primaryText,
+    })
+    const contentSegments = highlightSegments
+
+    return {
+      highlightId: highlight.id,
+      uuid: computeCompatibleHighlightUuid(highlight.url),
+      text: primaryText,
+      imageUrl: null,
+      contentSegments,
+      locationLabel: highlight.url ? 'View Highlight' : null,
+      locationUrl: highlight.url ?? null,
+      createdDate: toYmd(highlight.created_at) ?? '',
+      tags: normalizeTagNames(highlight.tags),
+      note: normalizeOptionalText(highlight.notes),
+    }
+  })
 
 const buildReaderPreviewSemanticPage = (
   previewBook: ReaderPreviewBook,
@@ -97,9 +114,9 @@ const buildReaderPreviewSemanticPage = (
   metadata: buildMetadataEntries(previewBook, syncDate),
   pageNote:
     normalizeOptionalText(previewBook.document.notes) != null ||
-    normalizeOptionalText(previewBook.document.image_url) != null
+    normalizeReaderImageUrl(previewBook.document.image_url) != null
       ? {
-          imageUrl: normalizeOptionalText(previewBook.document.image_url),
+          imageUrl: normalizeReaderImageUrl(previewBook.document.image_url),
           text: normalizeOptionalText(previewBook.document.notes),
         }
       : null,
@@ -161,26 +178,41 @@ export const syncRenderedReaderPreviewPage = async (
     syncHeaderText?: string
     pageResolveMode?: 'title_only' | 'reader_id_then_title'
     identityNamespaceRoot?: string
+    readerAuthToken?: string | null
   } = {},
 ) => {
-  const sourcePageTitle = previewBook.document.title?.trim().length
-    ? previewBook.document.title
-    : previewBook.document.id
+  const enrichedPreviewBook =
+    options.readerAuthToken != null
+      ? {
+          ...previewBook,
+          highlights: (
+            await tryEnrichReaderDocumentHighlightsViaMcp({
+              token: options.readerAuthToken,
+              document: previewBook.document,
+              highlights: previewBook.highlights,
+              logPrefix,
+            })
+          ).highlights,
+        }
+      : previewBook
+  const sourcePageTitle = enrichedPreviewBook.document.title?.trim().length
+    ? enrichedPreviewBook.document.title
+    : enrichedPreviewBook.document.id
   const pageNamePlan = buildManagedPageNamePlanV1({
     pageTitle: sourcePageTitle,
     namespacePrefix,
-    managedId: previewBook.document.id,
+    managedId: enrichedPreviewBook.document.id,
     format: 'org',
   })
   const preferredPageName = pageNamePlan.preferredPageName
   const disambiguatedPageName = pageNamePlan.disambiguatedPageName
   logReadwiseDebug(logPrefix, 'preparing rendered Reader page', {
-    readerDocumentId: previewBook.document.id,
+    readerDocumentId: enrichedPreviewBook.document.id,
     preferredPageName,
     disambiguatedPageName,
     namespacePrefix,
     pageResolveMode: options.pageResolveMode ?? 'title_only',
-    highlightCount: previewBook.highlights.length,
+    highlightCount: enrichedPreviewBook.highlights.length,
   })
   const syncDate = format(new Date(), 'yyyy-MM-dd')
   const preferredPage =
@@ -195,7 +227,7 @@ export const syncRenderedReaderPreviewPage = async (
   const pageResolution =
     options.pageResolveMode === 'reader_id_then_title'
       ? await resolveManagedReaderPageV1({
-          readerDocumentId: previewBook.document.id,
+          readerDocumentId: enrichedPreviewBook.document.id,
           preferredPageName,
           disambiguatedPageName,
           namespaceRoot: options.identityNamespaceRoot ?? namespacePrefix,
@@ -216,7 +248,7 @@ export const syncRenderedReaderPreviewPage = async (
     await resolveAvailableManagedPageNameV1({
       pageTitle: sourcePageTitle,
       namespacePrefix,
-      managedId: previewBook.document.id,
+      managedId: enrichedPreviewBook.document.id,
       format: 'org',
       currentPageUuid: pageBeforeRepair?.uuid ?? null,
     })
@@ -248,7 +280,7 @@ export const syncRenderedReaderPreviewPage = async (
   const existingPage = resolvedExistingPage.page
   const syncHeaderText = options.syncHeaderText ?? ''
   const semanticPage = buildReaderPreviewSemanticPage(
-    previewBook,
+    enrichedPreviewBook,
     syncDate,
     syncHeaderText,
   )
@@ -286,15 +318,15 @@ export const syncRenderedReaderPreviewPage = async (
   }
 
   const summary: SyncRenderedReaderPageResult = {
-    readerDocumentId: previewBook.document.id,
+    readerDocumentId: enrichedPreviewBook.document.id,
     pageName,
     pageMatchKind: pageResolution.matchKind,
     pageRenamed: resolvedExistingPage.renamed,
     previousPageName: resolvedExistingPage.previousPageName,
     result,
     renderHash,
-    highlightCount: previewBook.highlights.length,
-    highlightCoverage: previewBook.highlightCoverage,
+    highlightCount: enrichedPreviewBook.highlights.length,
+    highlightCoverage: enrichedPreviewBook.highlightCoverage,
     isNewPage: pageBeforeRepair == null,
   }
 

@@ -81,6 +81,7 @@ export interface ReaderDocument {
   saved_at: string | null
   last_moved_at: string | null
   html_content?: string | null
+  render_content?: string | null
 }
 
 export interface ReadwisePageProp {

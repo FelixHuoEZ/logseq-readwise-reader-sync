@@ -92,6 +92,9 @@ const buildSemanticHighlight = (
     uuid: computeUuid(uuidSource),
     text: highlight.text,
     imageUrl: highlight.imageUrl,
+    contentSegments: highlight.imageUrl
+      ? [{ kind: 'image' as const, value: highlight.imageUrl }]
+      : [],
     locationLabel: highlight.locationLabel,
     locationUrl: readerDocumentUrl ?? highlight.locationUrl,
     createdDate: toYmd(highlight.highlightedAt ?? highlight.createdAt) ?? '',

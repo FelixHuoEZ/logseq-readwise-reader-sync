@@ -16,6 +16,10 @@ export const buildRenderHashInput = (page: SemanticPage): RenderHashInput => ({
     uuid: highlight.uuid,
     text: highlight.text,
     imageUrl: highlight.imageUrl,
+    contentSegments: highlight.contentSegments.map((segment) => ({
+      kind: segment.kind,
+      value: segment.value,
+    })),
     locationLabel: highlight.locationLabel,
     locationUrl: highlight.locationUrl,
     createdDate: highlight.createdDate,

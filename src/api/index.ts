@@ -102,3 +102,4 @@ export type ReadwiseClient = ReturnType<typeof createReadwiseClient>
 export * from './load-all-exported-books'
 export * from './load-reader-document-urls'
 export * from './load-reader-preview-books'
+export * from './reader-document-highlights'

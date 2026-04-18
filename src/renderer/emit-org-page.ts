@@ -128,7 +128,19 @@ const emitHighlightMainText = (
 
   const [firstLine = '', ...restLines] = highlight.text.split('\n')
   const restText = normalizeBoundaryBlankLines(restLines.join('\n'))
-  const trailingSections = [restText].filter(
+  const orderedContentSections = (
+    highlight.contentSegments.length > 0
+      ? highlight.contentSegments
+      : highlight.imageUrl
+        ? [{ kind: 'image' as const, value: highlight.imageUrl }]
+        : []
+  )
+    .map((segment) =>
+      segment.kind === 'image' ? wrapWikiLink(segment.value) : segment.value,
+    )
+    .map((value) => normalizeBoundaryBlankLines(value))
+    .filter((value) => value.length > 0)
+  const trailingSections = [restText, ...orderedContentSections].filter(
     (section): section is string => section.length > 0,
   )
 
@@ -143,16 +155,6 @@ const emitHighlightMainText = (
   ].join('\n')
 }
 
-const emitChildBlockText = (level: number, value: string) => {
-  const normalizedValue = normalizeBoundaryBlankLines(value)
-  if (normalizedValue.length === 0) return ''
-
-  const [firstLine = '', ...restLines] = normalizedValue.split('\n')
-  const prefix = '*'.repeat(level)
-
-  return [(`${prefix} ${firstLine}`).trimEnd(), ...restLines].join('\n')
-}
-
 const emitChildNoteBlockText = (level: number, value: string) => {
   const normalizedValue = normalizeBoundaryBlankLines(value)
   if (normalizedValue.length === 0) return ''
@@ -165,12 +167,6 @@ const emitChildNoteBlockText = (level: number, value: string) => {
 const emitHighlightBlocks = (page: SemanticPage): EmittedBlock[] =>
   page.highlights.map((highlight) => {
     const children: EmittedBlock[] = []
-
-    if (highlight.imageUrl) {
-      children.push({
-        text: emitChildBlockText(3, wrapWikiLink(highlight.imageUrl)),
-      })
-    }
 
     if (highlight.note) {
       children.push({

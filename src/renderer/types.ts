@@ -39,11 +39,17 @@ export interface SemanticSyncHeader {
   text: string | null
 }
 
+export interface SemanticHighlightContentSegment {
+  kind: 'text' | 'image'
+  value: string
+}
+
 export interface SemanticHighlight {
   highlightId: number | string
   uuid: string
   text: string
   imageUrl: string | null
+  contentSegments: SemanticHighlightContentSegment[]
   locationLabel: string | null
   locationUrl: string | null
   createdDate: string
@@ -88,6 +94,7 @@ export interface RenderHashInput {
     uuid: string
     text: string
     imageUrl: string | null
+    contentSegments: SemanticHighlightContentSegment[]
     locationLabel: string | null
     locationUrl: string | null
     createdDate: string

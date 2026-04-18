@@ -127,8 +127,7 @@ const emitHighlightMainText = (
 
   const [firstLine = '', ...restLines] = highlight.text.split('\n')
   const restText = normalizeBoundaryBlankLines(restLines.join('\n'))
-  const noteSection = highlight.note ? [`* *Note*: ${highlight.note}`] : []
-  const trailingSections = [restText, ...noteSection].filter(
+  const trailingSections = [restText].filter(
     (section): section is string => section.length > 0,
   )
 
@@ -143,9 +142,22 @@ const emitHighlightMainText = (
   ].join('\n')
 }
 
+const emitChildBlockText = (level: number, value: string) => {
+  const normalizedValue = normalizeBoundaryBlankLines(value)
+  if (normalizedValue.length === 0) return ''
+
+  const [firstLine = '', ...restLines] = normalizedValue.split('\n')
+  const prefix = '*'.repeat(level)
+
+  return [(`${prefix} ${firstLine}`).trimEnd(), ...restLines].join('\n')
+}
+
 const emitHighlightBlocks = (page: SemanticPage): EmittedBlock[] =>
   page.highlights.map((highlight) => ({
     text: emitHighlightMainText(highlight),
+    children: highlight.note
+      ? [{ text: emitChildBlockText(3, highlight.note) }]
+      : undefined,
   }))
 
 export const emitOrgPage = (page: SemanticPage): EmitResult => {

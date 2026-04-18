@@ -41,9 +41,7 @@ const buildMetadataEntries = (
   ]
 }
 
-const buildSyncHeader = (
-  context: PageRenderContext,
-): SemanticSyncHeader => {
+const buildSyncHeader = (context: PageRenderContext): SemanticSyncHeader => {
   const { runtime } = context
 
   if (runtime.isNewPage) {
@@ -92,6 +90,7 @@ const buildSemanticHighlight = (
     highlightId: highlight.id,
     uuid: computeUuid(uuidSource),
     text: highlight.text,
+    imageUrl: highlight.imageUrl,
     locationLabel: highlight.locationLabel,
     locationUrl: readerDocumentUrl ?? highlight.locationUrl,
     createdDate: toYmd(highlight.highlightedAt ?? highlight.createdAt) ?? '',
@@ -113,6 +112,10 @@ export const buildSemanticPage = (
   },
   syncHeader: buildSyncHeader(context),
   highlights: context.book.highlights.map((highlight) =>
-    buildSemanticHighlight(highlight, computeUuid, context.book.readerDocumentUrl),
+    buildSemanticHighlight(
+      highlight,
+      computeUuid,
+      context.book.readerDocumentUrl,
+    ),
   ),
 })

@@ -1,8 +1,6 @@
 import type { RenderHashInput, SemanticPage } from './types'
 
-export const buildRenderHashInput = (
-  page: SemanticPage,
-): RenderHashInput => ({
+export const buildRenderHashInput = (page: SemanticPage): RenderHashInput => ({
   pageTitle: page.pageTitle,
   metadata: page.metadata.map((entry) => ({
     key: entry.key,
@@ -17,6 +15,7 @@ export const buildRenderHashInput = (
   highlights: page.highlights.map((highlight) => ({
     uuid: highlight.uuid,
     text: highlight.text,
+    imageUrl: highlight.imageUrl,
     locationLabel: highlight.locationLabel,
     locationUrl: highlight.locationUrl,
     createdDate: highlight.createdDate,

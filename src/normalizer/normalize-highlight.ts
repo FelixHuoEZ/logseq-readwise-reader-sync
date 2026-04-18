@@ -1,12 +1,17 @@
 import type { ExportedHighlight } from '../types'
 import type { NormalizedHighlight } from './types'
 
-const toArray = <T,>(value: T[] | null | undefined): T[] =>
+const toArray = <T>(value: T[] | null | undefined): T[] =>
   Array.isArray(value) ? value : []
 
-const buildLocationLabel = (
-  highlight: ExportedHighlight,
-): string | null => {
+const normalizeOptionalText = (value: string | null | undefined) => {
+  if (typeof value !== 'string') return null
+
+  const normalized = value.trim()
+  return normalized.length > 0 ? normalized : null
+}
+
+const buildLocationLabel = (highlight: ExportedHighlight): string | null => {
   if (highlight.readwise_url) return 'View Highlight'
   if (highlight.location == null) return null
 
@@ -40,7 +45,8 @@ export const normalizeHighlight = (
     bookId,
     isDeleted: highlight.is_deleted,
     text: highlight.text,
-    note: highlight.note,
+    imageUrl: normalizeOptionalText(highlight.image_url),
+    note: normalizeOptionalText(highlight.note),
     location: highlight.location ?? null,
     locationType: highlight.location_type ?? null,
     locationLabel: buildLocationLabel(highlight),

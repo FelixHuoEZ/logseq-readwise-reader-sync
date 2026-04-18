@@ -43,6 +43,7 @@ export interface SemanticHighlight {
   highlightId: number | string
   uuid: string
   text: string
+  imageUrl: string | null
   locationLabel: string | null
   locationUrl: string | null
   createdDate: string
@@ -86,6 +87,7 @@ export interface RenderHashInput {
   highlights: Array<{
     uuid: string
     text: string
+    imageUrl: string | null
     locationLabel: string | null
     locationUrl: string | null
     createdDate: string

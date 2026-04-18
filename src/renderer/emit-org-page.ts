@@ -127,8 +127,11 @@ const emitHighlightMainText = (
 
   const [firstLine = '', ...restLines] = highlight.text.split('\n')
   const restText = normalizeBoundaryBlankLines(restLines.join('\n'))
+  const imageSection = highlight.imageUrl
+    ? [wrapWikiLink(highlight.imageUrl)]
+    : []
   const noteSection = highlight.note ? [`* *Note*: ${highlight.note}`] : []
-  const trailingSections = [restText, ...noteSection].filter(
+  const trailingSections = [restText, ...imageSection, ...noteSection].filter(
     (section): section is string => section.length > 0,
   )
 

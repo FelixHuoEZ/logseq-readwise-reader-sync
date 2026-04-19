@@ -1,6 +1,6 @@
 {
   "name": "logseq-readwise-reader-sync",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "author": "FelixHuoEZ",
   "description": "Unofficial Reader v3 sync for Logseq.",
   "license": "MIT",

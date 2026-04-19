@@ -1,11 +1,17 @@
 import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
 
 import {
+  describeUnknownError,
+  logReadwiseDebug,
+  logReadwiseWarn,
+} from '../logging'
+import {
   collectManagedPageAliasesV1,
   resolveManagedPageFilePathV1,
 } from './managed-page-integrity'
 
 const FORCE_REPARSE_RESTORE_DELAY_MS = 120
+const SOFT_REOPEN_LOG_PREFIX = '[Readwise Sync]'
 const SOFT_REOPEN_ROUTE_TIMEOUT_MS = 2000
 const SOFT_REOPEN_ROUTE_POLL_INTERVAL_MS = 50
 const SOFT_REOPEN_ROUTE_SETTLE_DELAY_MS = 80
@@ -16,6 +22,23 @@ const delay = async (ms: number) =>
   new Promise((resolve) => {
     window.setTimeout(resolve, ms)
   })
+
+const logSoftReopenDebugV1 = (message: string, payload?: unknown) => {
+  logReadwiseDebug(SOFT_REOPEN_LOG_PREFIX, `soft reopen ${message}`, payload)
+}
+
+const withSoftReopenStepV1 = async <T>(
+  step: string,
+  action: () => Promise<T>,
+): Promise<T> => {
+  try {
+    return await action()
+  } catch (error) {
+    throw new Error(
+      `Soft reopen failed during ${step}: ${describeUnknownError(error)}`,
+    )
+  }
+}
 
 export const getSoftReopenCurrentPageUnavailableReasonV1 = async () => {
   const editingBlock = await logseq.Editor.checkEditing()
@@ -66,7 +89,10 @@ const normalizeCurrentPageRouteKeyV1 = (
   value === 'page-block' || value === ':page-block' ? 'page-block' : 'page'
 
 const readCurrentRouteSnapshotV1 = async (): Promise<CurrentRouteSnapshotV1> => {
-  const routeMatch = (await logseq.App.getStateFromStore('route-match')) as unknown
+  const routeMatch = await withSoftReopenStepV1(
+    'loading route-match from store',
+    async () => (await logseq.App.getStateFromStore('route-match')) as unknown,
+  )
   const routeRecord = isRecord(routeMatch) ? routeMatch : null
   const data = isRecord(routeRecord?.data) ? routeRecord.data : null
   const parameters = isRecord(routeRecord?.parameters)
@@ -120,6 +146,29 @@ const waitForCurrentRouteSnapshotV1 = async ({
   )
 }
 
+const normalizeRouteQueryParamsV1 = (
+  queryParams: Record<string, unknown> | null,
+) => {
+  if (!queryParams) return undefined
+
+  try {
+    const normalized = JSON.parse(JSON.stringify(queryParams)) as unknown
+    if (isRecord(normalized)) {
+      return normalized as Record<string, unknown>
+    }
+  } catch (error) {
+    logReadwiseWarn(
+      SOFT_REOPEN_LOG_PREFIX,
+      'soft reopen dropped non-serializable route query params',
+      {
+        error: describeUnknownError(error),
+      },
+    )
+  }
+
+  return undefined
+}
+
 const replaceCurrentPageRouteV1 = async ({
   routeKey,
   pageName,
@@ -141,11 +190,24 @@ const replaceCurrentPageRouteV1 = async ({
           name: pageName,
         }
 
-  logseq.App.replaceState(
+  const normalizedQueryParams = normalizeRouteQueryParamsV1(queryParams)
+  logSoftReopenDebugV1('replacing route', {
     routeKey,
-    params,
-    (queryParams ?? undefined) as Record<string, unknown> | undefined,
-  )
+    pageName,
+    blockRouteName,
+    hasQueryParams: queryParams != null,
+    normalizedQueryParamKeys: normalizedQueryParams
+      ? Object.keys(normalizedQueryParams)
+      : [],
+  })
+
+  try {
+    logseq.App.replaceState(routeKey, params, normalizedQueryParams)
+  } catch (error) {
+    throw new Error(
+      `Failed to replace route state for "${pageName}": ${describeUnknownError(error)}`,
+    )
+  }
 
   await waitForCurrentRouteSnapshotV1({
     routeKey,
@@ -244,13 +306,22 @@ const forceReparseFileContentV1 = async ({
 }
 
 export const softReopenCurrentPageV1 = async () => {
-  const unavailableReason = await getSoftReopenCurrentPageUnavailableReasonV1()
+  const unavailableReason = await withSoftReopenStepV1(
+    'checking editor state',
+    async () => await getSoftReopenCurrentPageUnavailableReasonV1(),
+  )
   if (unavailableReason) {
     throw new Error(unavailableReason)
   }
 
-  const page = await resolveCurrentPageEntityV1()
-  const currentRoute = await readCurrentRouteSnapshotV1()
+  const page = await withSoftReopenStepV1(
+    'resolving current page',
+    async () => await resolveCurrentPageEntityV1(),
+  )
+  const currentRoute = await withSoftReopenStepV1(
+    'reading current route state',
+    async () => await readCurrentRouteSnapshotV1(),
+  )
   const routeKey: SupportedCurrentPageRouteKeyV1 =
     currentRoute.routeKey === 'page-block' &&
     typeof currentRoute.blockRouteName === 'string' &&
@@ -280,21 +351,37 @@ export const softReopenCurrentPageV1 = async () => {
     )
   }
 
+  logSoftReopenDebugV1('resolved route identities', {
+    routeKey,
+    stableRouteName,
+    alternateRouteName,
+    blockRouteName: currentRoute.blockRouteName,
+    hasQueryParams: currentRoute.queryParams != null,
+  })
+
   let restoredStableRoute = false
 
   try {
-    await replaceCurrentPageRouteV1({
-      routeKey,
-      pageName: alternateRouteName,
-      blockRouteName: currentRoute.blockRouteName,
-      queryParams: null,
-    })
-    await replaceCurrentPageRouteV1({
-      routeKey,
-      pageName: stableRouteName,
-      blockRouteName: currentRoute.blockRouteName,
-      queryParams: currentRoute.queryParams,
-    })
+    await withSoftReopenStepV1(
+      `switching to alternate route "${alternateRouteName}"`,
+      async () =>
+        await replaceCurrentPageRouteV1({
+          routeKey,
+          pageName: alternateRouteName,
+          blockRouteName: currentRoute.blockRouteName,
+          queryParams: null,
+        }),
+    )
+    await withSoftReopenStepV1(
+      `restoring original route "${stableRouteName}"`,
+      async () =>
+        await replaceCurrentPageRouteV1({
+          routeKey,
+          pageName: stableRouteName,
+          blockRouteName: currentRoute.blockRouteName,
+          queryParams: currentRoute.queryParams,
+        }),
+    )
     restoredStableRoute = true
   } finally {
     if (!restoredStableRoute) {
@@ -311,7 +398,10 @@ export const softReopenCurrentPageV1 = async () => {
     }
   }
 
-  const reopenedPage = await resolveCurrentPageEntityV1()
+  const reopenedPage = await withSoftReopenStepV1(
+    'verifying reopened page',
+    async () => await resolveCurrentPageEntityV1(),
+  )
   if (
     typeof page.uuid === 'string' &&
     page.uuid.length > 0 &&

@@ -180,11 +180,46 @@ const extractPageLevelPreludeV1 = (rootContent: string) => {
   return prelude.join('\n')
 }
 
+const inspectFirstPropertyDrawerV1 = (pagePrelude: string) => {
+  const keyCounts = new Map<string, number>()
+  let hasHighlightTagsProperty = false
+  let inProperties = false
+
+  for (const line of pagePrelude.split('\n')) {
+    if (!inProperties) {
+      if (line === ':PROPERTIES:') {
+        inProperties = true
+      }
+      continue
+    }
+
+    if (line === ':END:') {
+      break
+    }
+
+    if (/^:tags:\s+\[\[ReadwiseHighlights\]\]/.test(line)) {
+      hasHighlightTagsProperty = true
+    }
+
+    const keyMatch = line.match(/^:([^:]+):/)
+    const normalizedKey = (keyMatch?.[1] ?? '').trim().toLowerCase()
+    if (normalizedKey.length === 0) continue
+
+    keyCounts.set(normalizedKey, (keyCounts.get(normalizedKey) ?? 0) + 1)
+  }
+
+  return {
+    keyCounts,
+    hasHighlightTagsProperty,
+  }
+}
+
 export const detectLegacyManagedPageRepairSignaturesV1 = (rootContent: string) => {
   const signatures: string[] = []
   const pagePrelude = extractPageLevelPreludeV1(rootContent)
   const propertiesBlocks = (pagePrelude.match(/^:PROPERTIES:$/gm) ?? []).length
   const noteBlocks = (pagePrelude.match(/^#\+BEGIN_NOTE$/gm) ?? []).length
+  const firstPropertyDrawer = inspectFirstPropertyDrawerV1(pagePrelude)
   const syncHeaders = (
     rootContent.match(/^\* Highlights (?:first synced|refreshed) by \[\[Readwise\]\]/gm) ??
     []
@@ -211,6 +246,18 @@ export const detectLegacyManagedPageRepairSignaturesV1 = (rootContent: string) =
 
   if (noteBlocks > 1) {
     signatures.push('duplicate note block')
+  }
+
+  const createdProperties = firstPropertyDrawer.keyCounts.get('created') ?? 0
+  const idProperties = firstPropertyDrawer.keyCounts.get('id') ?? 0
+  const tagProperties = firstPropertyDrawer.keyCounts.get('tags') ?? 0
+  if (
+    createdProperties > 0 &&
+    (idProperties > 1 ||
+      tagProperties > 1 ||
+      firstPropertyDrawer.hasHighlightTagsProperty)
+  ) {
+    signatures.push('highlight properties leaked into page properties')
   }
 
   if (syncHeaders > 1) {

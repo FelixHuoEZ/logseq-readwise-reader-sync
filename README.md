@@ -19,6 +19,7 @@ This project is published as an independent plugin release line. If it is publis
 - Optional Auto Sync for day-to-day incremental runs, with confirmation before suspiciously large page rewrites
 - Manual `Full Refresh` for whole-library rebuilds
 - `Refresh Local Snapshot Only` for rebuilding the local full-library snapshot without rewriting managed pages
+- `Cached Full Rebuild` for rewriting every managed page from the local snapshot without another full remote highlight scan
 - Current-page tools for `Rebuild Current Page From Cache` and `Refresh Current Page Metadata`
 - Preview-first current-page legacy ID migration for pages and whiteboards
 - Dedicated current-page preview and apply summaries, instead of burying successful previews in the issue list
@@ -30,7 +31,7 @@ This project is published as an independent plugin release line. If it is publis
 
 ## Known Tradeoff
 
-`Incremental Sync` uses the saved Reader cursor and only scans changed highlights and notes. When it rewrites a changed page, it rebuilds that page by merging the changed highlights onto the local cached highlight snapshot for the same `parent_id`. `Full Refresh` still scans the full Reader highlight and note library and can take minutes on large libraries. `Refresh Local Snapshot Only` runs the same full remote scan too, but stops after refreshing the local snapshot and does not rewrite managed pages. Auto Sync only runs `Incremental Sync`; it never promotes itself to `Full Refresh` or snapshot-only maintenance work. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates a full-library scan, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
+`Incremental Sync` uses the saved Reader cursor and only scans changed highlights and notes. When it rewrites a changed page, it rebuilds that page by merging the changed highlights onto the local cached highlight snapshot for the same `parent_id`. `Full Refresh` still scans the full Reader highlight and note library and can take minutes on large libraries. `Refresh Local Snapshot Only` runs the same full remote scan too, but stops after refreshing the local snapshot and does not rewrite managed pages. `Cached Full Rebuild` is the complementary maintenance action: it skips the remote highlight scan, reuses the local cached highlight snapshot, refreshes parent metadata for the matched documents, and rewrites every managed page. Auto Sync only runs `Incremental Sync`; it never promotes itself to `Full Refresh` or snapshot-only maintenance work. Current-page tools rely on the local highlight snapshot; if a debug highlight-page cap truncates a full-library scan, the plugin keeps the previous cached snapshot instead of replacing it with a partial one.
 
 ## Sync Scope Difference From The Official Plugin
 
@@ -69,11 +70,12 @@ Do not run this project and another Readwise Logseq plugin against the same grap
 4. Leave Auto Sync enabled if you want the plugin to periodically check whether a safe automatic `Incremental Sync` should run.
 5. If Auto Sync detects a suspiciously large rewrite set, review the confirmation dialog before allowing page writes to continue.
 6. Open `Maintenance Tools > Snapshots` and use `Refresh Local Snapshot Only` when you want a fresh local snapshot without rewriting pages.
-7. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
-8. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
-9. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
-10. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
-11. Wait for the plugin to:
+7. Use `Maintenance Tools > Snapshots > Cached Full Rebuild` when you want to rewrite every managed page from the local snapshot without another full remote highlight scan.
+8. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
+9. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
+10. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
+11. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
+12. Wait for the plugin to:
    - scan Reader highlights and notes, or load the cached highlight snapshot
    - group them by parent document
    - fetch the target parent documents
@@ -106,6 +108,7 @@ Maintenance tools are grouped by purpose:
   - graph-wide legacy block ref preview/apply
 - `Snapshots`
   - refresh the local highlight snapshot without rewriting pages
+  - rebuild every managed page from the local snapshot without another full remote highlight scan
   - capture and diff raw current-page snapshots
 - `Test & Preview`
   - session test pages, preview pages, and restore/clear helpers

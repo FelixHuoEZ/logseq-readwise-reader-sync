@@ -7128,6 +7128,7 @@ export const ReadwiseContainer = () => {
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
+    'Cached Full Rebuild reuses the local full-library highlight snapshot, refreshes parent metadata for the matched documents, and rewrites every managed page without re-scanning the remote highlight and note library.',
     'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
@@ -8039,19 +8040,23 @@ export const ReadwiseContainer = () => {
                         <div className="rw-maintenance-section-header">
                           <div className="rw-maintenance-section-title">Snapshots</div>
                           <div className="rw-maintenance-section-note">
-                            Refresh the local highlight snapshot, force Logseq to reparse
-                            managed pages, or capture raw page state for diff-based debugging.
+                            Refresh the local highlight snapshot, rebuild every managed page
+                            from the cached snapshot, force Logseq to reparse managed pages,
+                            or capture raw page state for diff-based debugging.
                           </div>
+                        </div>
+                        <div className="rw-action-row">
+                          <button className="rw-btn" onClick={handleRefreshLocalSnapshotOnly}>
+                            Refresh Local Snapshot Only
+                          </button>
+                          <button className="rw-btn" onClick={handleCachedFullRebuild}>
+                            Cached Full Rebuild
+                          </button>
                         </div>
                         <div className="rw-action-row">
                           <button className="rw-btn" onClick={handleForceReparseManagedPages}>
                             Force Reparse Managed Pages
                           </button>
-                          <button className="rw-btn" onClick={handleRefreshLocalSnapshotOnly}>
-                            Refresh Local Snapshot Only
-                          </button>
-                        </div>
-                        <div className="rw-action-row">
                           <button className="rw-btn" onClick={handleCaptureCurrentPageSnapshot}>
                             Capture Page Snapshot
                           </button>

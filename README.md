@@ -74,8 +74,9 @@ Do not run this project and another Readwise Logseq plugin against the same grap
 8. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
 9. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
 10. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
-11. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
-12. Wait for the plugin to:
+11. Use `Preview Legacy Managed Page Migration` to inspect safe non-tweet page rebindings before applying them.
+12. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
+13. Wait for the plugin to:
    - scan Reader highlights and notes, or load the cached highlight snapshot
    - group them by parent document
    - fetch the target parent documents
@@ -139,6 +140,7 @@ Use the highlight page limit only for short debug runs. Set it back to `0` for r
 - If a damaged page has no `rw-reader-id`, but still has `View Highlight` links, repair re-looks up the parent through the Reader API instead of trusting cache alone.
 - If a damaged page points at a highlight whose original parent metadata is gone, repair scans Reader again for a replacement parent using the page's current metadata.
 - If Reader still does not provide a unique, high-confidence parent, the page stays as an issue instead of being rebound by guesswork.
+- Legacy managed page migration now follows a preview-first flow for non-tweet pages: the plugin proves a Reader parent from embedded ids, `View Highlight` links, or metadata, then previews the `rw-reader-id` bind plus title rename before you confirm the apply step.
 - Legacy block ref migration now follows a preview-first flow: the plugin lists every planned `((block ref))` rewrite before you confirm the apply step.
 - Current-page legacy id migration also follows a preview-first flow and rewrites only the current page or whiteboard. It updates proven Readwise legacy ids in `((block refs))`, whiteboard embeds, and `:refdock-item-id:` values, then shows a dedicated apply summary after the rewrite completes.
 

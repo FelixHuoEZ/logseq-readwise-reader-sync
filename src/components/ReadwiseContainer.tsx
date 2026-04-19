@@ -68,6 +68,7 @@ import {
   migrateLegacyBlockRefsV1,
   previewCurrentPageLegacyIdsV1,
   previewLegacyBlockRefsV1,
+  resolveAvailableManagedPageNameV1,
   restoreLatestFormalTestPageBackup,
   rotateActiveFormalTestSessionNamespaceV1,
   saveFormalTestSessionManifestV1,
@@ -173,11 +174,33 @@ interface ReaderDocumentRepairMatch {
 interface ReaderParentReplacementLookupResult {
   document: ReaderDocument | null
   shouldRetry: boolean
+  reasons: string[]
 }
 
 interface PendingLegacyBlockRefMigrationPlan {
   mapping: Map<string, string>
   entries: LegacyBlockRefPreviewEntryV1[]
+}
+
+interface LegacyManagedPageIdentityMigrationPreviewEntry {
+  pageUuid: string
+  currentPageName: string
+  readerDocumentId: string
+  readerDocumentTitle: string | null
+  targetPageName: string
+  reasons: string[]
+}
+
+interface PendingLegacyManagedPageIdentityMigrationPlan {
+  entries: LegacyManagedPageIdentityMigrationPreviewEntry[]
+}
+
+interface LegacyManagedPageIdentityMigrationScanResult {
+  entries: LegacyManagedPageIdentityMigrationPreviewEntry[]
+  issues: RunIssue[]
+  skippedTweetPages: number
+  scopedPages: number
+  scannedPages: number
 }
 
 interface PendingCurrentPageLegacyIdMigrationPlan {
@@ -221,7 +244,8 @@ const isReaderDetailEnrichWarningReason = (
 const countReaderDetailWarningEntries = (
   entries: readonly ReaderDocumentHighlightDetailOutcome[],
 ) =>
-  entries.filter((entry) => isReaderDetailEnrichWarningReason(entry.reason)).length
+  entries.filter((entry) => isReaderDetailEnrichWarningReason(entry.reason))
+    .length
 
 interface ManagedPageRepairScanEntryResult {
   pageName: string
@@ -305,12 +329,20 @@ export const ReadwiseContainer = () => {
   const [showWarningIssues, setShowWarningIssues] = useState(false)
   const [runIssueContext, setRunIssueContext] =
     useState<RunIssueBundleContext | null>(null)
+  const [
+    pendingLegacyManagedPageIdentityMigration,
+    setPendingLegacyManagedPageIdentityMigration,
+  ] = useState<PendingLegacyManagedPageIdentityMigrationPlan | null>(null)
   const [pendingLegacyBlockRefMigration, setPendingLegacyBlockRefMigration] =
     useState<PendingLegacyBlockRefMigrationPlan | null>(null)
-  const [pendingCurrentPageLegacyIdMigration, setPendingCurrentPageLegacyIdMigration] =
-    useState<PendingCurrentPageLegacyIdMigrationPlan | null>(null)
-  const [currentPageLegacyIdPreviewResult, setCurrentPageLegacyIdPreviewResult] =
-    useState<CurrentPageLegacyIdPreviewResult | null>(null)
+  const [
+    pendingCurrentPageLegacyIdMigration,
+    setPendingCurrentPageLegacyIdMigration,
+  ] = useState<PendingCurrentPageLegacyIdMigrationPlan | null>(null)
+  const [
+    currentPageLegacyIdPreviewResult,
+    setCurrentPageLegacyIdPreviewResult,
+  ] = useState<CurrentPageLegacyIdPreviewResult | null>(null)
   const [currentPageLegacyIdApplyResult, setCurrentPageLegacyIdApplyResult] =
     useState<CurrentPageLegacyIdApplyResult | null>(null)
   const [readerDetailEnrichReportResult, setReaderDetailEnrichReportResult] =
@@ -320,7 +352,9 @@ export const ReadwiseContainer = () => {
   const [cacheSummaryResult, setCacheSummaryResult] =
     useState<ReaderSyncCacheSummaryV1 | null>(null)
   const [etaTick, setEtaTick] = useState(0)
-  const [etaSnapshot, setEtaSnapshot] = useState<ReaderSyncEtaSnapshot | null>(null)
+  const [etaSnapshot, setEtaSnapshot] = useState<ReaderSyncEtaSnapshot | null>(
+    null,
+  )
   const [showMaintenanceTools, setShowMaintenanceTools] = useState(false)
   const [activeFormalTestSessionCount, setActiveFormalTestSessionCount] =
     useState<number | null>(null)
@@ -405,8 +439,11 @@ export const ReadwiseContainer = () => {
   }
 
   const refreshActiveFormalTestSessionCount = async () => {
-    const activeFormalTestSession = await loadActiveFormalTestSessionManifestV1()
-    setActiveFormalTestSessionCount(activeFormalTestSession?.books.length ?? null)
+    const activeFormalTestSession =
+      await loadActiveFormalTestSessionManifestV1()
+    setActiveFormalTestSessionCount(
+      activeFormalTestSession?.books.length ?? null,
+    )
   }
 
   useEffect(() => {
@@ -496,9 +533,7 @@ export const ReadwiseContainer = () => {
   ) => {
     if (phase === 'fetch-highlights' && label === 'repair scan') {
       const adaptiveHorizonMs =
-        rawEtaMs == null
-          ? 12_000
-          : Math.max(3_000, Math.min(30_000, rawEtaMs))
+        rawEtaMs == null ? 12_000 : Math.max(3_000, Math.min(30_000, rawEtaMs))
       return {
         maxSamples: 30,
         horizonMs: adaptiveHorizonMs,
@@ -511,9 +546,7 @@ export const ReadwiseContainer = () => {
       phase === 'refresh-snapshot'
     ) {
       const adaptiveHorizonMs =
-        rawEtaMs == null
-          ? 10_000
-          : Math.max(3_000, Math.min(30_000, rawEtaMs))
+        rawEtaMs == null ? 10_000 : Math.max(3_000, Math.min(30_000, rawEtaMs))
       return {
         maxSamples: 16,
         horizonMs: adaptiveHorizonMs,
@@ -522,9 +555,7 @@ export const ReadwiseContainer = () => {
 
     if (phase === 'fetch-documents') {
       const adaptiveHorizonMs =
-        rawEtaMs == null
-          ? 8_000
-          : Math.max(3_000, Math.min(30_000, rawEtaMs))
+        rawEtaMs == null ? 8_000 : Math.max(3_000, Math.min(30_000, rawEtaMs))
       return {
         maxSamples: 10,
         horizonMs: adaptiveHorizonMs,
@@ -584,7 +615,7 @@ export const ReadwiseContainer = () => {
           units: deltaUnits,
         },
       ]
-        .filter(sample => sample.observedAt >= now - horizonMs)
+        .filter((sample) => sample.observedAt >= now - horizonMs)
         .slice(-maxSamples)
       etaEstimatorRef.current = {
         phase,
@@ -667,7 +698,10 @@ export const ReadwiseContainer = () => {
   }
 
   const uniqueStrings = (values: string[]) =>
-    values.filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
+    values.filter(
+      (value, index, array) =>
+        value.length > 0 && array.indexOf(value) === index,
+    )
 
   const normalizePropertyKey = (value: string): string =>
     value.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -725,7 +759,8 @@ export const ReadwiseContainer = () => {
     collectPageAliases(page)[0] ?? null
 
   const isManagedFormalPageName = (pageName: string) =>
-    pageName === formalNamespaceRoot || pageName.startsWith(`${formalNamespaceRoot}/`)
+    pageName === formalNamespaceRoot ||
+    pageName.startsWith(`${formalNamespaceRoot}/`)
 
   const extractReaderDocumentIdFromPage = (page: PageEntity): string | null =>
     extractStringValue(
@@ -735,7 +770,9 @@ export const ReadwiseContainer = () => {
       ),
     )
 
-  const extractReaderDocumentIdsFromRootContent = (rootContent: string): string[] => {
+  const extractReaderDocumentIdsFromRootContent = (
+    rootContent: string,
+  ): string[] => {
     const readerDocumentIds: string[] = []
 
     for (const line of rootContent.split('\n')) {
@@ -796,19 +833,29 @@ export const ReadwiseContainer = () => {
 
     try {
       const pageBlocksTree = await logseq.Editor.getPageBlocksTree(page.name)
-      const searchableContent = flattenPageBlocksTreeContent(pageBlocksTree ?? [])
+      const searchableContent = flattenPageBlocksTreeContent(
+        pageBlocksTree ?? [],
+      )
       const readerDocumentIds =
         extractReaderDocumentIdsFromRootContent(searchableContent)
 
-      return readerDocumentIds.length === 1 ? readerDocumentIds[0] ?? null : null
+      return readerDocumentIds.length === 1
+        ? (readerDocumentIds[0] ?? null)
+        : null
     } catch {
       return null
     }
   }
 
-  const extractReaderHighlightIdsFromRootContent = (rootContent: string): string[] =>
+  const extractReaderHighlightIdsFromRootContent = (
+    rootContent: string,
+  ): string[] =>
     uniqueStrings(
-      [...rootContent.matchAll(/\[\[https:\/\/read\.readwise\.io\/read\/([0-9a-z]+)\]\[View Highlight\]\]/gi)]
+      [
+        ...rootContent.matchAll(
+          /\[\[https:\/\/read\.readwise\.io\/read\/([0-9a-z]+)\]\[View Highlight\]\]/gi,
+        ),
+      ]
         .map((match) => match[1] ?? '')
         .filter((value) => value.length > 0),
     )
@@ -824,7 +871,9 @@ export const ReadwiseContainer = () => {
     const normalized = normalizeComparableText(value)
     if (!normalized) return null
 
-    const singular = normalized.endsWith('s') ? normalized.slice(0, -1) : normalized
+    const singular = normalized.endsWith('s')
+      ? normalized.slice(0, -1)
+      : normalized
     if (singular === 'article') return 'article'
     if (singular === 'book') return 'book'
     if (singular === 'tweet') return 'tweet'
@@ -916,7 +965,9 @@ export const ReadwiseContainer = () => {
       normalizeComparableUrlV1(document.url)
     const normalizedDocumentTitle = normalizeComparableText(document.title)
     const normalizedDocumentAuthor = normalizeComparableText(document.author)
-    const normalizedDocumentCategory = normalizeReaderCategory(document.category)
+    const normalizedDocumentCategory = normalizeReaderCategory(
+      document.category,
+    )
 
     if (
       signals.normalizedLinkUrl &&
@@ -1036,7 +1087,9 @@ export const ReadwiseContainer = () => {
 
   const listReaderDocumentsWithRetry = async (
     client: ReturnType<typeof createReadwiseClient>,
-    params: Parameters<ReturnType<typeof createReadwiseClient>['listReaderDocuments']>[0],
+    params: Parameters<
+      ReturnType<typeof createReadwiseClient>['listReaderDocuments']
+    >[0],
     logPrefix: string,
     context: {
       stage: 'repair-parent-scan' | 'repair-replacement-scan'
@@ -1054,7 +1107,10 @@ export const ReadwiseContainer = () => {
       } catch (error) {
         lastError = error
 
-        if (!isRetriableReaderListError(error) || attempt === totalAttempts - 1) {
+        if (
+          !isRetriableReaderListError(error) ||
+          attempt === totalAttempts - 1
+        ) {
           break
         }
 
@@ -1146,12 +1202,17 @@ export const ReadwiseContainer = () => {
       rootContent,
     })
     if (!signals.normalizedLinkUrl && !signals.normalizedPageTitle) {
-      logReadwiseDebug(logPrefix, 'repair replacement lookup skipped: insufficient page signals', {
-        pageName,
-      })
+      logReadwiseDebug(
+        logPrefix,
+        'repair replacement lookup skipped: insufficient page signals',
+        {
+          pageName,
+        },
+      )
       return {
         document: null,
         shouldRetry: false,
+        reasons: [],
       }
     }
 
@@ -1203,9 +1264,9 @@ export const ReadwiseContainer = () => {
         replacementReason:
           replacement == null
             ? null
-            : matches
+            : (matches
                 .find((match) => match.document.id === replacement.id)
-                ?.reasons.join(', ') ?? null,
+                ?.reasons.join(', ') ?? null),
       })
 
       if (replacement) {
@@ -1219,6 +1280,11 @@ export const ReadwiseContainer = () => {
       return {
         document: replacement,
         shouldRetry: false,
+        reasons:
+          replacement == null
+            ? []
+            : (matches.find((match) => match.document.id === replacement.id)
+                ?.reasons ?? []),
       }
     } catch (error) {
       if (isRunCancelledError(error)) {
@@ -1233,6 +1299,7 @@ export const ReadwiseContainer = () => {
       return {
         document: null,
         shouldRetry: isRetriableReaderListError(error),
+        reasons: [],
       }
     }
   }
@@ -1287,16 +1354,15 @@ export const ReadwiseContainer = () => {
           .filter((value) => value.length > 0),
       )
 
-      return parentIds.length === 1 ? parentIds[0] ?? null : null
+      return parentIds.length === 1 ? (parentIds[0] ?? null) : null
     }
 
     if (!client) {
       if (previewCache) {
         throwIfCancelled()
         try {
-          const cachedHighlights = await previewCache.getCachedHighlightsByIds(
-            highlightIds,
-          )
+          const cachedHighlights =
+            await previewCache.getCachedHighlightsByIds(highlightIds)
           const cachedHighlightsList = [...cachedHighlights.values()]
           const cachedParentId = resolveUniqueParentId(cachedHighlightsList)
 
@@ -1409,13 +1475,14 @@ export const ReadwiseContainer = () => {
     )
 
     if (fetchedParentIds.length > 1) {
-      const fetchedParentDocuments = await loadReaderParentDocumentsByIdsAuthoritative({
-        client,
-        parentIds: fetchedParentIds,
-        previewCache,
-        pageName,
-        logPrefix: resolvedLogPrefix,
-      })
+      const fetchedParentDocuments =
+        await loadReaderParentDocumentsByIdsAuthoritative({
+          client,
+          parentIds: fetchedParentIds,
+          previewCache,
+          pageName,
+          logPrefix: resolvedLogPrefix,
+        })
       const parentMatches = fetchedParentDocuments
         .map((document) =>
           scoreReaderDocumentForRepairSignals({
@@ -1424,7 +1491,8 @@ export const ReadwiseContainer = () => {
           }),
         )
         .filter((match): match is ReaderDocumentRepairMatch => !!match)
-      const chosenParentDocument = chooseStrongReaderDocumentMatch(parentMatches)
+      const chosenParentDocument =
+        chooseStrongReaderDocumentMatch(parentMatches)
 
       if (chosenParentDocument) {
         logReadwiseInfo(
@@ -1435,9 +1503,9 @@ export const ReadwiseContainer = () => {
             resolvedReaderDocumentId: chosenParentDocument.id,
             candidateParentIds: fetchedParentIds,
             resolutionReasons:
-              parentMatches
-                .find((match) => match.document.id === chosenParentDocument.id)
-                ?.reasons ?? [],
+              parentMatches.find(
+                (match) => match.document.id === chosenParentDocument.id,
+              )?.reasons ?? [],
           },
         )
 
@@ -1590,19 +1658,25 @@ export const ReadwiseContainer = () => {
         pageNamePlan.preferredPageName,
         pageNamePlan.disambiguatedPageName,
       ])
-      const canonicalPages = uniquePages.filter((page) =>
-        page.aliases.some((alias) => canonicalNames.includes(alias)) ||
-        canonicalNames.includes(page.pageTitle),
+      const canonicalPages = uniquePages.filter(
+        (page) =>
+          page.aliases.some((alias) => canonicalNames.includes(alias)) ||
+          canonicalNames.includes(page.pageTitle),
       )
       const legacyPages = uniquePages.filter(
-        (page) => !canonicalPages.some((candidate) => candidate.pageUuid === page.pageUuid),
+        (page) =>
+          !canonicalPages.some(
+            (candidate) => candidate.pageUuid === page.pageUuid,
+          ),
       )
 
       if (canonicalPages.length !== 1 || legacyPages.length === 0) {
         continue
       }
 
-      if (!legacyPages.every((page) => isManagedPageTitleOverlong(page.pageTitle))) {
+      if (
+        !legacyPages.every((page) => isManagedPageTitleOverlong(page.pageTitle))
+      ) {
         continue
       }
 
@@ -1660,7 +1734,8 @@ export const ReadwiseContainer = () => {
       ),
     ) as PageEntity[]
     const candidates: ManagedPageRepairCandidate[] = []
-    const deferredIdentityRetries: ManagedPageRepairIdentityRetryCandidate[] = []
+    const deferredIdentityRetries: ManagedPageRepairIdentityRetryCandidate[] =
+      []
     const issues: RunIssue[] = []
 
     const scanResults = await mapWithConcurrency(
@@ -1694,7 +1769,9 @@ export const ReadwiseContainer = () => {
               logPrefix: formalSyncLogPrefix,
             })
         const readerDocumentId =
-          pageReaderDocumentId ?? inferredReaderDocument?.readerDocumentId ?? null
+          pageReaderDocumentId ??
+          inferredReaderDocument?.readerDocumentId ??
+          null
 
         if (!readerDocumentId) {
           if (inferredReaderDocument?.shouldRetryAfterScan) {
@@ -1717,14 +1794,12 @@ export const ReadwiseContainer = () => {
               book: pageName || 'Managed page',
               message: `Repair skipped because rw-reader-id is missing for ${pageName}.`,
               category: warningOnly ? 'warning' : undefined,
-              summary:
-                warningOnly
-                  ? 'This legacy page has no Reader highlight links, so the plugin cannot infer a Reader document id for automatic repair.'
-                  : 'This page matches the legacy corruption signature, but the plugin cannot map it back to a Reader document.',
-              suggestedAction:
-                warningOnly
-                  ? 'Skip automatic repair for this page, or rebuild it later after binding a Reader document id.'
-                  : 'Repair rw-reader-id first, or run Full Refresh after restoring the page identity.',
+              summary: warningOnly
+                ? 'This legacy page has no Reader highlight links, so the plugin cannot infer a Reader document id for automatic repair.'
+                : 'This page matches the legacy corruption signature, but the plugin cannot map it back to a Reader document.',
+              suggestedAction: warningOnly
+                ? 'Skip automatic repair for this page, or rebuild it later after binding a Reader document id.'
+                : 'Repair rw-reader-id first, or run Full Refresh after restoring the page identity.',
               debugFacts: [`detectedSignatures=${signatures.join(', ')}`],
               namespacePrefix: formalNamespaceRoot,
               pageName: pageName || null,
@@ -1777,9 +1852,7 @@ export const ReadwiseContainer = () => {
       const deferredResults = await mapWithConcurrency(
         deferredIdentityRetries,
         managedPageRepairScanConcurrency,
-        async (
-          deferredPage,
-        ): Promise<ManagedPageRepairScanEntryResult> => {
+        async (deferredPage): Promise<ManagedPageRepairScanEntryResult> => {
           throwIfCancelled()
 
           const deferredInference = await inferReaderDocumentIdFromHighlights({
@@ -1855,7 +1928,9 @@ export const ReadwiseContainer = () => {
     }
 
     const pageName = uniqueStrings([
-      typeof currentPage.originalName === 'string' ? currentPage.originalName : '',
+      typeof currentPage.originalName === 'string'
+        ? currentPage.originalName
+        : '',
       typeof currentPage.title === 'string' ? currentPage.title : '',
       typeof currentPage.name === 'string' ? currentPage.name : '',
     ])[0]
@@ -1865,7 +1940,9 @@ export const ReadwiseContainer = () => {
     }
 
     if (!isManagedFormalPageName(pageName)) {
-      throw new Error(`Current page is not a managed ${formalNamespaceRoot} page.`)
+      throw new Error(
+        `Current page is not a managed ${formalNamespaceRoot} page.`,
+      )
     }
 
     const readerDocumentId = await loadReaderDocumentIdFromPage(
@@ -1890,7 +1967,9 @@ export const ReadwiseContainer = () => {
     }
 
     const pageName = uniqueStrings([
-      typeof currentPage.originalName === 'string' ? currentPage.originalName : '',
+      typeof currentPage.originalName === 'string'
+        ? currentPage.originalName
+        : '',
       typeof currentPage.title === 'string' ? currentPage.title : '',
       typeof currentPage.name === 'string' ? currentPage.name : '',
     ])[0]
@@ -1904,7 +1983,9 @@ export const ReadwiseContainer = () => {
 
   const resolvePluginRepoRootForExternalDiff = () => {
     try {
-      const pathname = decodeURIComponent(new URL(window.location.href).pathname)
+      const pathname = decodeURIComponent(
+        new URL(window.location.href).pathname,
+      )
       if (pathname.endsWith('/dist/index.html')) {
         return pathname.slice(0, -'/dist/index.html'.length)
       }
@@ -1934,7 +2015,9 @@ export const ReadwiseContainer = () => {
     return repoRoot ? `cd ${JSON.stringify(repoRoot)} && ${command}` : command
   }
 
-  const handleCopyExternalRawSnapshotCommand = async (mode: 'capture' | 'diff') => {
+  const handleCopyExternalRawSnapshotCommand = async (
+    mode: 'capture' | 'diff',
+  ) => {
     try {
       const command = await buildExternalRawSnapshotCommand(mode)
       await copyText(
@@ -2090,8 +2173,8 @@ export const ReadwiseContainer = () => {
         resolveConfiguredReaderDebugHighlightPageLimit() ??
         0,
       processedItems: isActiveRun
-        ? liveRunIssueMetricsRef.current.processedItems ?? current
-        : runIssueContext?.processedItems ?? current,
+        ? (liveRunIssueMetricsRef.current.processedItems ?? current)
+        : (runIssueContext?.processedItems ?? current),
       issuesCount: errors.length,
       stats: isActiveRun
         ? {
@@ -2103,6 +2186,7 @@ export const ReadwiseContainer = () => {
   }
 
   const clearRunIssues = (options?: {
+    preservePendingLegacyManagedPageIdentityMigration?: boolean
     preservePendingLegacyBlockRefMigration?: boolean
     preservePendingCurrentPageLegacyIdMigration?: boolean
   }) => {
@@ -2112,6 +2196,9 @@ export const ReadwiseContainer = () => {
     setCurrentPageLegacyIdPreviewResult(null)
     setCurrentPageLegacyIdApplyResult(null)
     setReaderDetailEnrichReportResult(null)
+    if (!options?.preservePendingLegacyManagedPageIdentityMigration) {
+      setPendingLegacyManagedPageIdentityMigration(null)
+    }
     if (!options?.preservePendingLegacyBlockRefMigration) {
       setPendingLegacyBlockRefMigration(null)
     }
@@ -2297,20 +2384,19 @@ export const ReadwiseContainer = () => {
       } catch (error) {
         lastError = error
 
-        if (!isRetriableReaderListError(error) || attempt === totalAttempts - 1) {
+        if (
+          !isRetriableReaderListError(error) ||
+          attempt === totalAttempts - 1
+        ) {
           break
         }
 
-        logReadwiseWarn(
-          logPrefix,
-          'Reader document fetch failed; retrying',
-          {
-            documentId,
-            attempt: attempt + 1,
-            totalAttempts,
-            formattedError: describeUnknownError(error),
-          },
-        )
+        logReadwiseWarn(logPrefix, 'Reader document fetch failed; retrying', {
+          documentId,
+          attempt: attempt + 1,
+          totalAttempts,
+          formattedError: describeUnknownError(error),
+        })
 
         await sleep(1000 * 2 ** attempt)
       }
@@ -2407,9 +2493,8 @@ export const ReadwiseContainer = () => {
       return null
     }
 
-    const originalName = (
-      page as PageEntity & { originalName?: string | null }
-    ).originalName
+    const originalName = (page as PageEntity & { originalName?: string | null })
+      .originalName
     const candidate =
       typeof originalName === 'string' && originalName.trim().length > 0
         ? originalName
@@ -2424,12 +2509,11 @@ export const ReadwiseContainer = () => {
     pageName: string | null | undefined,
     namespacePrefix: string,
   ) =>
-    typeof pageName === 'string' &&
-    pageName.startsWith(`${namespacePrefix}/`)
+    typeof pageName === 'string' && pageName.startsWith(`${namespacePrefix}/`)
 
   const pruneRecentManagedPageActivity = (now = Date.now()) => {
-    recentManagedPageActivityRef.current = recentManagedPageActivityRef.current.filter(
-      (entry) => {
+    recentManagedPageActivityRef.current =
+      recentManagedPageActivityRef.current.filter((entry) => {
         const latestObservedAt = Math.max(
           entry.lastViewedAt ?? 0,
           entry.lastWrittenAt ?? 0,
@@ -2438,8 +2522,7 @@ export const ReadwiseContainer = () => {
           latestObservedAt > 0 &&
           now - latestObservedAt <= autoSyncProtectedActivityWindowMs
         )
-      },
-    )
+      })
   }
 
   const recordManagedPageActivity = ({
@@ -2462,7 +2545,9 @@ export const ReadwiseContainer = () => {
         (readerDocumentId != null &&
           entry.readerDocumentId != null &&
           entry.readerDocumentId === readerDocumentId) ||
-        (pageName != null && entry.pageName != null && entry.pageName === pageName),
+        (pageName != null &&
+          entry.pageName != null &&
+          entry.pageName === pageName),
     )
 
     if (existing) {
@@ -2518,7 +2603,10 @@ export const ReadwiseContainer = () => {
   }: {
     previewBook: ReaderPreviewBook
     namespacePrefix: string
-    currentOpenPage: { pageName: string | null; readerDocumentId: string | null } | null
+    currentOpenPage: {
+      pageName: string | null
+      readerDocumentId: string | null
+    } | null
   }): AutoSyncProtectedWriteMatch | null => {
     const now = Date.now()
     pruneRecentManagedPageActivity(now)
@@ -2533,8 +2621,12 @@ export const ReadwiseContainer = () => {
       format: 'org',
     })
     const candidatePageNames = new Set(
-      [pageNamePlan.preferredPageName, pageNamePlan.disambiguatedPageName].filter(
-        (value): value is string => typeof value === 'string' && value.length > 0,
+      [
+        pageNamePlan.preferredPageName,
+        pageNamePlan.disambiguatedPageName,
+      ].filter(
+        (value): value is string =>
+          typeof value === 'string' && value.length > 0,
       ),
     )
 
@@ -2618,7 +2710,9 @@ export const ReadwiseContainer = () => {
     pendingAutoSyncScheduleRef.current = null
   }
 
-  const scheduleAutoSyncAttempt = (source: 'startup' | 'interval' | 'resume') => {
+  const scheduleAutoSyncAttempt = (
+    source: 'startup' | 'interval' | 'resume',
+  ) => {
     if (!isAutoSyncForegroundReady()) {
       return
     }
@@ -2713,7 +2807,9 @@ export const ReadwiseContainer = () => {
     if (reasons.length === 0) {
       return {
         requiresConfirmation: false,
-        shouldWarn: runTrigger === 'auto' && pagesTargeted > autoSyncCautionWriteThreshold,
+        shouldWarn:
+          runTrigger === 'auto' &&
+          pagesTargeted > autoSyncCautionWriteThreshold,
         reasons: [],
       }
     }
@@ -2769,12 +2865,16 @@ export const ReadwiseContainer = () => {
           throw error
         }
 
-        logReadwiseWarn(formalSyncLogPrefix, 'transient export fetch failed; retrying', {
-          context,
-          attempt: attempt + 1,
-          params,
-          message,
-        })
+        logReadwiseWarn(
+          formalSyncLogPrefix,
+          'transient export fetch failed; retrying',
+          {
+            context,
+            attempt: attempt + 1,
+            params,
+            message,
+          },
+        )
         setStatusMessage(
           `Readwise request failed (${message}). Retrying ${attempt + 1}/2...`,
         )
@@ -2786,7 +2886,9 @@ export const ReadwiseContainer = () => {
   }
 
   const resolveConfiguredSyncMaxBooks = () => {
-    const rawDebugSyncMaxBooks = Number(logseq.settings?.debugSyncMaxBooks ?? 20)
+    const rawDebugSyncMaxBooks = Number(
+      logseq.settings?.debugSyncMaxBooks ?? 20,
+    )
     return Number.isFinite(rawDebugSyncMaxBooks) && rawDebugSyncMaxBooks > 0
       ? Math.floor(rawDebugSyncMaxBooks)
       : null
@@ -2828,26 +2930,30 @@ export const ReadwiseContainer = () => {
       throw new Error('No API token configured. Set it in plugin settings.')
     }
 
-    const activeFormalTestSession = await loadActiveFormalTestSessionManifestV1()
+    const activeFormalTestSession =
+      await loadActiveFormalTestSessionManifestV1()
     if (activeFormalTestSession && activeFormalTestSession.books.length > 0) {
-      const frozenBooks: ExportedBookIdentity[] = activeFormalTestSession.books.map(
-        (book) => ({
+      const frozenBooks: ExportedBookIdentity[] =
+        activeFormalTestSession.books.map((book) => ({
           user_book_id: book.userBookId,
           title: book.title,
-        }),
-      )
+        }))
 
       setTotal(frozenBooks.length)
       setStatusMessage(
         `Using active formal test session (${frozenBooks.length} frozen book(s)).`,
       )
-      logReadwiseInfo(sessionTestLogPrefix, 'using active formal test session for formal page selection', {
-        sessionId: activeFormalTestSession.sessionId,
-        namespacePrefix: formalNamespaceRoot,
-        updatedAfter: activeFormalTestSession.updatedAfter,
-        maxBooks: activeFormalTestSession.maxBooks,
-        frozenBooks: frozenBooks.length,
-      })
+      logReadwiseInfo(
+        sessionTestLogPrefix,
+        'using active formal test session for formal page selection',
+        {
+          sessionId: activeFormalTestSession.sessionId,
+          namespacePrefix: formalNamespaceRoot,
+          updatedAfter: activeFormalTestSession.updatedAfter,
+          maxBooks: activeFormalTestSession.maxBooks,
+          frozenBooks: frozenBooks.length,
+        },
+      )
 
       return {
         books: frozenBooks,
@@ -2928,7 +3034,9 @@ export const ReadwiseContainer = () => {
 
       if (books.length === 0) {
         setStatus('completed')
-        setStatusMessage('No formal test pages matched the current sync window.')
+        setStatusMessage(
+          'No formal test pages matched the current sync window.',
+        )
         return
       }
 
@@ -2976,7 +3084,9 @@ export const ReadwiseContainer = () => {
           setCurrent(completed)
           setTotal(total)
           setCurrentBook(pageTitle ?? '')
-          setStatusMessage(`Backing up ${completed} / ${total} formal test page(s)...`)
+          setStatusMessage(
+            `Backing up ${completed} / ${total} formal test page(s)...`,
+          )
         },
       })
       await refreshActiveFormalTestSessionCount()
@@ -3011,7 +3121,11 @@ export const ReadwiseContainer = () => {
         maxBooks,
       })
     } catch (err: unknown) {
-      logReadwiseError(backupLogPrefix, 'failed to back up formal test pages', err)
+      logReadwiseError(
+        backupLogPrefix,
+        'failed to back up formal test pages',
+        err,
+      )
       setStatus('error')
       setStatusMessage(
         `Backup failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3033,7 +3147,9 @@ export const ReadwiseContainer = () => {
 
       if (books.length === 0) {
         setStatus('completed')
-        setStatusMessage('No formal test pages matched the current sync window.')
+        setStatusMessage(
+          'No formal test pages matched the current sync window.',
+        )
         return
       }
 
@@ -3057,7 +3173,9 @@ export const ReadwiseContainer = () => {
           setCurrent(completed)
           setTotal(total)
           setCurrentBook(pageTitle ?? '')
-          setStatusMessage(`Deleting ${completed} / ${total} formal test page(s)...`)
+          setStatusMessage(
+            `Deleting ${completed} / ${total} formal test page(s)...`,
+          )
         },
       })
 
@@ -3086,7 +3204,11 @@ export const ReadwiseContainer = () => {
         maxBooks,
       })
     } catch (err: unknown) {
-      logReadwiseError(sessionTestLogPrefix, 'failed to clear formal test pages', err)
+      logReadwiseError(
+        sessionTestLogPrefix,
+        'failed to clear formal test pages',
+        err,
+      )
       setStatus('error')
       setStatusMessage(
         `Clear failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3155,9 +3277,9 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         result.failedPages.length > 0
           ? `Restored ${result.touchedPages} formal test page(s), but ${result.failedPages.length} page(s) failed. Active formal test session was kept for retry.`
-        : result.touchedPages > 0
-          ? `Restored ${result.touchedPages} formal test page(s) from ${result.backupDirectory}.`
-          : 'No formal test pages were restored.',
+          : result.touchedPages > 0
+            ? `Restored ${result.touchedPages} formal test page(s) from ${result.backupDirectory}.`
+            : 'No formal test pages were restored.',
       )
       logReadwiseInfo(restoreLogPrefix, 'restored formal test pages', {
         targetedBackups: result.targetedBooks,
@@ -3168,7 +3290,11 @@ export const ReadwiseContainer = () => {
         backupDirectory: result.backupDirectory,
       })
     } catch (err: unknown) {
-      logReadwiseError(restoreLogPrefix, 'failed to restore formal test pages', err)
+      logReadwiseError(
+        restoreLogPrefix,
+        'failed to restore formal test pages',
+        err,
+      )
       setStatus('error')
       setStatusMessage(
         `Restore failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3186,7 +3312,8 @@ export const ReadwiseContainer = () => {
     setStatusMessage('Resolving active session test pages to delete...')
 
     try {
-      const activeFormalTestSession = await loadActiveFormalTestSessionManifestV1()
+      const activeFormalTestSession =
+        await loadActiveFormalTestSessionManifestV1()
 
       setStatus('syncing')
       setCurrent(0)
@@ -3195,32 +3322,35 @@ export const ReadwiseContainer = () => {
         `Deleting session test page(s) under ${formalNamespaceRoot}/<run-id>/...`,
       )
 
-      const result = await clearManagedPagesBySessionNamespaceRoot(formalNamespaceRoot, {
-        onProgress: ({ phase, total, completed, pageTitle }) => {
-          if (phase === 'start') {
+      const result = await clearManagedPagesBySessionNamespaceRoot(
+        formalNamespaceRoot,
+        {
+          onProgress: ({ phase, total, completed, pageTitle }) => {
+            if (phase === 'start') {
+              setStatus('syncing')
+              setCurrent(0)
+              setTotal(total)
+              setCurrentBook('')
+              setStatusMessage(
+                total > 0
+                  ? `Deleting ${total} session test page(s)...`
+                  : `Deleting session test page(s) under ${formalNamespaceRoot}/<run-id>/...`,
+              )
+              return
+            }
+
             setStatus('syncing')
-            setCurrent(0)
+            setCurrent(completed)
             setTotal(total)
-            setCurrentBook('')
+            setCurrentBook(pageTitle ?? '')
             setStatusMessage(
               total > 0
-                ? `Deleting ${total} session test page(s)...`
+                ? `Deleting ${completed} / ${total} session test page(s)...`
                 : `Deleting session test page(s) under ${formalNamespaceRoot}/<run-id>/...`,
             )
-            return
-          }
-
-          setStatus('syncing')
-          setCurrent(completed)
-          setTotal(total)
-          setCurrentBook(pageTitle ?? '')
-          setStatusMessage(
-            total > 0
-              ? `Deleting ${completed} / ${total} session test page(s)...`
-              : `Deleting session test page(s) under ${formalNamespaceRoot}/<run-id>/...`,
-          )
+          },
         },
-      })
+      )
       const rotatedFormalTestSession = activeFormalTestSession
         ? await rotateActiveFormalTestSessionNamespaceV1()
         : null
@@ -3256,7 +3386,11 @@ export const ReadwiseContainer = () => {
         namespaceRoot: formalNamespaceRoot,
       })
     } catch (err: unknown) {
-      logReadwiseError(sessionTestLogPrefix, 'failed to clear session test pages', err)
+      logReadwiseError(
+        sessionTestLogPrefix,
+        'failed to clear session test pages',
+        err,
+      )
       setStatus('error')
       setStatusMessage(
         `Clear failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3274,32 +3408,35 @@ export const ReadwiseContainer = () => {
     setStatusMessage(`Deleting ${debugNamespaceRoot} pages...`)
 
     try {
-      const result = await clearManagedPagesByNamespacePrefix(debugNamespaceRoot, {
-        onProgress: ({ phase, total, completed, pageTitle }) => {
-          if (phase === 'start') {
+      const result = await clearManagedPagesByNamespacePrefix(
+        debugNamespaceRoot,
+        {
+          onProgress: ({ phase, total, completed, pageTitle }) => {
+            if (phase === 'start') {
+              setStatus('syncing')
+              setCurrent(0)
+              setTotal(total)
+              setCurrentBook('')
+              setStatusMessage(
+                total > 0
+                  ? `Deleting ${total} debug page(s)...`
+                  : `Deleting ${debugNamespaceRoot} pages...`,
+              )
+              return
+            }
+
             setStatus('syncing')
-            setCurrent(0)
+            setCurrent(completed)
             setTotal(total)
-            setCurrentBook('')
+            setCurrentBook(pageTitle ?? '')
             setStatusMessage(
               total > 0
-                ? `Deleting ${total} debug page(s)...`
+                ? `Deleting ${completed} / ${total} debug page(s)...`
                 : `Deleting ${debugNamespaceRoot} pages...`,
             )
-            return
-          }
-
-          setStatus('syncing')
-          setCurrent(completed)
-          setTotal(total)
-          setCurrentBook(pageTitle ?? '')
-          setStatusMessage(
-            total > 0
-              ? `Deleting ${completed} / ${total} debug page(s)...`
-              : `Deleting ${debugNamespaceRoot} pages...`,
-          )
+          },
         },
-      })
+      )
 
       setStatus('completed')
       setStatusMessage(`Deleted ${result.touchedPages} debug page(s).`)
@@ -3335,7 +3472,11 @@ export const ReadwiseContainer = () => {
         `Captured snapshot for ${result.pageName} via ${result.source} (${result.lineCount} lines).`,
       )
     } catch (err: unknown) {
-      logReadwiseError(formalSyncLogPrefix, 'failed to capture current page snapshot', err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'failed to capture current page snapshot',
+        err,
+      )
       setStatus('error')
       setStatusMessage(
         `Snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3368,7 +3509,11 @@ export const ReadwiseContainer = () => {
       setStatus('completed')
       setStatusMessage(result.summary)
     } catch (err: unknown) {
-      logReadwiseError(formalSyncLogPrefix, 'failed to diff current page snapshot', err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'failed to diff current page snapshot',
+        err,
+      )
       setStatus('error')
       setStatusMessage(
         `Diff failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3418,7 +3563,7 @@ export const ReadwiseContainer = () => {
       : await loadActiveFormalTestSessionManifestV1()
     const updatedAfter = ignoreCheckpoint
       ? undefined
-      : checkpointBeforeRun?.updatedAfter ?? undefined
+      : (checkpointBeforeRun?.updatedAfter ?? undefined)
     const syncLimitMaxBooks =
       typeof maxBooksOverride === 'number' && maxBooksOverride > 0
         ? Math.floor(maxBooksOverride)
@@ -3427,15 +3572,13 @@ export const ReadwiseContainer = () => {
       activeFormalTestSession?.namespacePrefix ??
       namespacePrefix ??
       (renderedDebugPages ? debugNamespaceRoot : formalNamespaceRoot)
-    const formalTestBookIds = activeFormalTestSession?.books.map(
-      (book) => book.userBookId,
-    ) ?? null
-    const syncLogPrefix =
-      renderedDebugPages
-        ? debugLogPrefix
-        : activeFormalTestSession || syncLimitMaxBooks != null
-          ? sessionTestLogPrefix
-          : formalSyncLogPrefix
+    const formalTestBookIds =
+      activeFormalTestSession?.books.map((book) => book.userBookId) ?? null
+    const syncLogPrefix = renderedDebugPages
+      ? debugLogPrefix
+      : activeFormalTestSession || syncLimitMaxBooks != null
+        ? sessionTestLogPrefix
+        : formalSyncLogPrefix
     setRunIssueContext({
       modeLabel: renderedDebugPages
         ? 'Debug sync'
@@ -3495,9 +3638,9 @@ export const ReadwiseContainer = () => {
               ? syncLimitMaxBooks != null
                 ? `Fetched ${allBooks.length} / ${syncLimitMaxBooks} debug book(s) so far...`
                 : `Fetched ${allBooks.length} debug book(s) so far...`
-            : syncLimitMaxBooks != null
-              ? `Fetched ${allBooks.length} / ${syncLimitMaxBooks} test book(s) so far...`
-            : `Fetched ${allBooks.length} book(s) so far...`,
+              : syncLimitMaxBooks != null
+                ? `Fetched ${allBooks.length} / ${syncLimitMaxBooks} test book(s) so far...`
+                : `Fetched ${allBooks.length} book(s) so far...`,
         )
         logReadwiseDebug(syncLogPrefix, 'export page', {
           pageResultCount: page.results.length,
@@ -3535,9 +3678,9 @@ export const ReadwiseContainer = () => {
             ? ignoreCheckpoint
               ? `Debug sync mode: processing ${allBooks.length} book(s) from scratch into ${effectiveNamespacePrefix}; checkpoint will not advance.`
               : `Debug sync mode: processing ${allBooks.length} book(s); checkpoint will not advance.`
-          : syncLimitMaxBooks != null
-            ? `Limited sync mode: processing ${allBooks.length} test book(s) in ${effectiveNamespacePrefix}; checkpoint will not advance.`
-          : `Syncing ${allBooks.length} book(s)...`,
+            : syncLimitMaxBooks != null
+              ? `Limited sync mode: processing ${allBooks.length} test book(s) in ${effectiveNamespacePrefix}; checkpoint will not advance.`
+              : `Syncing ${allBooks.length} book(s)...`,
       )
 
       for (let i = 0; i < allBooks.length; i++) {
@@ -3610,14 +3753,22 @@ export const ReadwiseContainer = () => {
           committedAt: new Date().toISOString(),
           source: checkpointSource,
         }
-        logReadwiseInfo(syncLogPrefix, 'saving graph checkpoint', checkpointToSave)
+        logReadwiseInfo(
+          syncLogPrefix,
+          'saving graph checkpoint',
+          checkpointToSave,
+        )
         await saveGraphCheckpointStateV1({
           schemaVersion: 1,
           updatedAfter: nextUpdatedAfter,
           committedAt: checkpointToSave.committedAt,
           source: checkpointToSave.source,
         })
-        logReadwiseInfo(syncLogPrefix, 'saved graph checkpoint', checkpointToSave)
+        logReadwiseInfo(
+          syncLogPrefix,
+          'saved graph checkpoint',
+          checkpointToSave,
+        )
       }
 
       setStatus('completed')
@@ -3636,11 +3787,11 @@ export const ReadwiseContainer = () => {
           ? `Formal test session complete. ${allBooks.length} frozen book(s) processed in ${effectiveNamespacePrefix}. Checkpoint was not advanced.`
           : renderedDebugPages || ignoreCheckpoint
             ? `Debug sync complete. ${allBooks.length} book(s) processed${effectiveNamespacePrefix ? ` in ${effectiveNamespacePrefix}` : ''}. Checkpoint was not advanced.`
-          : syncLimitMaxBooks != null
-            ? `Limited sync complete. ${allBooks.length} test book(s) processed in ${effectiveNamespacePrefix}. Checkpoint was not advanced.`
-          : hasSyncErrors
-            ? `Sync completed with ${syncErrorsForRun.length} error(s). Checkpoint was not advanced.`
-          : `Sync complete. ${allBooks.length} book(s) processed.`,
+            : syncLimitMaxBooks != null
+              ? `Limited sync complete. ${allBooks.length} test book(s) processed in ${effectiveNamespacePrefix}. Checkpoint was not advanced.`
+              : hasSyncErrors
+                ? `Sync completed with ${syncErrorsForRun.length} error(s). Checkpoint was not advanced.`
+                : `Sync complete. ${allBooks.length} book(s) processed.`,
       )
       logReadwiseInfo(syncLogPrefix, 'sync completed', {
         processedBooks: allBooks.length,
@@ -3664,9 +3815,7 @@ export const ReadwiseContainer = () => {
               issuesCount: syncErrorsForRun.length,
             },
       )
-      setStatusMessage(
-        `Sync failed: ${describeUnknownError(err)}`,
-      )
+      setStatusMessage(`Sync failed: ${describeUnknownError(err)}`)
     }
   }
 
@@ -3684,7 +3833,9 @@ export const ReadwiseContainer = () => {
             label: conflict.label,
             clearAction: conflict.clearAction,
             count: conflict.pages.length,
-            sampleTitles: conflict.pages.slice(0, 5).map((page) => page.pageTitle),
+            sampleTitles: conflict.pages
+              .slice(0, 5)
+              .map((page) => page.pageTitle),
           })),
         },
       )
@@ -3836,7 +3987,11 @@ export const ReadwiseContainer = () => {
         `Soft reopened ${result.pageName} without touching the page file.`,
       )
     } catch (err: unknown) {
-      logReadwiseError(formalSyncLogPrefix, 'soft reopen current page failed', err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'soft reopen current page failed',
+        err,
+      )
       setStatus('error')
       setRunIssueContext((previous) =>
         previous == null
@@ -3880,18 +4035,21 @@ export const ReadwiseContainer = () => {
     )
 
     try {
-      const result = await forceReparseManagedPagesByNamespaceV1(formalNamespaceRoot, {
-        onProgress: ({ total, completed, pageName }) => {
-          setCurrent(completed)
-          setTotal(total)
-          setCurrentBook(pageName ?? '')
-          setStatusMessage(
-            total > 0
-              ? `Touching managed page files under ${formalNamespaceRoot}... ${completed} / ${total}.`
-              : `No managed pages matched ${formalNamespaceRoot}.`,
-          )
+      const result = await forceReparseManagedPagesByNamespaceV1(
+        formalNamespaceRoot,
+        {
+          onProgress: ({ total, completed, pageName }) => {
+            setCurrent(completed)
+            setTotal(total)
+            setCurrentBook(pageName ?? '')
+            setStatusMessage(
+              total > 0
+                ? `Touching managed page files under ${formalNamespaceRoot}... ${completed} / ${total}.`
+                : `No managed pages matched ${formalNamespaceRoot}.`,
+            )
+          },
         },
-      })
+      )
       const issues: RunIssue[] = result.failedPages.map((page) => ({
         book: page.pageName,
         message: page.message,
@@ -3899,7 +4057,9 @@ export const ReadwiseContainer = () => {
           'The plugin could not touch and restore this managed page file, so Logseq was not forced to reparse it.',
         suggestedAction:
           'Inspect the file path and retry after resolving the page-level write problem.',
-        debugFacts: page.relativeFilePath ? [`relativeFilePath=${page.relativeFilePath}`] : [],
+        debugFacts: page.relativeFilePath
+          ? [`relativeFilePath=${page.relativeFilePath}`]
+          : [],
         namespacePrefix: formalNamespaceRoot,
         pageName: page.pageName,
       }))
@@ -3928,7 +4088,11 @@ export const ReadwiseContainer = () => {
             : `Forced Logseq to reparse ${result.touchedPages} managed page(s) under ${formalNamespaceRoot}.`,
       )
     } catch (err: unknown) {
-      logReadwiseError(formalSyncLogPrefix, 'force reparse managed pages failed', err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'force reparse managed pages failed',
+        err,
+      )
       setStatus('error')
       setRunIssueContext((previous) =>
         previous == null
@@ -4053,11 +4217,15 @@ export const ReadwiseContainer = () => {
     lastAutoSyncAttemptAtRef.current = now
 
     try {
-      logReadwiseInfo(formalSyncLogPrefix, 'starting automatic incremental sync', {
-        source,
-        intervalMinutes,
-        updatedAfter: currentReaderSyncState.updatedAfter,
-      })
+      logReadwiseInfo(
+        formalSyncLogPrefix,
+        'starting automatic incremental sync',
+        {
+          source,
+          intervalMinutes,
+          updatedAfter: currentReaderSyncState.updatedAfter,
+        },
+      )
       await runReaderManagedSync({
         namespacePrefix: formalNamespaceRoot,
         logPrefix: formalSyncLogPrefix,
@@ -4136,7 +4304,11 @@ export const ReadwiseContainer = () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('focus', handleFocus)
     }
-  }, [propsReady, logseq.settings?.autoSyncEnabled, logseq.settings?.syncIntervalMinutes])
+  }, [
+    propsReady,
+    logseq.settings?.autoSyncEnabled,
+    logseq.settings?.syncIntervalMinutes,
+  ])
 
   const handleAuditManagedIds = async () => {
     clearRunIssues()
@@ -4288,7 +4460,8 @@ export const ReadwiseContainer = () => {
           : {
               ...previous,
               completedAt: new Date().toISOString(),
-              processedItems: summary.parentDocumentCount + summary.highlightCount,
+              processedItems:
+                summary.parentDocumentCount + summary.highlightCount,
               issuesCount: 0,
               stats: {
                 pagesProcessed: summary.parentDocumentCount,
@@ -4310,9 +4483,7 @@ export const ReadwiseContainer = () => {
               completedAt: new Date().toISOString(),
             },
       )
-      setStatusMessage(
-        `Cache summary failed: ${describeUnknownError(err)}`,
-      )
+      setStatusMessage(`Cache summary failed: ${describeUnknownError(err)}`)
     }
   }
 
@@ -4392,7 +4563,12 @@ export const ReadwiseContainer = () => {
           setCurrent(completed)
           setTotal(total)
           setCurrentBook(pageName)
-          updateReaderSyncEta('fetch-highlights', 'repair scan', completed, total)
+          updateReaderSyncEta(
+            'fetch-highlights',
+            'repair scan',
+            completed,
+            total,
+          )
           setStatusMessage(
             `Scanning ${completed} / ${total} managed page(s) for repair candidates...`,
           )
@@ -4432,9 +4608,8 @@ export const ReadwiseContainer = () => {
       )
       const highlightsByParent =
         await previewCache.loadGroupedHighlightsByParent(candidateIds)
-      const cachedParentDocuments = await previewCache.getCachedParentDocuments(
-        candidateIds,
-      )
+      const cachedParentDocuments =
+        await previewCache.getCachedParentDocuments(candidateIds)
 
       setStatus('syncing')
       setCurrent(0)
@@ -4516,13 +4691,14 @@ export const ReadwiseContainer = () => {
 
         if (!document) {
           throwIfCancelled()
-          const replacementLookup = await findReplacementReaderParentDocumentByApi({
-            client,
-            pageName: candidate.pageName,
-            rootContent: candidate.rootContent,
-            previewCache,
-            logPrefix: formalSyncLogPrefix,
-          })
+          const replacementLookup =
+            await findReplacementReaderParentDocumentByApi({
+              client,
+              pageName: candidate.pageName,
+              rootContent: candidate.rootContent,
+              previewCache,
+              logPrefix: formalSyncLogPrefix,
+            })
           document = replacementLookup.document
         }
 
@@ -4653,7 +4829,9 @@ export const ReadwiseContainer = () => {
     } catch (err: unknown) {
       if (isRunCancelledError(err)) {
         const processedItems =
-          repairProgressCompleted > 0 ? repairProgressCompleted : scanProgressCompleted
+          repairProgressCompleted > 0
+            ? repairProgressCompleted
+            : scanProgressCompleted
         const totalItems =
           repairProgressTotal > 0 ? repairProgressTotal : scanProgressTotal
         setStatus('idle')
@@ -4778,6 +4956,599 @@ export const ReadwiseContainer = () => {
     ]
   }
 
+  const buildLegacyManagedPageIdentityMigrationPreviewIssues = (
+    entries: LegacyManagedPageIdentityMigrationPreviewEntry[],
+  ): RunIssue[] =>
+    entries.map((entry) => ({
+      book: entry.currentPageName,
+      category: 'warning' as const,
+      message:
+        entry.currentPageName === entry.targetPageName
+          ? `Preview: would bind rw-reader-id=${entry.readerDocumentId} on ${entry.currentPageName}.`
+          : `Preview: would bind rw-reader-id=${entry.readerDocumentId} and rename ${entry.currentPageName} to ${entry.targetPageName}.`,
+      summary:
+        'Preview only. This legacy managed page can be rebound to a Reader document without touching tweet-only pages.',
+      suggestedAction:
+        'Review the evidence and target page name. If it looks correct, run Apply Legacy Managed Page Migration.',
+      debugFacts: [
+        `readerDocumentId=${entry.readerDocumentId}`,
+        `readerDocumentTitle=${entry.readerDocumentTitle ?? '(untitled)'}`,
+        `targetPageName=${entry.targetPageName}`,
+        `matchReasons=${entry.reasons.join(', ') || 'unknown'}`,
+      ],
+      namespacePrefix: formalNamespaceRoot,
+      pageName: entry.currentPageName,
+      readerDocumentId: entry.readerDocumentId,
+    }))
+
+  const scanManagedPagesForLegacyIdentityMigration = async ({
+    previewCache,
+    client,
+    onProgress,
+  }: {
+    previewCache: ReturnType<typeof createGraphReaderSyncCacheV1>
+    client: ReturnType<typeof createReadwiseClient>
+    onProgress?: (progress: {
+      total: number
+      completed: number
+      pageName: string
+    }) => void
+  }): Promise<LegacyManagedPageIdentityMigrationScanResult> => {
+    const managedPages = (
+      ((await logseq.Editor.getAllPages()) ?? []) as PageEntity[]
+    ).filter((page) => {
+      const pageName =
+        resolvePreferredPageName(page) ??
+        page.originalName ??
+        page.name ??
+        page.title ??
+        ''
+      return isManagedFormalPageName(pageName)
+    })
+    const missingIdentityPages = managedPages.filter(
+      (page) => extractReaderDocumentIdFromPage(page) == null,
+    )
+    let skippedTweetPages = missingIdentityPages.filter(
+      (page) =>
+        normalizeReaderCategory(readPagePropertyString(page, 'CATEGORIES')) ===
+        'tweet',
+    ).length
+    const scopedPages = missingIdentityPages.filter(
+      (page) =>
+        normalizeReaderCategory(readPagePropertyString(page, 'CATEGORIES')) !==
+        'tweet',
+    )
+
+    const results = await mapWithConcurrency<
+      PageEntity,
+      {
+        pageName: string
+        entry?: LegacyManagedPageIdentityMigrationPreviewEntry
+        issue?: RunIssue
+        skippedTweet?: boolean
+      }
+    >(
+      scopedPages,
+      managedPageRepairScanConcurrency,
+      async (page) => {
+        throwIfCancelled()
+        const pageName =
+          resolvePreferredPageName(page) ??
+          page.originalName ??
+          page.name ??
+          page.title ??
+          ''
+        if (!page.uuid || pageName.length === 0) {
+          return {
+            pageName,
+            issue: {
+              book: pageName || 'Managed page',
+              message: `Legacy page migration skipped because the current page identity could not be resolved for ${pageName || '(unnamed page)'}.`,
+              summary:
+                'The migration preview could not determine a stable page uuid or title for this managed page.',
+              suggestedAction:
+                'Open the page in Logseq, confirm it still exists, and rerun the preview.',
+              namespacePrefix: formalNamespaceRoot,
+              pageName: pageName || null,
+            } satisfies RunIssue,
+          }
+        }
+
+        const inspection = await inspectManagedPageIntegrityV1(page)
+        const normalizedContentCategory = normalizeReaderCategory(
+          extractRootPropertyValue(inspection.rootContent, 'CATEGORIES'),
+        )
+        if (
+          normalizedContentCategory === 'tweet' ||
+          hasLegacyTweetOnlyLinks(inspection.searchableContent)
+        ) {
+          return {
+            pageName,
+            skippedTweet: true,
+          }
+        }
+
+        const embeddedReaderDocumentIds =
+          extractReaderDocumentIdsFromRootContent(inspection.searchableContent)
+        let resolvedDocument: ReaderDocument | null = null
+        let resolvedReaderDocumentId: string | null =
+          embeddedReaderDocumentIds.length === 1
+            ? (embeddedReaderDocumentIds[0] ?? null)
+            : null
+        let reasons =
+          resolvedReaderDocumentId != null
+            ? ['embedded-rw-reader-id']
+            : ([] as string[])
+
+        const loadParentDocument = async (readerDocumentId: string) => {
+          const cached = (
+            await previewCache.getCachedParentDocuments([readerDocumentId])
+          ).get(readerDocumentId)
+          if (cached) return cached
+
+          const loaded = await loadReaderParentDocumentByIdWithRetry(
+            client,
+            readerDocumentId,
+            formalSyncLogPrefix,
+          )
+          if (loaded) {
+            await previewCache.putParentDocuments([loaded])
+          }
+          return loaded
+        }
+
+        if (resolvedReaderDocumentId) {
+          resolvedDocument = await loadParentDocument(resolvedReaderDocumentId)
+        }
+
+        if (
+          !resolvedDocument &&
+          hasReaderHighlightLinks(inspection.searchableContent)
+        ) {
+          const inference = await inferReaderDocumentIdFromHighlights({
+            pageName,
+            rootContent: inspection.searchableContent,
+            previewCache,
+            client,
+            logPrefix: formalSyncLogPrefix,
+          })
+          if (inference.readerDocumentId) {
+            resolvedReaderDocumentId = inference.readerDocumentId
+            reasons = ['highlight-links']
+            resolvedDocument = await loadParentDocument(
+              inference.readerDocumentId,
+            )
+          }
+        }
+
+        if (!resolvedDocument) {
+          const replacementLookup =
+            await findReplacementReaderParentDocumentByApi({
+              client,
+              pageName,
+              rootContent: inspection.searchableContent,
+              previewCache,
+              logPrefix: formalSyncLogPrefix,
+            })
+          if (replacementLookup.document) {
+            resolvedDocument = replacementLookup.document
+            resolvedReaderDocumentId = replacementLookup.document.id
+            reasons =
+              replacementLookup.reasons.length > 0
+                ? replacementLookup.reasons
+                : ['metadata-match']
+          }
+        }
+
+        if (!resolvedDocument || !resolvedReaderDocumentId) {
+          return {
+            pageName,
+            issue: {
+              book: pageName,
+              message: `Legacy page migration skipped because no non-tweet Reader document could be proved for ${pageName}.`,
+              summary:
+                'The page is outside the tweet-only scope, but the plugin still could not prove a unique Reader parent from embedded ids, highlight links, or metadata.',
+              suggestedAction:
+                'Inspect LINK/AUTHOR/CATEGORIES on the page, or leave it unmanaged until a stronger identity signal is available.',
+              debugFacts: [
+                `embeddedReaderDocumentIds=${embeddedReaderDocumentIds.join(', ') || '(none)'}`,
+                `hasHighlightLinks=${hasReaderHighlightLinks(inspection.searchableContent)}`,
+                `contentCategory=${normalizedContentCategory ?? '(unknown)'}`,
+              ],
+              namespacePrefix: formalNamespaceRoot,
+              pageName,
+            } satisfies RunIssue,
+          }
+        }
+
+        const readerDocumentTitle =
+          typeof resolvedDocument.title === 'string' &&
+          resolvedDocument.title.trim().length > 0
+            ? resolvedDocument.title.trim()
+            : null
+        const targetTitle = readerDocumentTitle ?? pageName
+        const pageNamePlan = buildManagedPageNamePlanV1({
+          pageTitle: targetTitle,
+          namespacePrefix: formalNamespaceRoot,
+          managedId: resolvedReaderDocumentId,
+          format: 'org',
+        })
+        const availablePageName = await resolveAvailableManagedPageNameV1({
+          pageTitle: targetTitle,
+          namespacePrefix: formalNamespaceRoot,
+          managedId: resolvedReaderDocumentId,
+          format: 'org',
+          currentPageUuid: page.uuid,
+        })
+
+        if (availablePageName.pageName !== pageNamePlan.preferredPageName) {
+          return {
+            pageName,
+            issue: {
+              book: pageName,
+              message: `Legacy page migration skipped because the canonical target name is not currently free for ${pageName}.`,
+              summary:
+                'Binding this page would require a deduplicated managed page title, which is outside the safe automatic migration scope.',
+              suggestedAction:
+                'Resolve the conflicting managed page first, then rerun the preview.',
+              debugFacts: [
+                `readerDocumentId=${resolvedReaderDocumentId}`,
+                `preferredPageName=${pageNamePlan.preferredPageName}`,
+                `availablePageName=${availablePageName.pageName}`,
+                `matchReasons=${reasons.join(', ') || 'unknown'}`,
+              ],
+              namespacePrefix: formalNamespaceRoot,
+              pageName,
+              readerDocumentId: resolvedReaderDocumentId,
+            } satisfies RunIssue,
+          }
+        }
+
+        return {
+          pageName,
+          entry: {
+            pageUuid: page.uuid,
+            currentPageName: pageName,
+            readerDocumentId: resolvedReaderDocumentId,
+            readerDocumentTitle,
+            targetPageName: pageNamePlan.preferredPageName,
+            reasons,
+          } satisfies LegacyManagedPageIdentityMigrationPreviewEntry,
+        }
+      },
+      (result, _index, completed) => {
+        onProgress?.({
+          total: scopedPages.length,
+          completed,
+          pageName: result.pageName,
+        })
+      },
+    )
+
+    const entries: LegacyManagedPageIdentityMigrationPreviewEntry[] = []
+    const issues: RunIssue[] = []
+
+    for (const result of results) {
+      if (result.skippedTweet) {
+        skippedTweetPages += 1
+      }
+      if (result.entry) {
+        entries.push(result.entry)
+      }
+      if (result.issue) {
+        issues.push(result.issue)
+      }
+    }
+
+    return {
+      entries,
+      issues,
+      skippedTweetPages,
+      scopedPages: scopedPages.length,
+      scannedPages: managedPages.length,
+    }
+  }
+
+  const handlePreviewLegacyManagedPageMigration = async () => {
+    const token = logseq.settings?.apiToken as string
+    if (!token) {
+      setStatus('error')
+      setStatusMessage('Please set your Readwise API Token first.')
+      return
+    }
+
+    clearRunIssues()
+    setPageDiffResult(null)
+    setCacheSummaryResult(null)
+    setCurrent(0)
+    setTotal(0)
+    setCurrentBook('')
+    setStatus('fetching')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Preview legacy managed page migration',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    beginReaderSyncEtaPhase('fetch-documents', 'legacy page preview')
+    setStatusMessage(
+      `Scanning ${formalNamespaceRoot} for non-tweet legacy pages that can be rebound safely...`,
+    )
+
+    try {
+      const graphContext = await loadCurrentGraphContextV1()
+      const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
+      const client = createReadwiseClient(token)
+      const scanResult = await scanManagedPagesForLegacyIdentityMigration({
+        previewCache,
+        client,
+        onProgress: ({ total, completed, pageName }) => {
+          setCurrent(completed)
+          setTotal(total)
+          setCurrentBook(pageName)
+          updateReaderSyncEta(
+            'fetch-documents',
+            'legacy page preview',
+            completed,
+            total,
+          )
+          setStatusMessage(
+            `Previewing legacy managed page migration... ${completed} / ${total} scoped page(s).`,
+          )
+        },
+      })
+      const previewIssues = [
+        ...(scanResult.skippedTweetPages > 0
+          ? [
+              {
+                book: 'Tweet migration scope',
+                category: 'warning' as const,
+                message: `Preview skipped ${scanResult.skippedTweetPages} tweet-category legacy page(s).`,
+                summary:
+                  'Tweet-only legacy pages are intentionally out of scope for this migration preview.',
+                suggestedAction:
+                  'Leave them for the later tweet export/migration workflow.',
+                debugFacts: [
+                  `skippedTweetPages=${scanResult.skippedTweetPages}`,
+                ],
+                namespacePrefix: formalNamespaceRoot,
+              } satisfies RunIssue,
+            ]
+          : []),
+        ...buildLegacyManagedPageIdentityMigrationPreviewIssues(
+          scanResult.entries,
+        ),
+        ...scanResult.issues,
+      ]
+
+      setPendingLegacyManagedPageIdentityMigration(
+        scanResult.entries.length > 0 ? { entries: scanResult.entries } : null,
+      )
+      replaceRunIssues(previewIssues)
+      setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: scanResult.scopedPages,
+              issuesCount: previewIssues.length,
+              stats: {
+                pagesTargeted: scanResult.scopedPages,
+                pagesProcessed: scanResult.entries.length,
+                updatedCount: scanResult.entries.length,
+              },
+            },
+      )
+      setStatusMessage(
+        scanResult.entries.length > 0
+          ? `Preview found ${scanResult.entries.length} non-tweet legacy page(s) that can be rebound safely.${scanResult.issues.length > 0 ? ` ${scanResult.issues.length} page(s) still need manual review.` : ''}${scanResult.skippedTweetPages > 0 ? ` Skipped ${scanResult.skippedTweetPages} tweet page(s).` : ''}`
+          : `Preview found no non-tweet legacy pages that can be migrated automatically.${scanResult.skippedTweetPages > 0 ? ` Skipped ${scanResult.skippedTweetPages} tweet page(s).` : ''}`,
+      )
+    } catch (err: unknown) {
+      const issue = {
+        book: 'Legacy managed page migration',
+        message: describeUnknownError(err),
+        summary:
+          'Legacy managed page preview stopped before a safe bind-and-rename plan was produced.',
+        suggestedAction:
+          'Copy the issue bundle and inspect the matching logic before retrying the preview.',
+        namespacePrefix: formalNamespaceRoot,
+      } satisfies RunIssue
+      replaceRunIssues([issue])
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              issuesCount: 1,
+            },
+      )
+      setStatusMessage(
+        `Legacy managed page migration preview failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
+  const handleApplyLegacyManagedPageMigration = async () => {
+    const migrationPlan = pendingLegacyManagedPageIdentityMigration
+    if (!migrationPlan) {
+      setStatus('error')
+      setStatusMessage(
+        'No pending legacy managed page migration preview is available. Run the preview first.',
+      )
+      return
+    }
+
+    clearRunIssues({
+      preservePendingLegacyManagedPageIdentityMigration: true,
+    })
+    setPageDiffResult(null)
+    setCacheSummaryResult(null)
+    setCurrent(0)
+    setTotal(migrationPlan.entries.length)
+    setCurrentBook('')
+    setStatus('syncing')
+    const startedAt = new Date().toISOString()
+    setRunIssueContext({
+      modeLabel: 'Apply legacy managed page migration',
+      namespacePrefix: formalNamespaceRoot,
+      logLevel: String(logseq.settings?.logLevel ?? 'warn'),
+      statusMessage: '',
+      startedAt,
+      completedAt: null,
+      targetDocuments: null,
+      debugHighlightPageLimit: null,
+      processedItems: 0,
+      issuesCount: 0,
+    })
+    beginReaderSyncEtaPhase('write-pages', 'legacy page migration')
+    setStatusMessage(
+      `Binding rw-reader-id and renaming ${migrationPlan.entries.length} legacy managed page(s)...`,
+    )
+
+    try {
+      let boundCount = 0
+      let renamedCount = 0
+      const applyIssues: RunIssue[] = []
+
+      for (let index = 0; index < migrationPlan.entries.length; index += 1) {
+        throwIfCancelled()
+        const entry = migrationPlan.entries[index]!
+        setCurrentBook(entry.currentPageName)
+
+        const currentPages = ((await logseq.Editor.getAllPages()) ??
+          []) as PageEntity[]
+        const page =
+          currentPages.find((candidate) => candidate.uuid === entry.pageUuid) ??
+          null
+
+        if (!page) {
+          applyIssues.push({
+            book: entry.currentPageName,
+            message: `Legacy page migration skipped because ${entry.currentPageName} no longer exists.`,
+            summary:
+              'The page disappeared or was renamed after the preview was created.',
+            suggestedAction: 'Rerun the preview to refresh the migration plan.',
+            namespacePrefix: formalNamespaceRoot,
+            pageName: entry.currentPageName,
+            readerDocumentId: entry.readerDocumentId,
+          })
+        } else {
+          await logseq.Editor.upsertBlockProperty(
+            page.uuid,
+            'rw-reader-id',
+            entry.readerDocumentId,
+          )
+          boundCount += 1
+
+          const currentPageName =
+            resolvePreferredPageName(page) ??
+            page.originalName ??
+            page.name ??
+            page.title ??
+            entry.currentPageName
+          if (currentPageName !== entry.targetPageName) {
+            const conflictingPage = await logseq.Editor.getPage(
+              entry.targetPageName,
+            )
+            if (conflictingPage && conflictingPage.uuid !== page.uuid) {
+              applyIssues.push({
+                book: entry.currentPageName,
+                message: `Legacy page migration bound rw-reader-id, but rename target ${entry.targetPageName} is now occupied.`,
+                summary:
+                  'The preview target is no longer free, so the page was bound but left under its old title.',
+                suggestedAction:
+                  'Resolve the target-page conflict, then rerun the preview before retrying rename.',
+                debugFacts: [`currentPageName=${currentPageName}`],
+                namespacePrefix: formalNamespaceRoot,
+                pageName: entry.currentPageName,
+                readerDocumentId: entry.readerDocumentId,
+              })
+            } else {
+              await logseq.Editor.renamePage(
+                currentPageName,
+                entry.targetPageName,
+              )
+              renamedCount += 1
+            }
+          }
+        }
+
+        const completed = index + 1
+        setCurrent(completed)
+        updateReaderSyncEta(
+          'write-pages',
+          'legacy page migration',
+          completed,
+          migrationPlan.entries.length,
+        )
+        setStatusMessage(
+          `Applying legacy managed page migration... ${completed} / ${migrationPlan.entries.length} page(s), ${renamedCount} renamed.`,
+        )
+      }
+
+      setPendingLegacyManagedPageIdentityMigration(null)
+      replaceRunIssues(applyIssues)
+      setStatus('completed')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              processedItems: migrationPlan.entries.length,
+              issuesCount: applyIssues.length,
+              stats: {
+                pagesTargeted: migrationPlan.entries.length,
+                pagesProcessed: boundCount,
+                updatedCount: boundCount,
+                renamedCount,
+              },
+            },
+      )
+      setStatusMessage(
+        applyIssues.length > 0
+          ? `Applied legacy managed page migration to ${boundCount} page(s); renamed ${renamedCount}; ${applyIssues.length} follow-up issue(s) remain.`
+          : `Applied legacy managed page migration to ${boundCount} page(s); renamed ${renamedCount}.`,
+      )
+    } catch (err: unknown) {
+      const issue = {
+        book: 'Legacy managed page migration',
+        message: describeUnknownError(err),
+        summary:
+          'Legacy managed page migration stopped before the bind-and-rename plan completed.',
+        suggestedAction:
+          'Copy the issue bundle and inspect the current graph state before retrying apply.',
+        namespacePrefix: formalNamespaceRoot,
+      } satisfies RunIssue
+      replaceRunIssues([issue])
+      setStatus('error')
+      setRunIssueContext((previous) =>
+        previous == null
+          ? previous
+          : {
+              ...previous,
+              completedAt: new Date().toISOString(),
+              issuesCount: 1,
+            },
+      )
+      setStatusMessage(
+        `Legacy managed page migration failed: ${describeUnknownError(err)}`,
+      )
+    }
+  }
+
   const handlePreviewLegacyBlockRefs = async () => {
     clearRunIssues()
     setPageDiffResult(null)
@@ -4811,7 +5582,12 @@ export const ReadwiseContainer = () => {
           setCurrent(completed)
           setTotal(total)
           setCurrentBook(pageName)
-          updateReaderSyncEta('fetch-highlights', 'block ref mapping', completed, total)
+          updateReaderSyncEta(
+            'fetch-highlights',
+            'block ref mapping',
+            completed,
+            total,
+          )
           setStatusMessage(
             `Building legacy block UUID mapping... ${completed} / ${total} managed page(s).`,
           )
@@ -4848,17 +5624,30 @@ export const ReadwiseContainer = () => {
 
       const previewResult = await previewLegacyBlockRefsV1({
         mapping: mappingResult.mapping,
-        onProgress: ({ total, completed, pageName, affectedPages, refsPlanned }) => {
+        onProgress: ({
+          total,
+          completed,
+          pageName,
+          affectedPages,
+          refsPlanned,
+        }) => {
           setCurrent(completed)
           setTotal(total)
           setCurrentBook(pageName)
-          updateReaderSyncEta('write-pages', 'block ref preview', completed, total)
+          updateReaderSyncEta(
+            'write-pages',
+            'block ref preview',
+            completed,
+            total,
+          )
           setStatusMessage(
             `Previewing legacy block refs... ${completed} / ${total} page(s), ${affectedPages} affected, ${refsPlanned} ref(s) planned.`,
           )
         },
       })
-      const previewIssues = buildLegacyBlockRefPreviewIssues(previewResult.entries)
+      const previewIssues = buildLegacyBlockRefPreviewIssues(
+        previewResult.entries,
+      )
       replaceRunIssues(previewIssues)
       setShowWarningIssues(true)
       setPendingLegacyBlockRefMigration({
@@ -4898,7 +5687,11 @@ export const ReadwiseContainer = () => {
         namespacePrefix: formalNamespaceRoot,
       } satisfies RunIssue
 
-      logReadwiseError(formalSyncLogPrefix, 'legacy block ref migration failed', err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'legacy block ref migration failed',
+        err,
+      )
       replaceRunIssues([issue])
       setStatus('error')
       setRunIssueContext((previous) =>
@@ -4951,7 +5744,12 @@ export const ReadwiseContainer = () => {
           setCurrent(completed)
           setTotal(total)
           setCurrentBook(pageName)
-          updateReaderSyncEta('fetch-highlights', 'block ref mapping', completed, total)
+          updateReaderSyncEta(
+            'fetch-highlights',
+            'block ref mapping',
+            completed,
+            total,
+          )
           setStatusMessage(
             `Building legacy block UUID mapping... ${completed} / ${total} managed page(s).`,
           )
@@ -5094,11 +5892,22 @@ export const ReadwiseContainer = () => {
       const migrationSummary = await migrateLegacyBlockRefsV1({
         mapping: migrationPlan.mapping,
         logPrefix: formalSyncLogPrefix,
-        onProgress: ({ total, completed, pageName, updatedPages, refsRewritten }) => {
+        onProgress: ({
+          total,
+          completed,
+          pageName,
+          updatedPages,
+          refsRewritten,
+        }) => {
           setCurrent(completed)
           setTotal(total)
           setCurrentBook(pageName)
-          updateReaderSyncEta('write-pages', 'block ref rewrite', completed, total)
+          updateReaderSyncEta(
+            'write-pages',
+            'block ref rewrite',
+            completed,
+            total,
+          )
           setStatusMessage(
             `Migrating legacy block refs... ${completed} / ${total} page(s), ${updatedPages} updated, ${refsRewritten} ref(s) rewritten.`,
           )
@@ -5136,7 +5945,11 @@ export const ReadwiseContainer = () => {
         namespacePrefix: formalNamespaceRoot,
       } satisfies RunIssue
 
-      logReadwiseError(formalSyncLogPrefix, 'legacy block ref migration failed', err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'legacy block ref migration failed',
+        err,
+      )
       replaceRunIssues([issue])
       setStatus('error')
       setRunIssueContext((previous) =>
@@ -5321,9 +6134,8 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         `${statusPrefix}: loading cached highlights for ${pageName}...`,
       )
-      const highlightsByParent = await previewCache.loadGroupedHighlightsByParent([
-        readerDocumentId,
-      ])
+      const highlightsByParent =
+        await previewCache.loadGroupedHighlightsByParent([readerDocumentId])
       throwIfCancelled()
       const highlights = [
         ...(highlightsByParent.get(readerDocumentId) ?? []),
@@ -5347,9 +6159,9 @@ export const ReadwiseContainer = () => {
 
       let document =
         action === 'rebuild-from-cache'
-          ? (await previewCache.getCachedParentDocuments([readerDocumentId])).get(
-              readerDocumentId,
-            ) ?? null
+          ? ((
+              await previewCache.getCachedParentDocuments([readerDocumentId])
+            ).get(readerDocumentId) ?? null)
           : null
       throwIfCancelled()
 
@@ -5443,7 +6255,11 @@ export const ReadwiseContainer = () => {
         return
       }
 
-      logReadwiseError(formalSyncLogPrefix, 'current page Reader action failed', err)
+      logReadwiseError(
+        formalSyncLogPrefix,
+        'current page Reader action failed',
+        err,
+      )
       setStatus('error')
       setRunIssueContext((previous) =>
         previous == null
@@ -5550,7 +6366,9 @@ export const ReadwiseContainer = () => {
       mode === 'cached-full-rebuild' &&
       cachedRebuildExecutionMode === 'streaming'
     const previousFormalSummary =
-      syncHeaderMode === 'formal' ? await loadGraphLastFormalSyncSummaryV1() : null
+      syncHeaderMode === 'formal'
+        ? await loadGraphLastFormalSyncSummaryV1()
+        : null
     const debugHighlightPageLimit =
       mode === 'cached-full-rebuild'
         ? null
@@ -5597,7 +6415,7 @@ export const ReadwiseContainer = () => {
     }
     const readerSyncUpdatedAfter =
       mode === 'incremental-window'
-        ? readerSyncStateBeforeRun?.updatedAfter ?? null
+        ? (readerSyncStateBeforeRun?.updatedAfter ?? null)
         : null
     const debugCapSummary =
       debugHighlightPageLimit != null
@@ -5626,7 +6444,9 @@ export const ReadwiseContainer = () => {
     clearRunIssues()
     setPageDiffResult(null)
     setCurrent(0)
-    setTotal(mode === 'cached-full-rebuild' ? 1 : debugHighlightPageLimit ?? 0)
+    setTotal(
+      mode === 'cached-full-rebuild' ? 1 : (debugHighlightPageLimit ?? 0),
+    )
     setCurrentBook('')
     setStatus('fetching')
     const startedAt = new Date().toISOString()
@@ -5653,7 +6473,7 @@ export const ReadwiseContainer = () => {
             : `${statusPrefix}: loading the local Reader highlight snapshot and rebuilding cached parent groups...`
           : mode === 'snapshot-only-refresh'
             ? `${statusPrefix}: full-scanning Reader highlights and rebuilding the local snapshot only (${debugCapSummary || 'no debug cap'}). Managed pages will not be rewritten.`
-          : `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${targetDocumentsSummary}${debugCapSummary})...`,
+            : `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${targetDocumentsSummary}${debugCapSummary})...`,
     )
 
     const client = createReadwiseClient(token)
@@ -5664,7 +6484,10 @@ export const ReadwiseContainer = () => {
       ReaderSyncRetryPageEntryV1
     >()
     const resolvedRetryReaderDocumentIds = new Set<string>()
-    const queuedRetryEntriesToUpsert = new Map<string, ReaderSyncRetryPageEntryV1>()
+    const queuedRetryEntriesToUpsert = new Map<
+      string,
+      ReaderSyncRetryPageEntryV1
+    >()
     let retryQueueUpdateFailed = false
     const deferredProtectedWrites: Array<{
       readerDocumentId: string
@@ -5719,7 +6542,8 @@ export const ReadwiseContainer = () => {
       }
 
       try {
-        const graphFallbackEntries = await loadGraphReaderRetryFallbackEntriesV1()
+        const graphFallbackEntries =
+          await loadGraphReaderRetryFallbackEntriesV1()
 
         for (const entry of graphFallbackEntries) {
           if (!queuedRetryEntriesByDocumentId.has(entry.readerDocumentId)) {
@@ -5740,7 +6564,9 @@ export const ReadwiseContainer = () => {
     try {
       beginReaderSyncEtaPhase(
         'fetch-highlights',
-        mode === 'cached-full-rebuild' ? 'cached highlight snapshot' : 'highlight scan',
+        mode === 'cached-full-rebuild'
+          ? 'cached highlight snapshot'
+          : 'highlight scan',
       )
       let previewBooks: ReaderPreviewBook[] = []
       let cachedRebuildStreamingParentIds: string[] = []
@@ -5758,8 +6584,11 @@ export const ReadwiseContainer = () => {
           )
         }
 
-        const cachedHighlightsByParent = await previewCache.loadGroupedHighlightsByParent()
-        const sortedCachedParentEntries = [...cachedHighlightsByParent.entries()]
+        const cachedHighlightsByParent =
+          await previewCache.loadGroupedHighlightsByParent()
+        const sortedCachedParentEntries = [
+          ...cachedHighlightsByParent.entries(),
+        ]
           .filter(([, highlights]) => highlights.length > 0)
           .sort((left, right) => {
             const leftLatest =
@@ -5977,7 +6806,8 @@ export const ReadwiseContainer = () => {
         averageHighlightPageDurationMs:
           loadStats.highlightPagesScanned > 0
             ? Math.round(
-                loadStats.fetchHighlightsDurationMs / loadStats.highlightPagesScanned,
+                loadStats.fetchHighlightsDurationMs /
+                  loadStats.highlightPagesScanned,
               )
             : null,
         averageParentDocumentDurationMs:
@@ -5988,7 +6818,10 @@ export const ReadwiseContainer = () => {
             : null,
       })
 
-      if (mode === 'cached-full-rebuild' && loadStats.staleHighlightDeletionRisk) {
+      if (
+        mode === 'cached-full-rebuild' &&
+        loadStats.staleHighlightDeletionRisk
+      ) {
         logReadwiseWarn(
           logPrefix,
           'cached rebuild is using a highlight snapshot that may still include deleted highlights',
@@ -6006,7 +6839,8 @@ export const ReadwiseContainer = () => {
                 isStreamingCachedRebuild
                   ? !cachedRebuildStreamingParentIds.includes(readerDocumentId)
                   : !previewBooks.some(
-                      (previewBook) => previewBook.document.id === readerDocumentId,
+                      (previewBook) =>
+                        previewBook.document.id === readerDocumentId,
                     ),
             )
           : []
@@ -6033,15 +6867,16 @@ export const ReadwiseContainer = () => {
               `${statusPrefix}: reloading ${queuedRetryParentIdsToReload.length} queued retry page(s) from the local Reader cache...`,
             )
 
-            const queuedRetryLoadResult = await loadReaderPreviewBooksByParentIds(client, {
-              parentIds: queuedRetryParentIdsToReload,
-              previewCache,
-              parentMetadataMode: 'cache_first',
-              readerAuthToken: token,
-              logPrefix,
-              highlightCoverage: 'cached-full-rebuild',
-              throwIfCancelled,
-            })
+            const queuedRetryLoadResult =
+              await loadReaderPreviewBooksByParentIds(client, {
+                parentIds: queuedRetryParentIdsToReload,
+                previewCache,
+                parentMetadataMode: 'cache_first',
+                readerAuthToken: token,
+                logPrefix,
+                highlightCoverage: 'cached-full-rebuild',
+                throwIfCancelled,
+              })
 
             if (queuedRetryLoadResult.books.length > 0) {
               previewBooks = [...previewBooks, ...queuedRetryLoadResult.books]
@@ -6071,15 +6906,19 @@ export const ReadwiseContainer = () => {
                 queuedRetryLoadResult.fetchDocumentsDurationMs
             }
 
-            logReadwiseInfo(logPrefix, 'merged queued retry pages into sync target set', {
-              queuedRetryEntries: queuedRetryEntriesByDocumentId.size,
-              queuedRetryPagesRequested: queuedRetryParentIdsToReload.length,
-              queuedRetryPagesLoaded: queuedRetryLoadResult.books.length,
-              unresolvedQueuedRetryPages:
-                queuedRetryLoadResult.unresolvedParentIds.length,
-              unresolvedQueuedRetryPageIds:
-                queuedRetryLoadResult.unresolvedParentIds,
-            })
+            logReadwiseInfo(
+              logPrefix,
+              'merged queued retry pages into sync target set',
+              {
+                queuedRetryEntries: queuedRetryEntriesByDocumentId.size,
+                queuedRetryPagesRequested: queuedRetryParentIdsToReload.length,
+                queuedRetryPagesLoaded: queuedRetryLoadResult.books.length,
+                unresolvedQueuedRetryPages:
+                  queuedRetryLoadResult.unresolvedParentIds.length,
+                unresolvedQueuedRetryPageIds:
+                  queuedRetryLoadResult.unresolvedParentIds,
+              },
+            )
           } catch (error) {
             logReadwiseWarn(
               logPrefix,
@@ -6132,9 +6971,10 @@ export const ReadwiseContainer = () => {
           })
         }
 
-        const incompleteSnapshotSuffix = !loadStats.completeHighlightSnapshotRefreshed
-          ? ' Local highlight snapshot was left unchanged because this run did not exhaust the full Reader highlight library.'
-          : ''
+        const incompleteSnapshotSuffix =
+          !loadStats.completeHighlightSnapshotRefreshed
+            ? ' Local highlight snapshot was left unchanged because this run did not exhaust the full Reader highlight library.'
+            : ''
         const detailEnrichmentSummarySegments = [
           loadStats.documentHighlightDetailCalls > 0
             ? `MCP detail calls ${loadStats.documentHighlightDetailCalls}`
@@ -6162,24 +7002,26 @@ export const ReadwiseContainer = () => {
           detailEnrichmentSummarySegments.length > 0
             ? ` Detail enrich: ${detailEnrichmentSummarySegments.join(', ')}.`
             : ''
-        const sortedDetailOutcomes = [...loadStats.documentHighlightDetailOutcomes].sort(
-          (left, right) => {
-            const warningCompare =
-              Number(isReaderDetailEnrichWarningReason(right.reason)) -
-              Number(isReaderDetailEnrichWarningReason(left.reason))
-            if (warningCompare !== 0) return warningCompare
+        const sortedDetailOutcomes = [
+          ...loadStats.documentHighlightDetailOutcomes,
+        ].sort((left, right) => {
+          const warningCompare =
+            Number(isReaderDetailEnrichWarningReason(right.reason)) -
+            Number(isReaderDetailEnrichWarningReason(left.reason))
+          if (warningCompare !== 0) return warningCompare
 
-            const reasonCompare = formatReaderDetailEnrichOutcomeReason(
-              left.reason,
-            ).localeCompare(formatReaderDetailEnrichOutcomeReason(right.reason))
-            if (reasonCompare !== 0) return reasonCompare
+          const reasonCompare = formatReaderDetailEnrichOutcomeReason(
+            left.reason,
+          ).localeCompare(formatReaderDetailEnrichOutcomeReason(right.reason))
+          if (reasonCompare !== 0) return reasonCompare
 
-            const titleCompare = (left.title ?? '').localeCompare(right.title ?? '')
-            if (titleCompare !== 0) return titleCompare
+          const titleCompare = (left.title ?? '').localeCompare(
+            right.title ?? '',
+          )
+          if (titleCompare !== 0) return titleCompare
 
-            return left.readerDocumentId.localeCompare(right.readerDocumentId)
-          },
-        )
+          return left.readerDocumentId.localeCompare(right.readerDocumentId)
+        })
 
         setStatus('completed')
         setCurrent(0)
@@ -6191,7 +7033,8 @@ export const ReadwiseContainer = () => {
                 modeLabel: statusPrefix,
                 highlightsScanned: loadStats.highlightsScanned,
                 highlightPagesScanned: loadStats.highlightPagesScanned,
-                documentHighlightDetailCalls: loadStats.documentHighlightDetailCalls,
+                documentHighlightDetailCalls:
+                  loadStats.documentHighlightDetailCalls,
                 outcomeEntries: sortedDetailOutcomes,
               }
             : null,
@@ -6207,10 +7050,12 @@ export const ReadwiseContainer = () => {
                 stats: {
                   highlightPagesScanned: loadStats.highlightPagesScanned,
                   highlightsScanned: loadStats.highlightsScanned,
-                  parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+                  parentDocumentsIdentified:
+                    loadStats.parentDocumentsIdentified,
                   pagesTargeted: 0,
                   pagesProcessed: 0,
-                  fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+                  fetchHighlightsDurationMs:
+                    loadStats.fetchHighlightsDurationMs,
                   fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
                   writePagesDurationMs: 0,
                 },
@@ -6293,19 +7138,27 @@ export const ReadwiseContainer = () => {
             const savedReaderSyncState =
               await saveGraphReaderSyncStateV1(nextReaderSyncState)
             setReaderSyncState(savedReaderSyncState)
-            logReadwiseInfo(logPrefix, 'saved graph reader sync state', savedReaderSyncState)
+            logReadwiseInfo(
+              logPrefix,
+              'saved graph reader sync state',
+              savedReaderSyncState,
+            )
           } else {
-            logReadwiseInfo(logPrefix, 'skipped graph reader sync state update', {
-              mode,
-              reason:
-                mode === 'cached-full-rebuild'
-                  ? 'cached_rebuild_does_not_advance_cursor'
-                  : debugHighlightPageLimit != null
-                    ? 'debug_highlight_page_cap_active'
-                    : 'full_reconcile_document_limit_active',
-              targetDocuments,
-              parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
-            })
+            logReadwiseInfo(
+              logPrefix,
+              'skipped graph reader sync state update',
+              {
+                mode,
+                reason:
+                  mode === 'cached-full-rebuild'
+                    ? 'cached_rebuild_does_not_advance_cursor'
+                    : debugHighlightPageLimit != null
+                      ? 'debug_highlight_page_cap_active'
+                      : 'full_reconcile_document_limit_active',
+                targetDocuments,
+                parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+              },
+            )
           }
         }
 
@@ -6321,10 +7174,12 @@ export const ReadwiseContainer = () => {
                 stats: {
                   highlightPagesScanned: loadStats.highlightPagesScanned,
                   highlightsScanned: loadStats.highlightsScanned,
-                  parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+                  parentDocumentsIdentified:
+                    loadStats.parentDocumentsIdentified,
                   pagesTargeted: loadStats.pagesTargeted,
                   pagesProcessed: 0,
-                  fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
+                  fetchHighlightsDurationMs:
+                    loadStats.fetchHighlightsDurationMs,
                   fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
                 },
               },
@@ -6337,10 +7192,14 @@ export const ReadwiseContainer = () => {
               : `${statusPrefix}: no Reader pages were available.`,
         )
         if (runTrigger === 'auto') {
-          logReadwiseInfo(logPrefix, 'auto sync completed with no page writes required', {
-            mode,
-            source: 'no_changed_pages',
-          })
+          logReadwiseInfo(
+            logPrefix,
+            'auto sync completed with no page writes required',
+            {
+              mode,
+              source: 'no_changed_pages',
+            },
+          )
         }
         logReadwiseInfo(logPrefix, 'no pages available')
         return
@@ -6394,17 +7253,22 @@ export const ReadwiseContainer = () => {
                 'Press OK to continue.',
                 'Press Cancel to stop before page writes.',
               ].join('\n')
-        logReadwiseWarn(logPrefix, 'managed sync is awaiting write confirmation', {
-          mode,
-          runTrigger,
-          pagesTargeted: plannedWriteCount,
-          reasonSummary,
-          usedCursorFallback,
-          highlightPagesScanned: loadStats.highlightPagesScanned,
-          highlightsScanned: loadStats.highlightsScanned,
-          previousFormalSummaryStatus: previousFormalSummary?.status ?? null,
-          previousFormalSummaryErrorCount: previousFormalSummary?.errorCount ?? null,
-        })
+        logReadwiseWarn(
+          logPrefix,
+          'managed sync is awaiting write confirmation',
+          {
+            mode,
+            runTrigger,
+            pagesTargeted: plannedWriteCount,
+            reasonSummary,
+            usedCursorFallback,
+            highlightPagesScanned: loadStats.highlightPagesScanned,
+            highlightsScanned: loadStats.highlightsScanned,
+            previousFormalSummaryStatus: previousFormalSummary?.status ?? null,
+            previousFormalSummaryErrorCount:
+              previousFormalSummary?.errorCount ?? null,
+          },
+        )
         setStatusMessage(
           `${statusPrefix}: waiting for confirmation before writing ${plannedWriteCount} page(s).`,
         )
@@ -6443,11 +7307,14 @@ export const ReadwiseContainer = () => {
                   stats: {
                     highlightPagesScanned: loadStats.highlightPagesScanned,
                     highlightsScanned: loadStats.highlightsScanned,
-                    parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+                    parentDocumentsIdentified:
+                      loadStats.parentDocumentsIdentified,
                     pagesTargeted: plannedWriteCount,
                     pagesProcessed: 0,
-                    fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
-                    fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
+                    fetchHighlightsDurationMs:
+                      loadStats.fetchHighlightsDurationMs,
+                    fetchDocumentsDurationMs:
+                      loadStats.fetchDocumentsDurationMs,
                     writePagesDurationMs: 0,
                   },
                 },
@@ -6520,7 +7387,10 @@ export const ReadwiseContainer = () => {
 
             queuedRetryEntriesToUpsert.set(previewBook.document.id, {
               readerDocumentId: previewBook.document.id,
-              pageName: existingRetryEntry?.pageName ?? protectedWrite.pageName ?? pageTitle,
+              pageName:
+                existingRetryEntry?.pageName ??
+                protectedWrite.pageName ??
+                pageTitle,
               category: 'warning',
               message: deferredMessage,
               queuedAt: existingRetryEntry?.queuedAt ?? nowIso,
@@ -6594,7 +7464,9 @@ export const ReadwiseContainer = () => {
             message,
             readerDocumentId: previewBook.document.id,
             namespacePrefix,
-            pageName: queuedRetryEntriesByDocumentId.get(previewBook.document.id)?.pageName ?? null,
+            pageName:
+              queuedRetryEntriesByDocumentId.get(previewBook.document.id)
+                ?.pageName ?? null,
           })
           syncErrorsForRun.push(issue)
           if (shouldRunIssueBlockReaderSyncCursor(issue)) {
@@ -6606,9 +7478,7 @@ export const ReadwiseContainer = () => {
             const now = new Date().toISOString()
             queuedRetryEntriesToUpsert.set(previewBook.document.id, {
               readerDocumentId: previewBook.document.id,
-              pageName:
-                existingRetryEntry?.pageName ??
-                pageTitle,
+              pageName: existingRetryEntry?.pageName ?? pageTitle,
               category: issue.category,
               message: issue.message,
               queuedAt: existingRetryEntry?.queuedAt ?? now,
@@ -6619,35 +7489,38 @@ export const ReadwiseContainer = () => {
         }
         loadStats.pagesProcessed += 1
         setCurrent(index + 1)
-        updateReaderSyncEta(
-          'write-pages',
-          'page writes',
-          index + 1,
-          totalCount,
-        )
+        updateReaderSyncEta('write-pages', 'page writes', index + 1, totalCount)
       }
 
       if (isStreamingCachedRebuild) {
-        for (let index = 0; index < cachedRebuildStreamingParentIds.length; index += 1) {
+        for (
+          let index = 0;
+          index < cachedRebuildStreamingParentIds.length;
+          index += 1
+        ) {
           if (cancelledRef.current) return
 
           const parentId = cachedRebuildStreamingParentIds[index]!
-          const existingRetryEntry = queuedRetryEntriesByDocumentId.get(parentId)
+          const existingRetryEntry =
+            queuedRetryEntriesByDocumentId.get(parentId)
           setCurrentBook('')
           setStatusMessage(
             `${statusPrefix}: resolving cached Reader parent ${index + 1} / ${plannedWriteCount} before writing...`,
           )
 
           try {
-            const streamingLoadResult = await loadReaderPreviewBooksByParentIds(client, {
-              parentIds: [parentId],
-              previewCache,
-              parentMetadataMode: 'cache_first',
-              readerAuthToken: token,
-              logPrefix,
-              highlightCoverage: 'cached-full-rebuild',
-              throwIfCancelled,
-            })
+            const streamingLoadResult = await loadReaderPreviewBooksByParentIds(
+              client,
+              {
+                parentIds: [parentId],
+                previewCache,
+                parentMetadataMode: 'cache_first',
+                readerAuthToken: token,
+                logPrefix,
+                highlightCoverage: 'cached-full-rebuild',
+                throwIfCancelled,
+              },
+            )
 
             loadStats.parentMetadataCacheHits +=
               streamingLoadResult.parentMetadataCacheHits
@@ -6778,7 +7651,8 @@ export const ReadwiseContainer = () => {
         appendRunIssue({
           book:
             deferredProtectedWrites.length === 1
-              ? deferredProtectedWrites[0]?.pageTitle ?? 'Auto Sync deferred writes'
+              ? (deferredProtectedWrites[0]?.pageTitle ??
+                'Auto Sync deferred writes')
               : 'Auto Sync deferred writes',
           category: 'warning',
           summary:
@@ -6816,7 +7690,9 @@ export const ReadwiseContainer = () => {
               logPrefix,
               'failed to clear resolved Reader retry pages',
               {
-                resolvedRetryReaderDocumentIds: [...resolvedRetryReaderDocumentIds],
+                resolvedRetryReaderDocumentIds: [
+                  ...resolvedRetryReaderDocumentIds,
+                ],
                 formattedError: describeUnknownError(error),
               },
             )
@@ -6831,7 +7707,9 @@ export const ReadwiseContainer = () => {
               logPrefix,
               'failed to clear resolved Reader retry pages from graph fallback page',
               {
-                resolvedRetryReaderDocumentIds: [...resolvedRetryReaderDocumentIds],
+                resolvedRetryReaderDocumentIds: [
+                  ...resolvedRetryReaderDocumentIds,
+                ],
                 formattedError: describeUnknownError(error),
               },
             )
@@ -6877,7 +7755,10 @@ export const ReadwiseContainer = () => {
               ReaderSyncRetryPageEntryV1
             >()
 
-            for (const [readerDocumentId, entry] of queuedRetryEntriesByDocumentId) {
+            for (const [
+              readerDocumentId,
+              entry,
+            ] of queuedRetryEntriesByDocumentId) {
               if (!resolvedRetryReaderDocumentIds.has(readerDocumentId)) {
                 fallbackEntriesByDocumentId.set(readerDocumentId, entry)
               }
@@ -6961,14 +7842,17 @@ export const ReadwiseContainer = () => {
           const savedReaderSyncState =
             await saveGraphReaderSyncStateV1(nextReaderSyncState)
           setReaderSyncState(savedReaderSyncState)
-          logReadwiseInfo(logPrefix, 'saved graph reader sync state', savedReaderSyncState)
+          logReadwiseInfo(
+            logPrefix,
+            'saved graph reader sync state',
+            savedReaderSyncState,
+          )
         } else {
           logReadwiseInfo(logPrefix, 'skipped graph reader sync state update', {
             mode,
-            reason:
-              retryQueueUpdateFailed
-                ? 'retry_queue_update_failed'
-                : blockingSyncErrorsForRun.length > 0
+            reason: retryQueueUpdateFailed
+              ? 'retry_queue_update_failed'
+              : blockingSyncErrorsForRun.length > 0
                 ? 'blocking_page_errors_present'
                 : mode === 'cached-full-rebuild'
                   ? 'cached_rebuild_does_not_advance_cursor'
@@ -6990,7 +7874,8 @@ export const ReadwiseContainer = () => {
           ? ' Cached snapshot may still include deleted highlights until Full Refresh runs again.'
           : ''
       const incompleteSnapshotSuffix =
-        mode === 'full-library-scan' && !loadStats.completeHighlightSnapshotRefreshed
+        mode === 'full-library-scan' &&
+        !loadStats.completeHighlightSnapshotRefreshed
           ? ' Local highlight snapshot was left unchanged because this run did not exhaust the full Reader highlight library.'
           : ''
       setStatus('completed')
@@ -7002,7 +7887,8 @@ export const ReadwiseContainer = () => {
               completedAt: new Date().toISOString(),
               processedItems: loadStats.pagesProcessed,
               issuesCount:
-                syncErrorsForRun.length + (deferredProtectedWrites.length > 0 ? 1 : 0),
+                syncErrorsForRun.length +
+                (deferredProtectedWrites.length > 0 ? 1 : 0),
               stats: {
                 highlightPagesScanned: loadStats.highlightPagesScanned,
                 highlightsScanned: loadStats.highlightsScanned,
@@ -7091,14 +7977,18 @@ export const ReadwiseContainer = () => {
           setStatusMessage(
             `${statusPrefix}: interrupted during ${retryTarget}. Retrying automatically ${automaticRetryOrdinal} / ${retryTotal}...`,
           )
-          logReadwiseWarn(logPrefix, 'resumable Reader sync step failed; retrying automatically', {
-            retryTarget,
-            automaticRetryOrdinal,
-            retryTotal,
-            retryDelayMs,
-            resumePhase: err.resumeState.phase,
-            formattedError: describeUnknownError(err),
-          })
+          logReadwiseWarn(
+            logPrefix,
+            'resumable Reader sync step failed; retrying automatically',
+            {
+              retryTarget,
+              automaticRetryOrdinal,
+              retryTotal,
+              retryDelayMs,
+              resumePhase: err.resumeState.phase,
+              formattedError: describeUnknownError(err),
+            },
+          )
           await sleep(retryDelayMs)
 
           if (cancelledRef.current) {
@@ -7205,11 +8095,12 @@ export const ReadwiseContainer = () => {
   }
 
   const detectFormalSyncConflicts = async () => {
-    const [readerPreviewPages, debugPages, sessionTestPages] = await Promise.all([
-      listManagedPagesByNamespacePrefix(readerPreviewNamespaceRoot),
-      listManagedPagesByNamespacePrefix(debugNamespaceRoot),
-      listManagedPagesBySessionNamespaceRoot(formalNamespaceRoot),
-    ])
+    const [readerPreviewPages, debugPages, sessionTestPages] =
+      await Promise.all([
+        listManagedPagesByNamespacePrefix(readerPreviewNamespaceRoot),
+        listManagedPagesByNamespacePrefix(debugNamespaceRoot),
+        listManagedPagesBySessionNamespaceRoot(formalNamespaceRoot),
+      ])
 
     const conflicts = [
       {
@@ -7263,32 +8154,35 @@ export const ReadwiseContainer = () => {
     setStatusMessage(`Deleting ${readerPreviewNamespaceRoot} pages...`)
 
     try {
-      const result = await clearManagedPagesByNamespacePrefix(readerPreviewNamespaceRoot, {
-        onProgress: ({ phase, total, completed, pageTitle }) => {
-          if (phase === 'start') {
+      const result = await clearManagedPagesByNamespacePrefix(
+        readerPreviewNamespaceRoot,
+        {
+          onProgress: ({ phase, total, completed, pageTitle }) => {
+            if (phase === 'start') {
+              setStatus('syncing')
+              setCurrent(0)
+              setTotal(total)
+              setCurrentBook('')
+              setStatusMessage(
+                total > 0
+                  ? `Deleting ${total} Reader preview page(s)...`
+                  : `Deleting ${readerPreviewNamespaceRoot} pages...`,
+              )
+              return
+            }
+
             setStatus('syncing')
-            setCurrent(0)
+            setCurrent(completed)
             setTotal(total)
-            setCurrentBook('')
+            setCurrentBook(pageTitle ?? '')
             setStatusMessage(
               total > 0
-                ? `Deleting ${total} Reader preview page(s)...`
+                ? `Deleting ${completed} / ${total} Reader preview page(s)...`
                 : `Deleting ${readerPreviewNamespaceRoot} pages...`,
             )
-            return
-          }
-
-          setStatus('syncing')
-          setCurrent(completed)
-          setTotal(total)
-          setCurrentBook(pageTitle ?? '')
-          setStatusMessage(
-            total > 0
-              ? `Deleting ${completed} / ${total} Reader preview page(s)...`
-              : `Deleting ${readerPreviewNamespaceRoot} pages...`,
-          )
+          },
         },
-      })
+      )
 
       if (result.skippedPages.length > 0) {
         replaceRunIssues(
@@ -7308,7 +8202,11 @@ export const ReadwiseContainer = () => {
         skippedPages: result.skippedPages,
       })
     } catch (err: unknown) {
-      logReadwiseError(readerPreviewLogPrefix, 'failed to clear preview pages', err)
+      logReadwiseError(
+        readerPreviewLogPrefix,
+        'failed to clear preview pages',
+        err,
+      )
       setStatus('error')
       setStatusMessage(
         `Failed to clear Reader preview pages: ${err instanceof Error ? err.message : String(err)}`,
@@ -7319,7 +8217,11 @@ export const ReadwiseContainer = () => {
   const progressPct = total > 0 ? Math.round((current / total) * 100) : 0
   const liveEstimatedRemainingMs =
     etaSnapshot?.etaMs != null
-      ? Math.max(0, etaSnapshot.etaMs - ((etaTick || Date.now()) - etaSnapshot.observedAt))
+      ? Math.max(
+          0,
+          etaSnapshot.etaMs -
+            ((etaTick || Date.now()) - etaSnapshot.observedAt),
+        )
       : null
   const isBusy = status === 'fetching' || status === 'syncing'
   const configuredSyncMaxBooks =
@@ -7370,7 +8272,7 @@ export const ReadwiseContainer = () => {
           ? 'Scanning Reader notes'
           : etaSnapshot?.phase === 'refresh-snapshot'
             ? 'Refreshing local snapshot'
-          : 'Scanning Reader highlights'
+            : 'Scanning Reader highlights'
         : status === 'syncing'
           ? 'Rebuilding managed pages'
           : status === 'completed' && errors.length > 0
@@ -7381,12 +8283,12 @@ export const ReadwiseContainer = () => {
   const statusPhaseLabel =
     status === 'completed'
       ? ''
-      : etaSnapshot?.label ??
+      : (etaSnapshot?.label ??
         (status === 'fetching'
           ? 'remote scan'
           : status === 'syncing'
             ? 'page writes'
-            : '')
+            : ''))
   const statusDetail =
     status === 'idle'
       ? statusMessage || idleCursorSummary
@@ -7399,7 +8301,7 @@ export const ReadwiseContainer = () => {
           ? 'Scanning Reader note pages and attaching comments back onto highlights.'
           : etaSnapshot?.phase === 'refresh-snapshot'
             ? 'Attaching Reader notes back onto highlights and refreshing the local snapshot.'
-          : 'Scanning Reader highlight pages and grouping by parent document.'
+            : 'Scanning Reader highlight pages and grouping by parent document.'
         : ''
   const activeHelpPopover = pinnedHelpPopover ?? hoveredHelpPopover
   const shortManagedPagesSummary =
@@ -7438,6 +8340,7 @@ export const ReadwiseContainer = () => {
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
+    'Preview Legacy Managed Page Migration finds non-tweet legacy pages that are missing rw-reader-id, proves a Reader parent from embedded ids, View Highlight links, or metadata, and previews the bind-and-rename plan before apply.',
     'Cached Full Rebuild now offers two run-time modes: staged first resolves the full page set and then writes it, while streaming resolves one cached parent at a time and writes it immediately. Both reuse the local full-library highlight snapshot, prefer cached parent metadata, and only refetch missing parent metadata from Reader.',
     'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
@@ -7459,11 +8362,14 @@ export const ReadwiseContainer = () => {
     status === 'completed' || liveEstimatedRemainingMs == null
       ? ''
       : `ETA ${formatDuration(liveEstimatedRemainingMs)}`
-  const progressPhaseLabel = status === 'completed' ? '' : etaSnapshot?.label ?? ''
+  const progressPhaseLabel =
+    status === 'completed' ? '' : (etaSnapshot?.label ?? '')
   const statusPanelClassName = [
     'rw-status-panel',
     `rw-status-panel-${status}`,
-    status === 'completed' && errors.length > 0 ? 'rw-status-panel-warning' : '',
+    status === 'completed' && errors.length > 0
+      ? 'rw-status-panel-warning'
+      : '',
   ]
     .filter((value) => value.length > 0)
     .join(' ')
@@ -7584,7 +8490,10 @@ export const ReadwiseContainer = () => {
       popover.id === 'managed-pages' || popover.id === 'highlight-scan'
         ? 220
         : 280
-    const width = Math.min(preferredWidth, window.innerWidth - viewportPadding * 2)
+    const width = Math.min(
+      preferredWidth,
+      window.innerWidth - viewportPadding * 2,
+    )
     const desiredLeft =
       popover.anchorRect.left + popover.anchorRect.width / 2 - width / 2
     const left = Math.min(
@@ -7687,7 +8596,9 @@ export const ReadwiseContainer = () => {
                       ? 'All matched'
                       : configuredReaderTargetDocuments}
                   </div>
-                  <div className="rw-summary-note">{shortManagedPagesSummary}</div>
+                  <div className="rw-summary-note">
+                    {shortManagedPagesSummary}
+                  </div>
                 </div>
               )}
               {showHighlightScanSummary && (
@@ -7703,7 +8614,9 @@ export const ReadwiseContainer = () => {
                   <div className="rw-summary-value">
                     {configuredReaderDebugHighlightPageLimit} page(s)
                   </div>
-                  <div className="rw-summary-note">{highlightScanDetailLabel}</div>
+                  <div className="rw-summary-note">
+                    {highlightScanDetailLabel}
+                  </div>
                 </div>
               )}
             </div>
@@ -7737,7 +8650,7 @@ export const ReadwiseContainer = () => {
             {status !== 'idle' && (
               <>
                 <div className="rw-progress-track">
-                <div
+                  <div
                     className={`rw-progress-bar ${status}`}
                     style={{
                       width:
@@ -7771,14 +8684,17 @@ export const ReadwiseContainer = () => {
                 <div>
                   <div className="rw-section-title">Current-Page Preview</div>
                   <div className="rw-section-meta">
-                    {currentPageLegacyIdPreviewResult.rewrites.length} rewrite(s) in the
-                    current {currentPageLegacyIdPreviewResult.fileKind}
+                    {currentPageLegacyIdPreviewResult.rewrites.length}{' '}
+                    rewrite(s) in the current{' '}
+                    {currentPageLegacyIdPreviewResult.fileKind}
                   </div>
                 </div>
                 <div className="rw-section-actions">
                   <button
                     className="rw-btn rw-btn-small"
-                    onClick={() => void handleCopyCurrentPageLegacyIdPreviewBundle()}
+                    onClick={() =>
+                      void handleCopyCurrentPageLegacyIdPreviewBundle()
+                    }
                   >
                     Copy Preview Bundle
                   </button>
@@ -7791,20 +8707,26 @@ export const ReadwiseContainer = () => {
                 </div>
                 <div className="rw-preview-summary-item">
                   <span className="rw-preview-summary-key">Path</span>
-                  <strong>{currentPageLegacyIdPreviewResult.relativeFilePath}</strong>
+                  <strong>
+                    {currentPageLegacyIdPreviewResult.relativeFilePath}
+                  </strong>
                 </div>
                 <div className="rw-preview-summary-item">
                   <span className="rw-preview-summary-key">Kind</span>
                   <strong>{currentPageLegacyIdPreviewResult.fileKind}</strong>
                 </div>
                 <div className="rw-preview-summary-item">
-                  <span className="rw-preview-summary-key">Managed pages scanned</span>
-                  <strong>{currentPageLegacyIdPreviewResult.managedPagesScanned}</strong>
+                  <span className="rw-preview-summary-key">
+                    Managed pages scanned
+                  </span>
+                  <strong>
+                    {currentPageLegacyIdPreviewResult.managedPagesScanned}
+                  </strong>
                 </div>
               </div>
               <div className="rw-preview-note">
-                Preview only. Review these UUID rewrites, then run Apply Current Page
-                Legacy ID Migration if they look correct.
+                Preview only. Review these UUID rewrites, then run Apply Current
+                Page Legacy ID Migration if they look correct.
               </div>
               <div className="rw-preview-list">
                 {currentPageLegacyIdPreviewResult.rewrites.map((rewrite) => (
@@ -7813,10 +8735,14 @@ export const ReadwiseContainer = () => {
                     className="rw-preview-item"
                   >
                     <div className="rw-preview-item-head">
-                      <span className="rw-preview-entry">Entry {rewrite.entryIndex}</span>
+                      <span className="rw-preview-entry">
+                        Entry {rewrite.entryIndex}
+                      </span>
                       <span className="rw-preview-kind">{rewrite.kind}</span>
                     </div>
-                    <div className="rw-preview-block">blockUuid={rewrite.blockUuid}</div>
+                    <div className="rw-preview-block">
+                      blockUuid={rewrite.blockUuid}
+                    </div>
                     <div className="rw-preview-rewrite">
                       <code>{rewrite.from}</code>
                       <span aria-hidden="true">→</span>
@@ -7834,8 +8760,9 @@ export const ReadwiseContainer = () => {
                 <div>
                   <div className="rw-section-title">Current-Page Migration</div>
                   <div className="rw-section-meta">
-                    Applied {currentPageLegacyIdApplyResult.rewritesApplied} rewrite(s) to
-                    the current {currentPageLegacyIdApplyResult.fileKind}
+                    Applied {currentPageLegacyIdApplyResult.rewritesApplied}{' '}
+                    rewrite(s) to the current{' '}
+                    {currentPageLegacyIdApplyResult.fileKind}
                   </div>
                 </div>
               </div>
@@ -7846,15 +8773,21 @@ export const ReadwiseContainer = () => {
                 </div>
                 <div className="rw-preview-summary-item">
                   <span className="rw-preview-summary-key">Path</span>
-                  <strong>{currentPageLegacyIdApplyResult.relativeFilePath}</strong>
+                  <strong>
+                    {currentPageLegacyIdApplyResult.relativeFilePath}
+                  </strong>
                 </div>
                 <div className="rw-preview-summary-item">
                   <span className="rw-preview-summary-key">Kind</span>
                   <strong>{currentPageLegacyIdApplyResult.fileKind}</strong>
                 </div>
                 <div className="rw-preview-summary-item">
-                  <span className="rw-preview-summary-key">Rewrites applied</span>
-                  <strong>{currentPageLegacyIdApplyResult.rewritesApplied}</strong>
+                  <span className="rw-preview-summary-key">
+                    Rewrites applied
+                  </span>
+                  <strong>
+                    {currentPageLegacyIdApplyResult.rewritesApplied}
+                  </strong>
                 </div>
               </div>
             </div>
@@ -7864,7 +8797,9 @@ export const ReadwiseContainer = () => {
             <div className="rw-feedback-block rw-preview-panel">
               <div className="rw-section-header">
                 <div>
-                  <div className="rw-section-title">Detail / Warning Report</div>
+                  <div className="rw-section-title">
+                    Detail / Warning Report
+                  </div>
                   <div className="rw-section-meta">
                     {countReaderDetailWarningEntries(
                       readerDetailEnrichReportResult.outcomeEntries,
@@ -7874,8 +8809,7 @@ export const ReadwiseContainer = () => {
                     ) === 1
                       ? 'warning page'
                       : 'warning pages'}{' '}
-                    ·{' '}
-                    {readerDetailEnrichReportResult.outcomeEntries.length}{' '}
+                    · {readerDetailEnrichReportResult.outcomeEntries.length}{' '}
                     {readerDetailEnrichReportResult.outcomeEntries.length === 1
                       ? 'outcome entry'
                       : 'outcome entries'}{' '}
@@ -7897,17 +8831,25 @@ export const ReadwiseContainer = () => {
                   <strong>{readerDetailEnrichReportResult.modeLabel}</strong>
                 </div>
                 <div className="rw-preview-summary-item">
-                  <span className="rw-preview-summary-key">Highlights scanned</span>
-                  <strong>{readerDetailEnrichReportResult.highlightsScanned}</strong>
+                  <span className="rw-preview-summary-key">
+                    Highlights scanned
+                  </span>
+                  <strong>
+                    {readerDetailEnrichReportResult.highlightsScanned}
+                  </strong>
                 </div>
                 <div className="rw-preview-summary-item">
                   <span className="rw-preview-summary-key">Remote pages</span>
-                  <strong>{readerDetailEnrichReportResult.highlightPagesScanned}</strong>
+                  <strong>
+                    {readerDetailEnrichReportResult.highlightPagesScanned}
+                  </strong>
                 </div>
                 <div className="rw-preview-summary-item">
                   <span className="rw-preview-summary-key">MCP calls</span>
                   <strong>
-                    {readerDetailEnrichReportResult.documentHighlightDetailCalls}
+                    {
+                      readerDetailEnrichReportResult.documentHighlightDetailCalls
+                    }
                   </strong>
                 </div>
                 <div className="rw-preview-summary-item">
@@ -7920,9 +8862,9 @@ export const ReadwiseContainer = () => {
                 </div>
               </div>
               <div className="rw-preview-note">
-                This report lists the documents that warned, were cache-resolved,
-                were skipped, or fell back because Reader parent metadata or detail
-                data was unavailable.
+                This report lists the documents that warned, were
+                cache-resolved, were skipped, or fell back because Reader parent
+                metadata or detail data was unavailable.
               </div>
               <div className="rw-preview-list">
                 {readerDetailEnrichReportResult.outcomeEntries
@@ -7944,15 +8886,17 @@ export const ReadwiseContainer = () => {
                         readerDocumentId={entry.readerDocumentId}
                       </div>
                       {entry.category && (
-                        <div className="rw-preview-block">category={entry.category}</div>
+                        <div className="rw-preview-block">
+                          category={entry.category}
+                        </div>
                       )}
                     </div>
                   ))}
               </div>
               {readerDetailEnrichReportResult.outcomeEntries.length > 60 && (
                 <div className="rw-preview-note">
-                  Showing the first 60 entries. Use Copy Detail Report for the full
-                  list.
+                  Showing the first 60 entries. Use Copy Detail Report for the
+                  full list.
                 </div>
               )}
             </div>
@@ -7971,7 +8915,9 @@ export const ReadwiseContainer = () => {
                 <div className="rw-section-actions">
                   <button
                     className="rw-btn rw-btn-small"
-                    onClick={() => void handleCopyRunIssueBundleWithoutWarnings()}
+                    onClick={() =>
+                      void handleCopyRunIssueBundleWithoutWarnings()
+                    }
                   >
                     Copy Errors Only
                   </button>
@@ -8022,7 +8968,9 @@ export const ReadwiseContainer = () => {
                     </div>
                     <button
                       className="rw-btn rw-btn-small"
-                      onClick={() => setShowWarningIssues((previous) => !previous)}
+                      onClick={() =>
+                        setShowWarningIssues((previous) => !previous)
+                      }
                     >
                       {showWarningIssues
                         ? 'Hide Warnings'
@@ -8040,8 +8988,12 @@ export const ReadwiseContainer = () => {
                           <div className="rw-error-label">
                             {formatRunIssueCategoryLabel(issue.category)}
                           </div>
-                          <div className="rw-error-summary">{issue.summary}</div>
-                          <div className="rw-error-message">{issue.message}</div>
+                          <div className="rw-error-summary">
+                            {issue.summary}
+                          </div>
+                          <div className="rw-error-message">
+                            {issue.message}
+                          </div>
                           {issue.suggestedAction && (
                             <div className="rw-error-action">
                               Next: {issue.suggestedAction}
@@ -8092,7 +9044,9 @@ export const ReadwiseContainer = () => {
                 </div>
                 <div className="rw-cache-item">
                   <span className="rw-cache-key">cache_state</span>
-                  <strong>{cacheSummaryResult.state ? 'Present' : 'Missing'}</strong>
+                  <strong>
+                    {cacheSummaryResult.state ? 'Present' : 'Missing'}
+                  </strong>
                 </div>
                 <div className="rw-cache-item">
                   <span className="rw-cache-key">Latest updatedAt</span>
@@ -8138,7 +9092,8 @@ export const ReadwiseContainer = () => {
                 <div className="rw-diff-header-text">
                   <div className="rw-section-title">Current page diff</div>
                   <strong>
-                    {pageDiffResult.pageName} @ line {pageDiffResult.firstDiffLine ?? '?'}
+                    {pageDiffResult.pageName} @ line{' '}
+                    {pageDiffResult.firstDiffLine ?? '?'}
                   </strong>
                   <span className="rw-diff-meta">
                     {pageDiffResult.source}
@@ -8150,7 +9105,10 @@ export const ReadwiseContainer = () => {
                 <button
                   className="rw-btn rw-btn-small"
                   onClick={() =>
-                    void copyText(buildPageDiffBundle(pageDiffResult), 'Full diff bundle')
+                    void copyText(
+                      buildPageDiffBundle(pageDiffResult),
+                      'Full diff bundle',
+                    )
                   }
                 >
                   Copy All
@@ -8163,13 +9121,18 @@ export const ReadwiseContainer = () => {
                   <button
                     className="rw-btn rw-btn-small"
                     onClick={() =>
-                      void copyText(pageDiffResult.beforeExcerpt, 'Before excerpt')
+                      void copyText(
+                        pageDiffResult.beforeExcerpt,
+                        'Before excerpt',
+                      )
                     }
                   >
                     Copy
                   </button>
                 </div>
-                <pre className="rw-diff-content">{pageDiffResult.beforeExcerpt}</pre>
+                <pre className="rw-diff-content">
+                  {pageDiffResult.beforeExcerpt}
+                </pre>
               </div>
 
               <div className="rw-diff-section">
@@ -8178,13 +9141,18 @@ export const ReadwiseContainer = () => {
                   <button
                     className="rw-btn rw-btn-small"
                     onClick={() =>
-                      void copyText(pageDiffResult.afterExcerpt, 'After excerpt')
+                      void copyText(
+                        pageDiffResult.afterExcerpt,
+                        'After excerpt',
+                      )
                     }
                   >
                     Copy
                   </button>
                 </div>
-                <pre className="rw-diff-content">{pageDiffResult.afterExcerpt}</pre>
+                <pre className="rw-diff-content">
+                  {pageDiffResult.afterExcerpt}
+                </pre>
               </div>
 
               <div className="rw-diff-section">
@@ -8193,7 +9161,10 @@ export const ReadwiseContainer = () => {
                   <button
                     className="rw-btn rw-btn-small"
                     onClick={() =>
-                      void copyText(pageDiffResult.beforeFullText, 'Before full page')
+                      void copyText(
+                        pageDiffResult.beforeFullText,
+                        'Before full page',
+                      )
                     }
                   >
                     Copy
@@ -8210,7 +9181,10 @@ export const ReadwiseContainer = () => {
                   <button
                     className="rw-btn rw-btn-small"
                     onClick={() =>
-                      void copyText(pageDiffResult.afterFullText, 'After full page')
+                      void copyText(
+                        pageDiffResult.afterFullText,
+                        'After full page',
+                      )
                     }
                   >
                     Copy
@@ -8237,9 +9211,7 @@ export const ReadwiseContainer = () => {
             <div className="rw-action-groups">
               <div className="rw-action-group">
                 <div className="rw-action-group-heading">
-                  <div className="rw-action-group-label">
-                    Library Sync
-                  </div>
+                  <div className="rw-action-group-label">Library Sync</div>
                   {renderHelpPanel(
                     'global-sync',
                     'Library Sync',
@@ -8247,7 +9219,10 @@ export const ReadwiseContainer = () => {
                   )}
                 </div>
                 <div className="rw-action-row">
-                  <button className="rw-btn rw-btn-primary" onClick={handleSync}>
+                  <button
+                    className="rw-btn rw-btn-primary"
+                    onClick={handleSync}
+                  >
                     Incremental Sync
                   </button>
                   <button className="rw-btn" onClick={handleFullReconcile}>
@@ -8261,9 +9236,7 @@ export const ReadwiseContainer = () => {
 
               <div className="rw-action-group">
                 <div className="rw-action-group-heading">
-                  <div className="rw-action-group-label">
-                    Current Page
-                  </div>
+                  <div className="rw-action-group-label">Current Page</div>
                   {renderHelpPanel(
                     'current-page',
                     'Current Page',
@@ -8271,13 +9244,22 @@ export const ReadwiseContainer = () => {
                   )}
                 </div>
                 <div className="rw-action-row">
-                  <button className="rw-btn" onClick={handleRebuildCurrentPageFromCache}>
+                  <button
+                    className="rw-btn"
+                    onClick={handleRebuildCurrentPageFromCache}
+                  >
                     Rebuild Current Page From Cache
                   </button>
-                  <button className="rw-btn" onClick={handleRefreshCurrentPageMetadata}>
+                  <button
+                    className="rw-btn"
+                    onClick={handleRefreshCurrentPageMetadata}
+                  >
                     Refresh Current Page Metadata
                   </button>
-                  <button className="rw-btn" onClick={handleSoftReopenCurrentPage}>
+                  <button
+                    className="rw-btn"
+                    onClick={handleSoftReopenCurrentPage}
+                  >
                     Soft Reopen Current Page
                   </button>
                 </div>
@@ -8285,9 +9267,7 @@ export const ReadwiseContainer = () => {
 
               <div className="rw-action-group">
                 <div className="rw-action-group-heading">
-                  <div className="rw-action-group-label">
-                    Maintenance Tools
-                  </div>
+                  <div className="rw-action-group-label">Maintenance Tools</div>
                   <div className="rw-action-group-heading-actions">
                     {renderHelpPanel(
                       'maintenance-tools',
@@ -8307,8 +9287,8 @@ export const ReadwiseContainer = () => {
                 </div>
                 {!showMaintenanceTools && (
                   <div className="rw-summary-note">
-                    Low-frequency audit, migration, snapshot, and debug tools for managed
-                    pages.
+                    Low-frequency audit, migration, snapshot, and debug tools
+                    for managed pages.
                   </div>
                 )}
                 {showMaintenanceTools && (
@@ -8320,17 +9300,27 @@ export const ReadwiseContainer = () => {
                             Audit & Repair
                           </div>
                           <div className="rw-maintenance-section-note">
-                            Inspect managed-page identity and rebuild corrupted pages.
+                            Inspect managed-page identity and rebuild corrupted
+                            pages.
                           </div>
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handleInspectCacheSummary}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleInspectCacheSummary}
+                          >
                             Inspect Cache Summary
                           </button>
-                          <button className="rw-btn" onClick={handleAuditManagedIds}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleAuditManagedIds}
+                          >
                             Audit Managed IDs
                           </button>
-                          <button className="rw-btn" onClick={handleRepairManagedPages}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleRepairManagedPages}
+                          >
                             Repair Managed Pages
                           </button>
                         </div>
@@ -8338,13 +9328,35 @@ export const ReadwiseContainer = () => {
 
                       <div className="rw-maintenance-section">
                         <div className="rw-maintenance-section-header">
-                          <div className="rw-maintenance-section-title">Migration</div>
+                          <div className="rw-maintenance-section-title">
+                            Migration
+                          </div>
                           <div className="rw-maintenance-section-note">
-                            Preview and apply low-frequency UUID rewrite workflows.
+                            Preview and apply low-frequency legacy migration
+                            workflows.
                           </div>
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handlePreviewCurrentPageLegacyIds}>
+                          <button
+                            className="rw-btn"
+                            onClick={handlePreviewLegacyManagedPageMigration}
+                          >
+                            Preview Legacy Managed Page Migration
+                          </button>
+                          {pendingLegacyManagedPageIdentityMigration && (
+                            <button
+                              className="rw-btn"
+                              onClick={handleApplyLegacyManagedPageMigration}
+                            >
+                              Apply Legacy Managed Page Migration
+                            </button>
+                          )}
+                        </div>
+                        <div className="rw-action-row">
+                          <button
+                            className="rw-btn"
+                            onClick={handlePreviewCurrentPageLegacyIds}
+                          >
                             Preview Current Page Legacy ID Migration
                           </button>
                           {pendingCurrentPageLegacyIdMigration && (
@@ -8357,7 +9369,10 @@ export const ReadwiseContainer = () => {
                           )}
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handlePreviewLegacyBlockRefs}>
+                          <button
+                            className="rw-btn"
+                            onClick={handlePreviewLegacyBlockRefs}
+                          >
                             Preview Legacy Block Ref Migration
                           </button>
                           {pendingLegacyBlockRefMigration && (
@@ -8371,60 +9386,87 @@ export const ReadwiseContainer = () => {
                         </div>
                       </div>
 
-                        <div className="rw-maintenance-section">
-                          <div className="rw-maintenance-section-header">
-                            <div className="rw-maintenance-section-title">Snapshots</div>
-                            <div className="rw-maintenance-section-note">
-                            Refresh the local highlight snapshot, rebuild every managed page
-                            from the cached snapshot in staged or streaming mode, force
-                            Logseq to reparse managed pages, or capture raw page state for
-                            diff-based debugging.
+                      <div className="rw-maintenance-section">
+                        <div className="rw-maintenance-section-header">
+                          <div className="rw-maintenance-section-title">
+                            Snapshots
+                          </div>
+                          <div className="rw-maintenance-section-note">
+                            Refresh the local highlight snapshot, rebuild every
+                            managed page from the cached snapshot in staged or
+                            streaming mode, force Logseq to reparse managed
+                            pages, or capture raw page state for diff-based
+                            debugging.
                           </div>
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handleRefreshLocalSnapshotOnly}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleRefreshLocalSnapshotOnly}
+                          >
                             Refresh Local Snapshot Only
                           </button>
                           <button
                             className="rw-btn"
-                            onClick={() => void handleCachedFullRebuild('staged')}
+                            onClick={() =>
+                              void handleCachedFullRebuild('staged')
+                            }
                           >
                             Cached Full Rebuild (Staged)
                           </button>
                           <button
                             className="rw-btn"
-                            onClick={() => void handleCachedFullRebuild('streaming')}
+                            onClick={() =>
+                              void handleCachedFullRebuild('streaming')
+                            }
                           >
                             Cached Full Rebuild (Streaming)
                           </button>
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handleForceReparseManagedPages}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleForceReparseManagedPages}
+                          >
                             Force Reparse Managed Pages
                           </button>
-                          <button className="rw-btn" onClick={handleCaptureCurrentPageSnapshot}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleCaptureCurrentPageSnapshot}
+                          >
                             Capture Page Snapshot
                           </button>
-                          <button className="rw-btn" onClick={handleDiffCurrentPageSnapshot}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleDiffCurrentPageSnapshot}
+                          >
                             Diff Page Snapshot
                           </button>
                         </div>
                         <div className="rw-action-row">
                           <button
                             className="rw-btn"
-                            onClick={() => void handleCopyExternalRawSnapshotCommand('capture')}
+                            onClick={() =>
+                              void handleCopyExternalRawSnapshotCommand(
+                                'capture',
+                              )
+                            }
                           >
                             Copy Raw Capture Cmd
                           </button>
                           <button
                             className="rw-btn"
-                            onClick={() => void handleCopyExternalRawSnapshotCommand('diff')}
+                            onClick={() =>
+                              void handleCopyExternalRawSnapshotCommand('diff')
+                            }
                           >
                             Copy Raw Diff Cmd
                           </button>
                           <button
                             className="rw-btn"
-                            onClick={() => void handleCopyExternalRawSnapshotWorkflow()}
+                            onClick={() =>
+                              void handleCopyExternalRawSnapshotWorkflow()
+                            }
                           >
                             Copy Raw Workflow
                           </button>
@@ -8433,35 +9475,58 @@ export const ReadwiseContainer = () => {
 
                       <div className="rw-maintenance-section">
                         <div className="rw-maintenance-section-header">
-                          <div className="rw-maintenance-section-title">Test & Preview</div>
+                          <div className="rw-maintenance-section-title">
+                            Test & Preview
+                          </div>
                           <div className="rw-maintenance-section-note">
                             Session-scoped fixtures and preview-page utilities.
                           </div>
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handleLimitedSync}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleLimitedSync}
+                          >
                             {sessionTestSyncLabel}
                           </button>
-                          <button className="rw-btn" onClick={handleBackupFormalTestPages}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleBackupFormalTestPages}
+                          >
                             Backup Test Pages
                           </button>
-                          <button className="rw-btn" onClick={handleRestoreTestPages}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleRestoreTestPages}
+                          >
                             Restore Test Pages
                           </button>
-                          <button className="rw-btn" onClick={handleClearSessionTestPages}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleClearSessionTestPages}
+                          >
                             Clear Session Test Pages
                           </button>
                           {showAdvancedFormalTestActions && (
-                            <button className="rw-btn" onClick={handleClearFormalTestPages}>
+                            <button
+                              className="rw-btn"
+                              onClick={handleClearFormalTestPages}
+                            >
                               Clear Formal Test Pages
                             </button>
                           )}
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handleReaderPreviewSync}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleReaderPreviewSync}
+                          >
                             Start Reader Preview (20, full scan)
                           </button>
-                          <button className="rw-btn" onClick={handleClearReaderPreviewPages}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleClearReaderPreviewPages}
+                          >
                             Clear Reader Preview Pages
                           </button>
                         </div>
@@ -8469,16 +9534,24 @@ export const ReadwiseContainer = () => {
 
                       <div className="rw-maintenance-section">
                         <div className="rw-maintenance-section-header">
-                          <div className="rw-maintenance-section-title">Debug</div>
+                          <div className="rw-maintenance-section-title">
+                            Debug
+                          </div>
                           <div className="rw-maintenance-section-note">
                             Short-lived debug pages and troubleshooting runs.
                           </div>
                         </div>
                         <div className="rw-action-row">
-                          <button className="rw-btn" onClick={handleDebugSyncFromScratch}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleDebugSyncFromScratch}
+                          >
                             Start Debug Sync (5)
                           </button>
-                          <button className="rw-btn" onClick={handleClearDebugPages}>
+                          <button
+                            className="rw-btn"
+                            onClick={handleClearDebugPages}
+                          >
                             Clear Debug Pages
                           </button>
                         </div>

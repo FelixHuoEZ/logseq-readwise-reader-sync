@@ -7038,6 +7038,7 @@ export const ReadwiseContainer = () => {
   const warningIssues = diagnosedErrors.filter(
     (issue) => issue.category === 'warning',
   )
+  const activeModeLabel = runIssueContext?.modeLabel ?? 'Reader sync'
   const statusLabel =
     status === 'completed' && errors.length > 0
       ? 'warning'
@@ -7064,10 +7065,10 @@ export const ReadwiseContainer = () => {
         : status === 'syncing'
           ? 'Rebuilding managed pages'
           : status === 'completed' && errors.length > 0
-            ? 'Completed with issues'
+            ? `${activeModeLabel} completed with issues`
             : status === 'completed'
-              ? 'Reader sync completed'
-              : 'Reader sync stopped'
+              ? `${activeModeLabel} completed`
+              : `${activeModeLabel} stopped`
   const statusPhaseLabel =
     status === 'completed'
       ? ''

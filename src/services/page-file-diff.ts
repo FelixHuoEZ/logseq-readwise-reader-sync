@@ -38,6 +38,7 @@ const CURRENT_PAGE_SNAPSHOT_KEY = 'page-file-diff/current-page-snapshot.json'
 interface PageFileResolutionDiagnostics {
   pageName: string
   pageAliases: string[]
+  pageFilePath: string | null
   pageEntity: {
     id: number | null
     originalName: string | null
@@ -196,6 +197,14 @@ const buildCandidateRelativeFilePaths = (
   return preferredExtensions.map((extension) => `${expectedStem}.${extension}`)
 }
 
+const buildCandidateRelativeFilePathsForAliases = (
+  aliases: string[],
+  expectedFormat: 'org' | 'markdown' | null,
+) =>
+  uniqueValues(
+    aliases.flatMap((alias) => buildCandidateRelativeFilePaths(alias, expectedFormat)),
+  )
+
 const escapeDatalogString = (value: string) =>
   value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
 
@@ -263,6 +272,15 @@ const resolveCurrentPageEntity = async (): Promise<PageEntity> => {
   throw new Error('Failed to resolve the current page entity.')
 }
 
+const extractPageFilePath = (page: PageEntity): string | null =>
+  page.file &&
+  typeof page.file === 'object' &&
+  'path' in page.file &&
+  typeof page.file.path === 'string' &&
+  page.file.path.length > 0
+    ? page.file.path
+    : null
+
 const resolveCurrentPageFile = async (page: PageEntity) => {
   const aliases = collectAliases(page)
   const pageName = aliases[0]
@@ -270,10 +288,15 @@ const resolveCurrentPageFile = async (page: PageEntity) => {
     throw new Error('Current page does not have a stable page name.')
   }
 
-  const candidatePaths = buildCandidateRelativeFilePaths(pageName, page.format ?? null)
+  const pageFilePath = extractPageFilePath(page)
+  const candidatePaths = uniqueValues([
+    pageFilePath ?? '',
+    ...buildCandidateRelativeFilePathsForAliases(aliases, page.format ?? null),
+  ])
   const diagnostics: PageFileResolutionDiagnostics = {
     pageName,
     pageAliases: aliases,
+    pageFilePath,
     pageEntity: {
       id: typeof page.id === 'number' ? page.id : null,
       originalName: typeof page.originalName === 'string' ? page.originalName : null,
@@ -370,16 +393,18 @@ const resolveCurrentPageFile = async (page: PageEntity) => {
     }
   }
 
-  const expectedStem = `pages/${buildPageFileStem(pageName)}`
-  const fallback = assets.find((asset) => asset.path.startsWith(`${expectedStem}.`))
-  if (fallback) {
-    diagnostics.assetStemMatch = fallback.path
-    diagnostics.resolvedFrom = 'asset-stem'
-    return {
-      pageName,
-      pageAliases: aliases,
-      relativeFilePath: fallback.path,
-      diagnostics,
+  for (const alias of aliases) {
+    const expectedStem = `pages/${buildPageFileStem(alias)}`
+    const fallback = assets.find((asset) => asset.path.startsWith(`${expectedStem}.`))
+    if (fallback) {
+      diagnostics.assetStemMatch = fallback.path
+      diagnostics.resolvedFrom = 'asset-stem'
+      return {
+        pageName,
+        pageAliases: aliases,
+        relativeFilePath: fallback.path,
+        diagnostics,
+      }
     }
   }
 

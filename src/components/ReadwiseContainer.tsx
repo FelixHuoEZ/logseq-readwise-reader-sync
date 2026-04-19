@@ -57,7 +57,6 @@ import {
   clearManagedPagesByNamespacePrefix,
   clearManagedPagesBySessionNamespaceRoot,
   diffCurrentPageFileSnapshotV1,
-  forceReparseCurrentPageV1,
   forceReparseManagedPagesByNamespaceV1,
   inspectManagedPageIntegrityV1,
   type LegacyBlockRefPreviewEntryV1,
@@ -73,6 +72,7 @@ import {
   rotateActiveFormalTestSessionNamespaceV1,
   saveFormalTestSessionManifestV1,
   setupProps,
+  softReopenCurrentPageV1,
   syncRenderedDebugPage,
   syncRenderedPage,
   syncRenderedReaderPreviewPage,
@@ -3772,7 +3772,7 @@ export const ReadwiseContainer = () => {
     })
   }
 
-  const handleForceReparseCurrentPage = async () => {
+  const handleSoftReopenCurrentPage = async () => {
     clearRunIssues()
     setPageDiffResult(null)
     setCacheSummaryResult(null)
@@ -3782,7 +3782,7 @@ export const ReadwiseContainer = () => {
     setStatus('syncing')
     const startedAt = new Date().toISOString()
     setRunIssueContext({
-      modeLabel: 'Force reparse current page',
+      modeLabel: 'Soft reopen current page',
       namespacePrefix: null,
       logLevel: String(logseq.settings?.logLevel ?? 'warn'),
       statusMessage: '',
@@ -3793,10 +3793,12 @@ export const ReadwiseContainer = () => {
       processedItems: 0,
       issuesCount: 0,
     })
-    setStatusMessage('Touching the current page file so Logseq reparses it...')
+    setStatusMessage(
+      'Soft reopening the current page view without touching the page file...',
+    )
 
     try {
-      const result = await forceReparseCurrentPageV1()
+      const result = await softReopenCurrentPageV1()
       setCurrent(1)
       setCurrentBook(result.pageName)
       setStatus('completed')
@@ -3811,10 +3813,10 @@ export const ReadwiseContainer = () => {
             },
       )
       setStatusMessage(
-        `Forced Logseq to reparse ${result.pageName} by touching ${result.relativeFilePath}.`,
+        `Soft reopened ${result.pageName} without touching the page file.`,
       )
     } catch (err: unknown) {
-      logReadwiseError(formalSyncLogPrefix, 'force reparse current page failed', err)
+      logReadwiseError(formalSyncLogPrefix, 'soft reopen current page failed', err)
       setStatus('error')
       setRunIssueContext((previous) =>
         previous == null
@@ -3827,7 +3829,7 @@ export const ReadwiseContainer = () => {
             },
       )
       setStatusMessage(
-        `Force reparse current page failed: ${describeUnknownError(err)}`,
+        `Soft reopen current page failed: ${describeUnknownError(err)}`,
       )
     }
   }
@@ -7119,7 +7121,7 @@ export const ReadwiseContainer = () => {
   const currentPageHelpNotes = [
     'Rebuild Current Page From Cache uses rw-reader-id, reads the cached highlight snapshot for that parent, and rewrites only the current managed page.',
     "Refresh Current Page Metadata re-fetches the current page's parent metadata from Reader, combines it with cached highlights, and rewrites only the current managed page.",
-    'Force Reparse Current Page temporarily touches the current page file and restores the original content so Logseq reparses it even when the rendered text itself did not change.',
+    'Soft Reopen Current Page reopens the current page route without touching the page file. It is safer for synced graphs, but it only refreshes the current page view and does not guarantee a parser-level reparse.',
     'These are the common page-level recovery actions. Low-frequency migration and audit workflows live under Maintenance Tools.',
   ]
   const maintenanceToolsHelpNotes = [
@@ -7939,8 +7941,8 @@ export const ReadwiseContainer = () => {
                   <button className="rw-btn" onClick={handleRefreshCurrentPageMetadata}>
                     Refresh Current Page Metadata
                   </button>
-                  <button className="rw-btn" onClick={handleForceReparseCurrentPage}>
-                    Force Reparse Current Page
+                  <button className="rw-btn" onClick={handleSoftReopenCurrentPage}>
+                    Soft Reopen Current Page
                   </button>
                 </div>
               </div>

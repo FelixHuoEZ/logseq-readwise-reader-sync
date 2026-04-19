@@ -3,6 +3,7 @@ misc
 
 # Logs
 logs
+scripts_local/
 debug/
 .release/
 logseq-readwise-plugin.zip

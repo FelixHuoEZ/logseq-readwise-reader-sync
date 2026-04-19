@@ -210,6 +210,18 @@ interface ReaderDetailEnrichReportResult {
   outcomeEntries: ReaderDocumentHighlightDetailOutcome[]
 }
 
+const isReaderDetailEnrichWarningReason = (
+  reason: ReaderDocumentHighlightDetailOutcome['reason'],
+) =>
+  reason === 'missing_parent_metadata' ||
+  reason === 'missing_in_reader' ||
+  reason === 'parent_metadata_cache_fallback'
+
+const countReaderDetailWarningEntries = (
+  entries: readonly ReaderDocumentHighlightDetailOutcome[],
+) =>
+  entries.filter((entry) => isReaderDetailEnrichWarningReason(entry.reason)).length
+
 interface ManagedPageRepairScanEntryResult {
   pageName: string
   candidate?: ManagedPageRepairCandidate
@@ -1988,6 +2000,8 @@ export const ReadwiseContainer = () => {
         return 'no-rich-media'
       case 'video':
         return 'video-like'
+      case 'parent_metadata_cache_fallback':
+        return 'parent-metadata-cache-fallback'
       case 'missing_parent_metadata':
         return 'missing-parent-metadata'
       case 'missing_in_reader':
@@ -2015,6 +2029,7 @@ export const ReadwiseContainer = () => {
       `Highlights Scanned: ${result.highlightsScanned}`,
       `Remote Pages Scanned: ${result.highlightPagesScanned}`,
       `MCP Detail Calls: ${result.documentHighlightDetailCalls}`,
+      `Warning Pages: ${countReaderDetailWarningEntries(result.outcomeEntries)}`,
       `Outcome Entries: ${result.outcomeEntries.length}`,
       '',
       'Outcome Counts:',
@@ -5289,9 +5304,11 @@ export const ReadwiseContainer = () => {
 
     try {
       const graphContext = await loadCurrentGraphContextV1()
+      throwIfCancelled()
       const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
       const client = createReadwiseClient(token)
       const currentManagedPage = await resolveCurrentManagedReaderPage()
+      throwIfCancelled()
       const { pageName, readerDocumentId } = currentManagedPage
 
       beginReaderSyncEtaPhase('fetch-highlights', 'cached highlight snapshot')
@@ -5302,6 +5319,7 @@ export const ReadwiseContainer = () => {
       const highlightsByParent = await previewCache.loadGroupedHighlightsByParent([
         readerDocumentId,
       ])
+      throwIfCancelled()
       const highlights = [
         ...(highlightsByParent.get(readerDocumentId) ?? []),
       ].sort(sortReaderDocumentsByCreatedAtAscending)
@@ -5319,7 +5337,7 @@ export const ReadwiseContainer = () => {
       setStatusMessage(
         action === 'refresh-metadata'
           ? `${statusPrefix}: refreshing parent metadata for ${pageName}...`
-          : `${statusPrefix}: resolving parent metadata for ${pageName}...`,
+          : `${statusPrefix}: loading cached parent metadata for ${pageName}...`,
       )
 
       let document =
@@ -5328,13 +5346,21 @@ export const ReadwiseContainer = () => {
               readerDocumentId,
             ) ?? null
           : null
+      throwIfCancelled()
 
       if (!document) {
+        if (action === 'rebuild-from-cache') {
+          throw new Error(
+            'No cached parent metadata was found for the current page. Use Refresh Current Page Metadata or Full Refresh first.',
+          )
+        }
+
         document = await loadReaderParentDocumentByIdWithRetry(
           client,
           readerDocumentId,
           formalSyncLogPrefix,
         )
+        throwIfCancelled()
 
         if (!document) {
           throw new Error(
@@ -5354,6 +5380,7 @@ export const ReadwiseContainer = () => {
               logPrefix: formalSyncLogPrefix,
             })
           : null
+      throwIfCancelled()
       const resolvedHighlights = enrichmentResult?.highlights ?? highlights
 
       if (
@@ -5362,6 +5389,7 @@ export const ReadwiseContainer = () => {
         enrichmentResult.changedCount > 0
       ) {
         await previewCache.putHighlights(resolvedHighlights)
+        throwIfCancelled()
       }
 
       setCurrent(1)
@@ -5385,6 +5413,7 @@ export const ReadwiseContainer = () => {
           identityNamespaceRoot: formalNamespaceRoot,
         },
       )
+      throwIfCancelled()
 
       setCurrent(1)
       updateReaderSyncEta('write-pages', 'page writes', 1, 1)
@@ -5405,6 +5434,10 @@ export const ReadwiseContainer = () => {
           : `${statusPrefix}: rebuilt ${pageSyncResult.pageName}.`,
       )
     } catch (err: unknown) {
+      if (isRunCancelledError(err)) {
+        return
+      }
+
       logReadwiseError(formalSyncLogPrefix, 'current page Reader action failed', err)
       setStatus('error')
       setRunIssueContext((previous) =>
@@ -5642,6 +5675,7 @@ export const ReadwiseContainer = () => {
       completeHighlightSnapshotRefreshed: false,
       parentMetadataCacheHits: 0,
       parentMetadataRemoteFetches: 0,
+      parentMetadataCacheFallbacks: 0,
       documentHighlightDetailCalls: 0,
       documentHighlightDetailSkippedNoParentMetadata: 0,
       documentHighlightDetailSkippedNoRichMedia: 0,
@@ -5706,9 +5740,12 @@ export const ReadwiseContainer = () => {
         resumeState,
         previewCache,
         parentMetadataMode:
-          mode === 'incremental-window' ? 'cache_first' : 'always_refresh',
+          mode === 'incremental-window' || mode === 'cached-full-rebuild'
+            ? 'cache_first'
+            : 'always_refresh',
         readerAuthToken: token,
         logPrefix,
+        throwIfCancelled,
         onProgress: (progress) => {
           if (cancelledRef.current) return
 
@@ -5814,7 +5851,7 @@ export const ReadwiseContainer = () => {
           )
           setStatusMessage(
             mode === 'cached-full-rebuild'
-              ? `${statusPrefix}: refreshing Reader parent metadata for cached pages... ${progress.completed ?? 0} / ${progress.total ?? 0}.`
+              ? `${statusPrefix}: resolving cached Reader parent metadata first, then filling any misses from Reader... ${progress.completed ?? 0} / ${progress.total ?? 0}.`
               : `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? 0}.`,
           )
         },
@@ -5837,6 +5874,7 @@ export const ReadwiseContainer = () => {
           loadStats.completeHighlightSnapshotRefreshed,
         parentMetadataCacheHits: loadStats.parentMetadataCacheHits,
         parentMetadataRemoteFetches: loadStats.parentMetadataRemoteFetches,
+        parentMetadataCacheFallbacks: loadStats.parentMetadataCacheFallbacks,
         documentHighlightDetailCalls: loadStats.documentHighlightDetailCalls,
         documentHighlightDetailSkippedNoParentMetadata:
           loadStats.documentHighlightDetailSkippedNoParentMetadata,
@@ -5896,6 +5934,7 @@ export const ReadwiseContainer = () => {
             readerAuthToken: token,
             logPrefix,
             highlightCoverage: 'cached-full-rebuild',
+            throwIfCancelled,
           })
 
           if (queuedRetryLoadResult.books.length > 0) {
@@ -5905,8 +5944,12 @@ export const ReadwiseContainer = () => {
               queuedRetryLoadResult.parentMetadataCacheHits
             loadStats.parentMetadataRemoteFetches +=
               queuedRetryLoadResult.parentMetadataRemoteFetches
+            loadStats.parentMetadataCacheFallbacks +=
+              queuedRetryLoadResult.parentMetadataCacheFallbacks
             loadStats.documentHighlightDetailCalls +=
               queuedRetryLoadResult.documentHighlightDetailCalls
+            loadStats.documentHighlightDetailSkippedNoParentMetadata +=
+              queuedRetryLoadResult.documentHighlightDetailSkippedNoParentMetadata
             loadStats.documentHighlightDetailSkippedNoRichMedia +=
               queuedRetryLoadResult.documentHighlightDetailSkippedNoRichMedia
             loadStats.documentHighlightDetailSkippedVideo +=
@@ -5985,6 +6028,9 @@ export const ReadwiseContainer = () => {
           loadStats.documentHighlightDetailCalls > 0
             ? `MCP detail calls ${loadStats.documentHighlightDetailCalls}`
             : null,
+          loadStats.parentMetadataCacheFallbacks > 0
+            ? `parent metadata fallback ${loadStats.parentMetadataCacheFallbacks}`
+            : null,
           loadStats.documentHighlightDetailSkippedResolved > 0
             ? `cache-resolved ${loadStats.documentHighlightDetailSkippedResolved}`
             : null,
@@ -6007,6 +6053,11 @@ export const ReadwiseContainer = () => {
             : ''
         const sortedDetailOutcomes = [...loadStats.documentHighlightDetailOutcomes].sort(
           (left, right) => {
+            const warningCompare =
+              Number(isReaderDetailEnrichWarningReason(right.reason)) -
+              Number(isReaderDetailEnrichWarningReason(left.reason))
+            if (warningCompare !== 0) return warningCompare
+
             const reasonCompare = formatReaderDetailEnrichOutcomeReason(
               left.reason,
             ).localeCompare(formatReaderDetailEnrichOutcomeReason(right.reason))
@@ -6064,6 +6115,7 @@ export const ReadwiseContainer = () => {
           highlightPagesScanned: loadStats.highlightPagesScanned,
           parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
           documentHighlightDetailCalls: loadStats.documentHighlightDetailCalls,
+          parentMetadataCacheFallbacks: loadStats.parentMetadataCacheFallbacks,
           documentHighlightDetailSkippedResolved:
             loadStats.documentHighlightDetailSkippedResolved,
           documentHighlightDetailSkippedNoRichMedia:
@@ -6753,6 +6805,10 @@ export const ReadwiseContainer = () => {
         deferredProtectedWrites: deferredProtectedWrites.length,
       })
     } catch (err: unknown) {
+      if (isRunCancelledError(err)) {
+        return
+      }
+
       if (isReaderPreviewLoadResumeError(err)) {
         const retryTarget = describeReaderResumeTarget(err.resumeState)
 
@@ -7129,7 +7185,7 @@ export const ReadwiseContainer = () => {
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
-    'Cached Full Rebuild reuses the local full-library highlight snapshot, refreshes parent metadata for the matched documents, and rewrites every managed page without re-scanning the remote highlight and note library.',
+    'Cached Full Rebuild reuses the local full-library highlight snapshot, prefers cached parent metadata, only refetches missing parent metadata from Reader, and rewrites every managed page without re-scanning the remote highlight and note library.',
     'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
@@ -7548,13 +7604,22 @@ export const ReadwiseContainer = () => {
             <div className="rw-feedback-block rw-preview-panel">
               <div className="rw-section-header">
                 <div>
-                  <div className="rw-section-title">Detail Enrich Report</div>
+                  <div className="rw-section-title">Detail / Warning Report</div>
                   <div className="rw-section-meta">
+                    {countReaderDetailWarningEntries(
+                      readerDetailEnrichReportResult.outcomeEntries,
+                    )}{' '}
+                    {countReaderDetailWarningEntries(
+                      readerDetailEnrichReportResult.outcomeEntries,
+                    ) === 1
+                      ? 'warning page'
+                      : 'warning pages'}{' '}
+                    ·{' '}
                     {readerDetailEnrichReportResult.outcomeEntries.length}{' '}
                     {readerDetailEnrichReportResult.outcomeEntries.length === 1
                       ? 'outcome entry'
                       : 'outcome entries'}{' '}
-                    from the last snapshot refresh
+                    from the last sync run
                   </div>
                 </div>
                 <div className="rw-section-actions">
@@ -7585,10 +7650,19 @@ export const ReadwiseContainer = () => {
                     {readerDetailEnrichReportResult.documentHighlightDetailCalls}
                   </strong>
                 </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Warning pages</span>
+                  <strong>
+                    {countReaderDetailWarningEntries(
+                      readerDetailEnrichReportResult.outcomeEntries,
+                    )}
+                  </strong>
+                </div>
               </div>
               <div className="rw-preview-note">
-                This report lists the documents that were cache-resolved, skipped,
-                or fell back because Reader detail data was unavailable.
+                This report lists the documents that warned, were cache-resolved,
+                were skipped, or fell back because Reader parent metadata or detail
+                data was unavailable.
               </div>
               <div className="rw-preview-list">
                 {readerDetailEnrichReportResult.outcomeEntries

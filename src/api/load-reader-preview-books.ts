@@ -19,7 +19,10 @@ export type ReaderPreviewLoadMode =
   | 'cached-full-rebuild'
   | 'snapshot-only-refresh'
 
-export type ReaderParentMetadataMode = 'cache_first' | 'always_refresh'
+export type ReaderParentMetadataMode =
+  | 'cache_first'
+  | 'always_refresh'
+  | 'cache_only'
 
 export interface ReaderPreviewBook {
   document: ReaderDocument
@@ -41,6 +44,7 @@ export interface ReaderPreviewLoadStats {
   completeHighlightSnapshotRefreshed: boolean
   parentMetadataCacheHits: number
   parentMetadataRemoteFetches: number
+  parentMetadataCacheFallbacks: number
   documentHighlightDetailCalls: number
   documentHighlightDetailSkippedNoParentMetadata: number
   documentHighlightDetailSkippedNoRichMedia: number
@@ -58,6 +62,7 @@ export type ReaderDocumentHighlightDetailOutcomeReason =
   | 'video'
   | 'missing_parent_metadata'
   | 'missing_in_reader'
+  | 'parent_metadata_cache_fallback'
 
 export interface ReaderDocumentHighlightDetailOutcome {
   readerDocumentId: string
@@ -137,6 +142,7 @@ export interface LoadReaderPreviewBooksOptions {
   readerAuthToken?: string | null
   logPrefix?: string
   onProgress?: (progress: LoadReaderPreviewBooksProgress) => void
+  throwIfCancelled?: () => void
 }
 
 export interface LoadReaderPreviewBooksByParentIdsOptions {
@@ -146,6 +152,7 @@ export interface LoadReaderPreviewBooksByParentIdsOptions {
   readerAuthToken?: string | null
   logPrefix?: string
   highlightCoverage?: ReaderPreviewLoadMode
+  throwIfCancelled?: () => void
 }
 
 export interface LoadReaderPreviewBooksByParentIdsResult {
@@ -153,7 +160,9 @@ export interface LoadReaderPreviewBooksByParentIdsResult {
   unresolvedParentIds: string[]
   parentMetadataCacheHits: number
   parentMetadataRemoteFetches: number
+  parentMetadataCacheFallbacks: number
   documentHighlightDetailCalls: number
+  documentHighlightDetailSkippedNoParentMetadata: number
   documentHighlightDetailSkippedNoRichMedia: number
   documentHighlightDetailSkippedVideo: number
   documentHighlightDetailSkippedResolved: number
@@ -224,10 +233,26 @@ const mergeHighlightWithAttachedNotes = (
 const uniqueParentIds = (parentIds: readonly string[]) =>
   [...new Set(parentIds.filter((parentId) => typeof parentId === 'string' && parentId.length > 0))]
 
-const sleep = async (milliseconds: number) =>
-  new Promise((resolve) => {
-    window.setTimeout(resolve, milliseconds)
-  })
+const isRunCancelledError = (error: unknown): error is Error =>
+  error instanceof Error && error.name === 'ReadwiseRunCancelledError'
+
+const sleep = async (
+  milliseconds: number,
+  throwIfCancelled?: (() => void) | undefined,
+) => {
+  let remainingMilliseconds = Math.max(0, milliseconds)
+
+  while (remainingMilliseconds > 0) {
+    throwIfCancelled?.()
+    const currentSliceMilliseconds = Math.min(100, remainingMilliseconds)
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, currentSliceMilliseconds)
+    })
+    remainingMilliseconds -= currentSliceMilliseconds
+  }
+
+  throwIfCancelled?.()
+}
 
 const isRetriableReaderListError = (error: unknown) => {
   const message = describeUnknownError(error)
@@ -248,6 +273,7 @@ const listReaderDocumentsWithRetry = async (
     stage: 'fetch-highlights' | 'fetch-notes' | 'fetch-documents'
     pageNumber?: number
     parentId?: string
+    throwIfCancelled?: () => void
   },
 ) => {
   let lastError: unknown = null
@@ -255,8 +281,13 @@ const listReaderDocumentsWithRetry = async (
 
   for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
     try {
+      options.throwIfCancelled?.()
       return await client.listReaderDocuments(params)
     } catch (error) {
+      if (isRunCancelledError(error)) {
+        throw error
+      }
+
       lastError = error
 
       if (!isRetriableReaderListError(error) || attempt === totalAttempts - 1) {
@@ -274,7 +305,7 @@ const listReaderDocumentsWithRetry = async (
         })
       }
 
-      await sleep(1000 * (attempt + 1))
+      await sleep(1000 * (attempt + 1), options.throwIfCancelled)
     }
   }
 
@@ -351,6 +382,7 @@ export const loadReaderPreviewBooksByParentIds = async (
   client: ReadwiseClient,
   options: LoadReaderPreviewBooksByParentIdsOptions,
 ): Promise<LoadReaderPreviewBooksByParentIdsResult> => {
+  options.throwIfCancelled?.()
   const parentIds = uniqueParentIds(options.parentIds)
   if (parentIds.length === 0) {
     return {
@@ -358,7 +390,9 @@ export const loadReaderPreviewBooksByParentIds = async (
       unresolvedParentIds: [],
       parentMetadataCacheHits: 0,
       parentMetadataRemoteFetches: 0,
+      parentMetadataCacheFallbacks: 0,
       documentHighlightDetailCalls: 0,
+      documentHighlightDetailSkippedNoParentMetadata: 0,
       documentHighlightDetailSkippedNoRichMedia: 0,
       documentHighlightDetailSkippedVideo: 0,
       documentHighlightDetailSkippedResolved: 0,
@@ -373,7 +407,9 @@ export const loadReaderPreviewBooksByParentIds = async (
   const unresolvedParentIds: string[] = []
   let parentMetadataCacheHits = 0
   let parentMetadataRemoteFetches = 0
+  let parentMetadataCacheFallbacks = 0
   let documentHighlightDetailCalls = 0
+  let documentHighlightDetailSkippedNoParentMetadata = 0
   let documentHighlightDetailSkippedNoRichMedia = 0
   let documentHighlightDetailSkippedVideo = 0
   let documentHighlightDetailSkippedResolved = 0
@@ -402,7 +438,9 @@ export const loadReaderPreviewBooksByParentIds = async (
         unresolvedParentIds: parentIds,
         parentMetadataCacheHits,
         parentMetadataRemoteFetches,
+        parentMetadataCacheFallbacks,
         documentHighlightDetailCalls,
+        documentHighlightDetailSkippedNoParentMetadata,
         documentHighlightDetailSkippedNoRichMedia,
         documentHighlightDetailSkippedVideo,
         documentHighlightDetailSkippedResolved,
@@ -412,8 +450,9 @@ export const loadReaderPreviewBooksByParentIds = async (
       }
   }
 
-  if (parentMetadataMode === 'cache_first') {
+  if (parentMetadataMode !== 'always_refresh') {
     try {
+      options.throwIfCancelled?.()
       cachedParentDocuments = await options.previewCache.getCachedParentDocuments(
         parentIds,
       )
@@ -433,8 +472,10 @@ export const loadReaderPreviewBooksByParentIds = async (
 
   const fetchedParentDocuments: ReaderDocument[] = []
   const books: ReaderPreviewBook[] = []
+  const shouldUseMcpEnrichment = parentMetadataMode !== 'cache_only'
 
   for (const parentId of parentIds) {
+    options.throwIfCancelled?.()
     const highlights = [...(highlightsByParent.get(parentId) ?? [])].sort(
       sortByCreatedAtAscending,
     )
@@ -456,7 +497,7 @@ export const loadReaderPreviewBooksByParentIds = async (
     }
 
     const cachedDocument =
-      parentMetadataMode === 'cache_first'
+      parentMetadataMode !== 'always_refresh'
         ? cachedParentDocuments.get(parentId) ?? null
         : null
     let document = cachedDocument
@@ -464,6 +505,38 @@ export const loadReaderPreviewBooksByParentIds = async (
     if (document) {
       parentMetadataCacheHits += 1
     } else {
+      if (parentMetadataMode === 'cache_only') {
+        unresolvedParentIds.push(parentId)
+        documentHighlightDetailSkippedNoParentMetadata += 1
+        appendReaderDocumentHighlightDetailOutcome(
+          documentHighlightDetailOutcomes,
+          {
+            readerDocumentId: parentId,
+            title:
+              typeof cachedDocument?.title === 'string'
+                ? cachedDocument.title
+                : null,
+            category:
+              typeof cachedDocument?.category === 'string'
+                ? cachedDocument.category
+                : null,
+            reason: 'missing_parent_metadata',
+          },
+        )
+
+        if (options.logPrefix) {
+          logReadwiseWarn(
+            options.logPrefix,
+            'cached queued retry page parent metadata is missing; leaving it queued',
+            {
+              parentId,
+            },
+          )
+        }
+
+        continue
+      }
+
       try {
         const response = await listReaderDocumentsWithRetry(
           client,
@@ -476,11 +549,16 @@ export const loadReaderPreviewBooksByParentIds = async (
             logPrefix: options.logPrefix,
             stage: 'fetch-documents',
             parentId,
+            throwIfCancelled: options.throwIfCancelled,
           },
         )
 
         document = response.results[0] ?? null
       } catch (error) {
+        if (isRunCancelledError(error)) {
+          throw error
+        }
+
         unresolvedParentIds.push(parentId)
 
         if (options.logPrefix) {
@@ -505,15 +583,36 @@ export const loadReaderPreviewBooksByParentIds = async (
 
     if (!document) {
       unresolvedParentIds.push(parentId)
+      documentHighlightDetailSkippedNoParentMetadata += 1
+      appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+        readerDocumentId: parentId,
+        title: typeof cachedDocument?.title === 'string' ? cachedDocument.title : null,
+        category:
+          typeof cachedDocument?.category === 'string'
+            ? cachedDocument.category
+            : null,
+        reason: 'missing_parent_metadata',
+      })
       continue
     }
 
-    const enrichedHighlightsResult = await tryEnrichReaderDocumentHighlightsViaMcp({
-      token: options.readerAuthToken,
-      document,
-      highlights,
-      logPrefix: options.logPrefix,
-    })
+    options.throwIfCancelled?.()
+    const enrichedHighlightsResult = shouldUseMcpEnrichment
+      ? await tryEnrichReaderDocumentHighlightsViaMcp({
+          token: options.readerAuthToken,
+          document,
+          highlights,
+          logPrefix: options.logPrefix,
+        })
+      : {
+          highlights: [...highlights],
+          changedCount: 0,
+          fetchedCount: 0,
+          attempted: false,
+          skippedReason: null,
+          missingInReader: false,
+        }
+    options.throwIfCancelled?.()
 
     if (enrichedHighlightsResult.attempted) {
       documentHighlightDetailCalls += 1
@@ -614,7 +713,9 @@ export const loadReaderPreviewBooksByParentIds = async (
     unresolvedParentIds,
     parentMetadataCacheHits,
     parentMetadataRemoteFetches,
+    parentMetadataCacheFallbacks,
     documentHighlightDetailCalls,
+    documentHighlightDetailSkippedNoParentMetadata,
     documentHighlightDetailSkippedNoRichMedia,
     documentHighlightDetailSkippedVideo,
     documentHighlightDetailSkippedResolved,
@@ -647,7 +748,9 @@ export const loadReaderPreviewBooks = async (
   const previewCache = options.previewCache ?? null
   const parentMetadataMode =
     options.parentMetadataMode ??
-    (mode === 'incremental-window' ? 'cache_first' : 'always_refresh')
+    (mode === 'incremental-window' || mode === 'cached-full-rebuild'
+      ? 'cache_first'
+      : 'always_refresh')
   const targetParentIds = [...(resumeState?.targetParentIds ?? [])]
   const seenParentIds = new Set(targetParentIds)
   const highlightsByParent = new Map<string, ReaderDocument[]>(
@@ -680,6 +783,7 @@ export const loadReaderPreviewBooks = async (
   let completeHighlightSnapshotRefreshed = false
   let parentMetadataCacheHits = 0
   let parentMetadataRemoteFetches = 0
+  let parentMetadataCacheFallbacks = 0
   let documentHighlightDetailCalls = 0
   let documentHighlightDetailSkippedNoParentMetadata = 0
   let documentHighlightDetailSkippedNoRichMedia = 0
@@ -792,6 +896,7 @@ export const loadReaderPreviewBooks = async (
       throw new Error('Cached rebuild requires local Reader cache support.')
     }
 
+    options.throwIfCancelled?.()
     const cacheState = await previewCache.getHighlightCacheState()
     if (!cacheState?.hasFullLibrarySnapshot) {
       throw new Error(
@@ -799,6 +904,7 @@ export const loadReaderPreviewBooks = async (
       )
     }
 
+    options.throwIfCancelled?.()
     const cachedHighlightsByParent = await previewCache.loadGroupedHighlightsByParent()
     usedCachedHighlightSnapshot = true
     staleHighlightDeletionRisk = cacheState.staleDeletionRisk
@@ -826,6 +932,7 @@ export const loadReaderPreviewBooks = async (
 
     if (resumePhase === 'fetch-highlights') {
       while (true) {
+      options.throwIfCancelled?.()
       if (
         effectiveMaxHighlightPages != null &&
         highlightPageNumber >= effectiveMaxHighlightPages
@@ -851,9 +958,14 @@ export const loadReaderPreviewBooks = async (
             logPrefix: options.logPrefix,
             stage: 'fetch-highlights',
             pageNumber: nextPageNumber,
+            throwIfCancelled: options.throwIfCancelled,
           },
         )
       } catch (error) {
+        if (isRunCancelledError(error)) {
+          throw error
+        }
+
         throw new ReaderPreviewLoadResumeError(
           describeUnknownError(error),
           buildResumeState('fetch-highlights'),
@@ -955,6 +1067,7 @@ export const loadReaderPreviewBooks = async (
 
     if (resumePhase === 'fetch-highlights') {
       while (true) {
+      options.throwIfCancelled?.()
       if (
         effectiveMaxHighlightPages != null &&
         notePageNumber >= effectiveMaxHighlightPages
@@ -980,9 +1093,14 @@ export const loadReaderPreviewBooks = async (
             logPrefix: options.logPrefix,
             stage: 'fetch-notes',
             pageNumber: nextPageNumber,
+            throwIfCancelled: options.throwIfCancelled,
           },
         )
       } catch (error) {
+        if (isRunCancelledError(error)) {
+          throw error
+        }
+
         throw new ReaderPreviewLoadResumeError(
           describeUnknownError(error),
           buildResumeState('fetch-highlights', {
@@ -1121,6 +1239,7 @@ export const loadReaderPreviewBooks = async (
     emitRefreshSnapshotProgress()
 
     for (const [index, highlightId] of unresolvedNoteParentHighlightIds.entries()) {
+      options.throwIfCancelled?.()
       try {
         const response = await listReaderDocumentsWithRetry(
           client,
@@ -1133,6 +1252,7 @@ export const loadReaderPreviewBooks = async (
             logPrefix: options.logPrefix,
             stage: 'fetch-documents',
             parentId: highlightId,
+            throwIfCancelled: options.throwIfCancelled,
           },
         )
         const highlight = response.results[0] ?? null
@@ -1140,6 +1260,10 @@ export const loadReaderPreviewBooks = async (
           ingestHighlight(highlight)
         }
       } catch (error) {
+        if (isRunCancelledError(error)) {
+          throw error
+        }
+
         if (options.logPrefix) {
           logReadwiseWarn(
             options.logPrefix,
@@ -1494,6 +1618,7 @@ export const loadReaderPreviewBooks = async (
         completeHighlightSnapshotRefreshed,
         parentMetadataCacheHits: 0,
         parentMetadataRemoteFetches: 0,
+        parentMetadataCacheFallbacks: 0,
         documentHighlightDetailCalls,
         documentHighlightDetailSkippedNoParentMetadata,
         documentHighlightDetailSkippedNoRichMedia,
@@ -1532,6 +1657,7 @@ export const loadReaderPreviewBooks = async (
   if (previewCache) {
     if (mode === 'incremental-window' && selectedParentIds.length > 0) {
       try {
+        options.throwIfCancelled?.()
         cachedHighlightsByParent = await previewCache.loadGroupedHighlightsByParent(
           selectedParentIds,
         )
@@ -1549,8 +1675,9 @@ export const loadReaderPreviewBooks = async (
       }
     }
 
-    if (parentMetadataMode === 'cache_first') {
+    if (parentMetadataMode !== 'always_refresh') {
       try {
+        options.throwIfCancelled?.()
         cachedParentDocuments = await previewCache.getCachedParentDocuments(
           selectedParentIds,
         )
@@ -1570,6 +1697,7 @@ export const loadReaderPreviewBooks = async (
 
     if (selectedHighlightIds.length > 0) {
       try {
+        options.throwIfCancelled?.()
         cachedHighlightsById = await previewCache.getCachedHighlightsByIds(
           selectedHighlightIds,
         )
@@ -1596,16 +1724,45 @@ export const loadReaderPreviewBooks = async (
   })
 
   for (; documentIndex < selectedParentIds.length; documentIndex += 1) {
+    options.throwIfCancelled?.()
     const parentId = selectedParentIds[documentIndex]!
-    const cachedDocument =
-      parentMetadataMode === 'cache_first'
-        ? cachedParentDocuments.get(parentId) ?? null
-        : null
+    const cachedDocument = cachedParentDocuments.get(parentId) ?? null
     let document = cachedDocument
 
-    if (document) {
+    if (document && parentMetadataMode !== 'always_refresh') {
       parentMetadataCacheHits += 1
     } else {
+      if (parentMetadataMode === 'cache_only') {
+        if (options.logPrefix) {
+          logReadwiseWarn(
+            options.logPrefix,
+            'cached rebuild skipped a page because cached parent metadata is missing',
+            {
+              parentId,
+            },
+          )
+        }
+
+        documentHighlightDetailSkippedNoParentMetadata += 1
+        appendReaderDocumentHighlightDetailOutcome(
+          documentHighlightDetailOutcomes,
+          {
+            readerDocumentId: parentId,
+            title:
+              typeof cachedDocument?.title === 'string'
+                ? cachedDocument.title
+                : null,
+            category:
+              typeof cachedDocument?.category === 'string'
+                ? cachedDocument.category
+                : null,
+            reason: 'missing_parent_metadata',
+          },
+        )
+        continue
+      }
+
+      document = null
       let response: Awaited<ReturnType<ReadwiseClient['listReaderDocuments']>>
 
       try {
@@ -1620,9 +1777,14 @@ export const loadReaderPreviewBooks = async (
             logPrefix: options.logPrefix,
             stage: 'fetch-documents',
             parentId,
+            throwIfCancelled: options.throwIfCancelled,
           },
         )
       } catch (error) {
+        if (isRunCancelledError(error)) {
+          throw error
+        }
+
         throw new ReaderPreviewLoadResumeError(
           describeUnknownError(error),
           buildResumeState('fetch-documents', {
@@ -1634,10 +1796,32 @@ export const loadReaderPreviewBooks = async (
         )
       }
 
-      document = response.results[0] ?? null
-      if (document) {
+      document = response.results[0] ?? cachedDocument
+      if (response.results[0]) {
         parentMetadataRemoteFetches += 1
-        fetchedParentDocuments.push(document)
+        fetchedParentDocuments.push(response.results[0])
+      } else if (cachedDocument && options.logPrefix) {
+        parentMetadataCacheFallbacks += 1
+        appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+          readerDocumentId: parentId,
+          title:
+            typeof cachedDocument.title === 'string' ? cachedDocument.title : null,
+          category:
+            typeof cachedDocument.category === 'string'
+              ? cachedDocument.category
+              : null,
+          reason: 'parent_metadata_cache_fallback',
+        })
+        logReadwiseWarn(
+          options.logPrefix,
+          'Reader parent metadata missing remotely; falling back to cached parent metadata for cached rebuild',
+          {
+            parentId,
+            title:
+              typeof cachedDocument.title === 'string' ? cachedDocument.title : null,
+            mode,
+          },
+        )
       }
     }
 
@@ -1648,7 +1832,19 @@ export const loadReaderPreviewBooks = async (
       pageTitle: document?.title ?? parentId,
     })
 
-    if (!document) continue
+    if (!document) {
+      documentHighlightDetailSkippedNoParentMetadata += 1
+      appendReaderDocumentHighlightDetailOutcome(documentHighlightDetailOutcomes, {
+        readerDocumentId: parentId,
+        title: typeof cachedDocument?.title === 'string' ? cachedDocument.title : null,
+        category:
+          typeof cachedDocument?.category === 'string'
+            ? cachedDocument.category
+            : null,
+        reason: 'missing_parent_metadata',
+      })
+      continue
+    }
 
     const mergedParentHighlights =
       mode === 'incremental-window'
@@ -1670,12 +1866,24 @@ export const loadReaderPreviewBooks = async (
       highlightsByParent.set(parentId, highlights)
     }
 
-    const enrichedHighlightsResult = await tryEnrichReaderDocumentHighlightsViaMcp({
-      token: options.readerAuthToken,
-      document,
-      highlights,
-      logPrefix: options.logPrefix,
-    })
+    options.throwIfCancelled?.()
+    const enrichedHighlightsResult =
+      parentMetadataMode === 'cache_only'
+        ? {
+            highlights: [...highlights],
+            changedCount: 0,
+            fetchedCount: 0,
+            attempted: false,
+            skippedReason: null,
+            missingInReader: false,
+          }
+        : await tryEnrichReaderDocumentHighlightsViaMcp({
+            token: options.readerAuthToken,
+            document,
+            highlights,
+            logPrefix: options.logPrefix,
+          })
+    options.throwIfCancelled?.()
 
     if (enrichedHighlightsResult.attempted) {
       documentHighlightDetailCalls += 1
@@ -1785,6 +1993,7 @@ export const loadReaderPreviewBooks = async (
       completeHighlightSnapshotRefreshed,
       parentMetadataCacheHits,
       parentMetadataRemoteFetches,
+      parentMetadataCacheFallbacks,
       documentHighlightDetailCalls,
       documentHighlightDetailSkippedNoParentMetadata,
       documentHighlightDetailSkippedNoRichMedia,

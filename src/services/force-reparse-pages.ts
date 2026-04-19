@@ -9,11 +9,24 @@ const FORCE_REPARSE_RESTORE_DELAY_MS = 120
 const SOFT_REOPEN_ROUTE_TIMEOUT_MS = 2000
 const SOFT_REOPEN_ROUTE_POLL_INTERVAL_MS = 50
 const SOFT_REOPEN_ROUTE_SETTLE_DELAY_MS = 80
+const SOFT_REOPEN_CURRENT_PAGE_EDITING_MESSAGE =
+  'Soft reopen current page is unavailable while a block is being edited. Exit editing mode and try again.'
 
 const delay = async (ms: number) =>
   new Promise((resolve) => {
     window.setTimeout(resolve, ms)
   })
+
+export const getSoftReopenCurrentPageUnavailableReasonV1 = async () => {
+  const editingBlock = await logseq.Editor.checkEditing()
+  if (editingBlock) {
+    await logseq.Editor.exitEditingMode(true)
+    await delay(SOFT_REOPEN_ROUTE_SETTLE_DELAY_MS)
+  }
+
+  const remainingEditingBlock = await logseq.Editor.checkEditing()
+  return remainingEditingBlock ? SOFT_REOPEN_CURRENT_PAGE_EDITING_MESSAGE : null
+}
 
 const uniqueStrings = (values: string[]) =>
   values.filter(
@@ -231,11 +244,9 @@ const forceReparseFileContentV1 = async ({
 }
 
 export const softReopenCurrentPageV1 = async () => {
-  const editingBlock = await logseq.Editor.checkEditing()
-  if (editingBlock) {
-    throw new Error(
-      'Soft reopen current page is unavailable while a block is being edited. Exit editing mode and try again.',
-    )
+  const unavailableReason = await getSoftReopenCurrentPageUnavailableReasonV1()
+  if (unavailableReason) {
+    throw new Error(unavailableReason)
   }
 
   const page = await resolveCurrentPageEntityV1()

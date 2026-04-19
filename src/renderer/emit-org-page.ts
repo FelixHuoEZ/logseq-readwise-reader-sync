@@ -23,7 +23,6 @@ export const buildPageProperties = (
   const date = getMetadataValue(page, 'DATE')
   const published = getMetadataValue(page, 'PUBLISHED')
   const saved = getMetadataValue(page, 'SAVED')
-  const summary = getMetadataValue(page, 'summary')
   const reservedKeys = new Set([
     'rw-id',
     'rw-reader-id',
@@ -50,7 +49,6 @@ export const buildPageProperties = (
     { key: 'DATE', value: date ? wrapWikiLink(date) : null },
     { key: 'PUBLISHED', value: published ? wrapWikiLink(published) : null },
     { key: 'SAVED', value: saved ? wrapWikiLink(saved) : null },
-    { key: 'summary', value: summary },
     ...extraMetadataEntries.map((entry) => ({
       key: entry.key,
       value: entry.value,
@@ -63,13 +61,27 @@ export const emitPageNoteText = (page: SemanticPage): string | null => {
     ? wrapWikiLink(page.pageNote.imageUrl)
     : ''
   const noteText = normalizeBoundaryBlankLines(page.pageNote?.text ?? '')
-  const noteLines = [imageLine, noteText].filter((line) => line.trim().length > 0)
+  const noteLines = [imageLine, noteText].filter(
+    (line) => line.trim().length > 0,
+  )
 
   if (noteLines.length === 0) {
     return null
   }
 
   return ['#+BEGIN_NOTE', ...noteLines, '#+END_NOTE'].join('\n')
+}
+
+export const emitPageSummaryText = (page: SemanticPage): string | null => {
+  const summaryText = normalizeBoundaryBlankLines(
+    getMetadataValue(page, 'summary') ?? '',
+  )
+
+  if (summaryText.length === 0) {
+    return null
+  }
+
+  return ['#+BEGIN_PINNED', summaryText, '#+END_PINNED'].join('\n')
 }
 
 const normalizeBoundaryBlankLines = (value: string) => {
@@ -183,6 +195,7 @@ const emitHighlightBlocks = (page: SemanticPage): EmittedBlock[] =>
 export const emitOrgPage = (page: SemanticPage): EmitResult => {
   const pageProperties = buildPageProperties(page)
   const metadataText = emitMetadataText(pageProperties)
+  const pageSummaryText = emitPageSummaryText(page)
   const pageNoteText = emitPageNoteText(page)
   const highlightBlocks = emitHighlightBlocks(page)
   const highlightTexts = highlightBlocks.map((block) =>
@@ -195,7 +208,7 @@ export const emitOrgPage = (page: SemanticPage): EmitResult => {
       (part): part is string => typeof part === 'string' && part.length > 0,
     )
     .join('\n')
-  const pageContentText = [pageNoteText, bodyText]
+  const pageContentText = [pageSummaryText, pageNoteText, bodyText]
     .filter(
       (part): part is string => typeof part === 'string' && part.length > 0,
     )

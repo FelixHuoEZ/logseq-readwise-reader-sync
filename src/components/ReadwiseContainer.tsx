@@ -1078,6 +1078,156 @@ export const ReadwiseContainer = () => {
     return null
   }
 
+  interface ReaderDocumentRepairLookupIndex {
+    documentCount: number
+    documentIds: Set<string>
+    byNormalizedUrl: Map<string, ReaderDocument[]>
+    byNormalizedTitle: Map<string, ReaderDocument[]>
+  }
+
+  const recordReaderDocumentInRepairLookupIndex = (
+    lookupIndex: ReaderDocumentRepairLookupIndex,
+    document: ReaderDocument | null | undefined,
+  ) => {
+    if (!document?.id || document.parent_id) {
+      return
+    }
+
+    const append = (
+      bucket: Map<string, ReaderDocument[]>,
+      key: string | null,
+      nextDocument: ReaderDocument,
+    ) => {
+      if (!key) return
+      const existing = bucket.get(key) ?? []
+      if (!existing.some((candidate) => candidate.id === nextDocument.id)) {
+        existing.push(nextDocument)
+        bucket.set(key, existing)
+      }
+    }
+
+    if (!lookupIndex.documentIds.has(document.id)) {
+      lookupIndex.documentIds.add(document.id)
+      lookupIndex.documentCount += 1
+    }
+
+    append(
+      lookupIndex.byNormalizedUrl,
+      normalizeComparableUrlV1(document.source_url) ??
+        normalizeComparableUrlV1(document.url),
+      document,
+    )
+    append(
+      lookupIndex.byNormalizedTitle,
+      normalizeComparableText(document.title),
+      document,
+    )
+  }
+
+  const buildReaderDocumentRepairLookupIndex = (
+    documents: readonly ReaderDocument[],
+  ): ReaderDocumentRepairLookupIndex => {
+    const lookupIndex: ReaderDocumentRepairLookupIndex = {
+      documentCount: 0,
+      documentIds: new Set(),
+      byNormalizedUrl: new Map(),
+      byNormalizedTitle: new Map(),
+    }
+
+    for (const document of documents) {
+      recordReaderDocumentInRepairLookupIndex(lookupIndex, document)
+    }
+
+    return lookupIndex
+  }
+
+  const findReplacementReaderParentDocumentFromLookupIndex = ({
+    pageName,
+    rootContent,
+    lookupIndex,
+    logPrefix,
+  }: {
+    pageName: string
+    rootContent: string
+    lookupIndex: ReaderDocumentRepairLookupIndex
+    logPrefix: string
+  }): ReaderParentReplacementLookupResult => {
+    const signals = extractManagedPageRepairSignals({
+      pageName,
+      rootContent,
+    })
+    if (!signals.normalizedLinkUrl && !signals.normalizedPageTitle) {
+      logReadwiseDebug(
+        logPrefix,
+        'repair replacement lookup skipped: insufficient page signals',
+        {
+          pageName,
+        },
+      )
+      return {
+        document: null,
+        shouldRetry: false,
+        reasons: [],
+      }
+    }
+
+    const candidatesById = new Map<string, ReaderDocument>()
+
+    if (signals.normalizedLinkUrl) {
+      for (const document of lookupIndex.byNormalizedUrl.get(
+        signals.normalizedLinkUrl,
+      ) ?? []) {
+        candidatesById.set(document.id, document)
+      }
+    }
+
+    if (signals.normalizedPageTitle) {
+      for (const document of lookupIndex.byNormalizedTitle.get(
+        signals.normalizedPageTitle,
+      ) ?? []) {
+        candidatesById.set(document.id, document)
+      }
+    }
+
+    const matches = [...candidatesById.values()]
+      .map((document) =>
+        scoreReaderDocumentForRepairSignals({
+          document,
+          signals,
+        }),
+      )
+      .filter((match): match is ReaderDocumentRepairMatch => !!match)
+    const replacement = chooseStrongReaderDocumentMatch(matches)
+
+    logReadwiseDebug(
+      logPrefix,
+      'repair replacement lookup completed from cache',
+      {
+        pageName,
+        cachedDocumentCount: lookupIndex.documentCount,
+        candidateCount: candidatesById.size,
+        matchCount: matches.length,
+        replacementReaderDocumentId: replacement?.id ?? null,
+        replacementReason:
+          replacement == null
+            ? null
+            : (matches
+                .find((match) => match.document.id === replacement.id)
+                ?.reasons.join(', ') ?? null),
+      },
+    )
+
+    return {
+      document: replacement,
+      shouldRetry: false,
+      reasons:
+        replacement == null
+          ? []
+          : (matches.find((match) => match.document.id === replacement.id)
+              ?.reasons ?? []),
+    }
+  }
+
   const hasLegacyTweetOnlyLinks = (rootContent: string) =>
     /\[\[[^\]]+\]\[View Tweet\]\]/i.test(rootContent) &&
     !/\[\[[^\]]+\]\[View Highlight\]\]/i.test(rootContent)
@@ -5018,6 +5168,9 @@ export const ReadwiseContainer = () => {
         normalizeReaderCategory(readPagePropertyString(page, 'CATEGORIES')) !==
         'tweet',
     )
+    const replacementLookupIndex = buildReaderDocumentRepairLookupIndex(
+      await previewCache.loadAllCachedParentDocuments(),
+    )
 
     const results = await mapWithConcurrency<
       PageEntity,
@@ -5084,7 +5237,13 @@ export const ReadwiseContainer = () => {
           const cached = (
             await previewCache.getCachedParentDocuments([readerDocumentId])
           ).get(readerDocumentId)
-          if (cached) return cached
+          if (cached) {
+            recordReaderDocumentInRepairLookupIndex(
+              replacementLookupIndex,
+              cached,
+            )
+            return cached
+          }
 
           const loaded = await loadReaderParentDocumentByIdWithRetry(
             client,
@@ -5093,6 +5252,10 @@ export const ReadwiseContainer = () => {
           )
           if (loaded) {
             await previewCache.putParentDocuments([loaded])
+            recordReaderDocumentInRepairLookupIndex(
+              replacementLookupIndex,
+              loaded,
+            )
           }
           return loaded
         }
@@ -5123,11 +5286,10 @@ export const ReadwiseContainer = () => {
 
         if (!resolvedDocument) {
           const replacementLookup =
-            await findReplacementReaderParentDocumentByApi({
-              client,
+            findReplacementReaderParentDocumentFromLookupIndex({
               pageName,
               rootContent: inspection.searchableContent,
-              previewCache,
+              lookupIndex: replacementLookupIndex,
               logPrefix: formalSyncLogPrefix,
             })
           if (replacementLookup.document) {
@@ -5147,7 +5309,7 @@ export const ReadwiseContainer = () => {
               book: pageName,
               message: `Legacy page migration skipped because no non-tweet Reader document could be proved for ${pageName}.`,
               summary:
-                'The page is outside the tweet-only scope, but the plugin still could not prove a unique Reader parent from embedded ids, highlight links, or metadata.',
+                'The page is outside the tweet-only scope, but the plugin still could not prove a unique Reader parent from embedded ids, highlight links, or cached metadata.',
               suggestedAction:
                 'Inspect LINK/AUTHOR/CATEGORIES on the page, or leave it unmanaged until a stronger identity signal is available.',
               debugFacts: [
@@ -8340,7 +8502,7 @@ export const ReadwiseContainer = () => {
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
-    'Preview Legacy Managed Page Migration finds non-tweet legacy pages that are missing rw-reader-id, proves a Reader parent from embedded ids, View Highlight links, or metadata, and previews the bind-and-rename plan before apply.',
+    'Preview Legacy Managed Page Migration finds non-tweet legacy pages that are missing rw-reader-id, proves a Reader parent from embedded ids, View Highlight links, or cached metadata, and previews the bind-and-rename plan before apply.',
     'Cached Full Rebuild now offers two run-time modes: staged first resolves the full page set and then writes it, while streaming resolves one cached parent at a time and writes it immediately. Both reuse the local full-library highlight snapshot, prefer cached parent metadata, and only refetch missing parent metadata from Reader.',
     'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',

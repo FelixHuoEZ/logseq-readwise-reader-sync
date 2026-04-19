@@ -140,7 +140,7 @@ Use the highlight page limit only for short debug runs. Set it back to `0` for r
 - If a damaged page has no `rw-reader-id`, but still has `View Highlight` links, repair re-looks up the parent through the Reader API instead of trusting cache alone.
 - If a damaged page points at a highlight whose original parent metadata is gone, repair scans Reader again for a replacement parent using the page's current metadata.
 - If Reader still does not provide a unique, high-confidence parent, the page stays as an issue instead of being rebound by guesswork.
-- Legacy managed page migration now follows a preview-first flow for non-tweet pages: the plugin proves a Reader parent from embedded ids, `View Highlight` links, or metadata, then previews the `rw-reader-id` bind plus title rename before you confirm the apply step.
+- Legacy managed page migration now follows a preview-first flow for non-tweet pages: the plugin proves a Reader parent from embedded ids, `View Highlight` links, or cached metadata, then previews the `rw-reader-id` bind plus title rename before you confirm the apply step.
 - Legacy block ref migration now follows a preview-first flow: the plugin lists every planned `((block ref))` rewrite before you confirm the apply step.
 - Current-page legacy id migration also follows a preview-first flow and rewrites only the current page or whiteboard. It updates proven Readwise legacy ids in `((block refs))`, whiteboard embeds, and `:refdock-item-id:` values, then shows a dedicated apply summary after the rewrite completes.
 

@@ -104,6 +104,7 @@ type ReaderSyncEtaPhase =
   | 'write-pages'
 type ReaderSyncMode = ReaderPreviewLoadMode
 type ReaderSyncRunTrigger = 'manual' | 'auto'
+type CachedRebuildExecutionMode = 'staged' | 'streaming'
 
 interface ReaderSyncEtaSample {
   msPerUnit: number
@@ -3728,9 +3729,12 @@ export const ReadwiseContainer = () => {
     })
   }
 
-  const handleCachedFullRebuild = async () => {
+  const handleCachedFullRebuild = async (
+    executionMode: CachedRebuildExecutionMode = 'staged',
+  ) => {
     setCacheSummaryResult(null)
     const conflicts = await detectFormalSyncConflicts()
+    const statusPrefix = buildCachedRebuildStatusPrefix(executionMode)
     if (conflicts != null) {
       setShowMaintenanceTools(true)
       const summary = formatManagedPageConflictSummary(conflicts)
@@ -3743,7 +3747,7 @@ export const ReadwiseContainer = () => {
         ),
       )
       setRunIssueContext({
-        modeLabel: 'Cached rebuild',
+        modeLabel: statusPrefix,
         namespacePrefix: formalNamespaceRoot,
         logLevel: String(logseq.settings?.logLevel ?? 'warn'),
         statusMessage: '',
@@ -3759,7 +3763,7 @@ export const ReadwiseContainer = () => {
       setTotal(0)
       setCurrentBook('')
       setStatusMessage(
-        `Cached rebuild blocked to avoid duplicate block UUIDs. ${summary}.`,
+        `${statusPrefix} blocked to avoid duplicate block UUIDs. ${summary}.`,
       )
       return
     }
@@ -3767,10 +3771,11 @@ export const ReadwiseContainer = () => {
     await runReaderManagedSync({
       namespacePrefix: formalNamespaceRoot,
       logPrefix: formalSyncLogPrefix,
-      statusPrefix: 'Cached rebuild',
+      statusPrefix,
       syncHeaderMode: 'formal',
       mode: 'cached-full-rebuild',
       runTrigger: 'manual',
+      cachedRebuildExecutionMode: executionMode,
     })
   }
 
@@ -5515,6 +5520,7 @@ export const ReadwiseContainer = () => {
     resumeState,
     automaticResumeAttempt = 0,
     runStartedAtMs,
+    cachedRebuildExecutionMode = 'staged',
   }: {
     namespacePrefix: string
     logPrefix: string
@@ -5525,6 +5531,7 @@ export const ReadwiseContainer = () => {
     resumeState?: ReaderPreviewLoadResumeState
     automaticResumeAttempt?: number
     runStartedAtMs?: number
+    cachedRebuildExecutionMode?: CachedRebuildExecutionMode
   }) => {
     const token = logseq.settings?.apiToken as string
     if (!token) {
@@ -5539,6 +5546,9 @@ export const ReadwiseContainer = () => {
       mode === 'full-library-scan' || mode === 'cached-full-rebuild'
         ? resolveConfiguredReaderFullScanTargetDocuments()
         : null
+    const isStreamingCachedRebuild =
+      mode === 'cached-full-rebuild' &&
+      cachedRebuildExecutionMode === 'streaming'
     const previousFormalSummary =
       syncHeaderMode === 'formal' ? await loadGraphLastFormalSyncSummaryV1() : null
     const debugHighlightPageLimit =
@@ -5610,6 +5620,7 @@ export const ReadwiseContainer = () => {
           syncHeaderMode,
           mode,
           runTrigger,
+          cachedRebuildExecutionMode,
         }),
     }
     clearRunIssues()
@@ -5637,7 +5648,9 @@ export const ReadwiseContainer = () => {
             readerSyncUpdatedAfter,
           )} and grouping changed parent documents (${debugCapSummary || 'no debug cap'})...`
         : mode === 'cached-full-rebuild'
-          ? `${statusPrefix}: loading the local Reader highlight snapshot and rebuilding cached parent groups...`
+          ? isStreamingCachedRebuild
+            ? `${statusPrefix}: loading the local Reader highlight snapshot and preparing per-page streaming rebuild targets...`
+            : `${statusPrefix}: loading the local Reader highlight snapshot and rebuilding cached parent groups...`
           : mode === 'snapshot-only-refresh'
             ? `${statusPrefix}: full-scanning Reader highlights and rebuilding the local snapshot only (${debugCapSummary || 'no debug cap'}). Managed pages will not be rewritten.`
           : `${statusPrefix}: full-scanning Reader highlights and grouping by parent_id (${targetDocumentsSummary}${debugCapSummary})...`,
@@ -5729,137 +5742,210 @@ export const ReadwiseContainer = () => {
         'fetch-highlights',
         mode === 'cached-full-rebuild' ? 'cached highlight snapshot' : 'highlight scan',
       )
-      const previewLoadResult = await loadReaderPreviewBooks(client, {
-        maxDocuments:
-          mode === 'full-library-scan' || mode === 'cached-full-rebuild'
-            ? targetDocuments
-            : undefined,
-        mode,
-        maxHighlightPages: debugHighlightPageLimit ?? undefined,
-        updatedAfter: readerSyncUpdatedAfter ?? undefined,
-        resumeState,
-        previewCache,
-        parentMetadataMode:
-          mode === 'incremental-window' || mode === 'cached-full-rebuild'
-            ? 'cache_first'
-            : 'always_refresh',
-        readerAuthToken: token,
-        logPrefix,
-        throwIfCancelled,
-        onProgress: (progress) => {
-          if (cancelledRef.current) return
+      let previewBooks: ReaderPreviewBook[] = []
+      let cachedRebuildStreamingParentIds: string[] = []
 
-          if (progress.phase === 'fetch-highlights') {
-            const uniqueParents = progress.uniqueParents ?? 0
+      if (isStreamingCachedRebuild) {
+        const fetchHighlightsStartedAt = Date.now()
+        if (!previewCache) {
+          throw new Error('Cached rebuild requires local Reader cache support.')
+        }
 
-            if (mode === 'cached-full-rebuild') {
+        const cacheState = await previewCache.getHighlightCacheState()
+        if (!cacheState?.hasFullLibrarySnapshot) {
+          throw new Error(
+            'Cached rebuild requires a successful Full Reconcile first to build a complete local highlight snapshot.',
+          )
+        }
+
+        const cachedHighlightsByParent = await previewCache.loadGroupedHighlightsByParent()
+        const sortedCachedParentEntries = [...cachedHighlightsByParent.entries()]
+          .filter(([, highlights]) => highlights.length > 0)
+          .sort((left, right) => {
+            const leftLatest =
+              left[1].reduce<string | null>(
+                (latest, highlight) =>
+                  latest == null || highlight.updated_at > latest
+                    ? highlight.updated_at
+                    : latest,
+                null,
+              ) ?? ''
+            const rightLatest =
+              right[1].reduce<string | null>(
+                (latest, highlight) =>
+                  latest == null || highlight.updated_at > latest
+                    ? highlight.updated_at
+                    : latest,
+                null,
+              ) ?? ''
+
+            return rightLatest.localeCompare(leftLatest)
+          })
+        const cachedHighlightCount = sortedCachedParentEntries.reduce(
+          (sum, [, highlights]) => sum + highlights.length,
+          0,
+        )
+
+        cachedRebuildStreamingParentIds = sortedCachedParentEntries.map(
+          ([parentId]) => parentId,
+        )
+        loadStats = {
+          ...loadStats,
+          highlightsScanned: cachedHighlightCount,
+          parentDocumentsIdentified: cachedRebuildStreamingParentIds.length,
+          pagesTargeted: cachedRebuildStreamingParentIds.length,
+          latestHighlightUpdatedAt: cacheState.latestHighlightUpdatedAt,
+          usedCachedHighlightSnapshot: true,
+          staleHighlightDeletionRisk: cacheState.staleDeletionRisk,
+          fetchHighlightsDurationMs: Date.now() - fetchHighlightsStartedAt,
+        }
+
+        setStatus('fetching')
+        setCurrent(cachedRebuildStreamingParentIds.length > 0 ? 1 : 0)
+        setTotal(cachedRebuildStreamingParentIds.length > 0 ? 1 : 0)
+        setCurrentBook('')
+        updateReaderSyncEta(
+          'fetch-highlights',
+          'cached highlight snapshot',
+          cachedRebuildStreamingParentIds.length > 0 ? 1 : 0,
+          cachedRebuildStreamingParentIds.length > 0 ? 1 : 0,
+        )
+        setStatusMessage(
+          `${statusPrefix}: loaded ${cachedRebuildStreamingParentIds.length} cached parent document(s) from ${cachedHighlightCount} cached highlight(s).`,
+        )
+      } else {
+        const previewLoadResult = await loadReaderPreviewBooks(client, {
+          maxDocuments:
+            mode === 'full-library-scan' || mode === 'cached-full-rebuild'
+              ? targetDocuments
+              : undefined,
+          mode,
+          maxHighlightPages: debugHighlightPageLimit ?? undefined,
+          updatedAfter: readerSyncUpdatedAfter ?? undefined,
+          resumeState,
+          previewCache,
+          parentMetadataMode:
+            mode === 'incremental-window' || mode === 'cached-full-rebuild'
+              ? 'cache_first'
+              : 'always_refresh',
+          readerAuthToken: token,
+          logPrefix,
+          throwIfCancelled,
+          onProgress: (progress) => {
+            if (cancelledRef.current) return
+
+            if (progress.phase === 'fetch-highlights') {
+              const uniqueParents = progress.uniqueParents ?? 0
+
+              if (mode === 'cached-full-rebuild') {
+                setStatus('fetching')
+                setCurrent(1)
+                setTotal(1)
+                setCurrentBook('')
+                updateReaderSyncEta(
+                  'fetch-highlights',
+                  'cached highlight snapshot',
+                  1,
+                  1,
+                )
+                setStatusMessage(
+                  `${statusPrefix}: loaded ${uniqueParents} cached parent document(s) from ${progress.totalHighlights ?? 0} cached highlight(s).`,
+                )
+                return
+              }
+
+              const totalPages = progress.totalPages ?? progress.pageNumber ?? 0
               setStatus('fetching')
-              setCurrent(1)
-              setTotal(1)
+              setCurrent(progress.pageNumber ?? 0)
+              setTotal(totalPages)
               setCurrentBook('')
               updateReaderSyncEta(
                 'fetch-highlights',
-                'cached highlight snapshot',
-                1,
-                1,
+                'highlight scan',
+                progress.pageNumber ?? 0,
+                totalPages,
               )
               setStatusMessage(
-                `${statusPrefix}: loaded ${uniqueParents} cached parent document(s) from ${progress.totalHighlights ?? 0} cached highlight(s).`,
+                mode === 'incremental-window'
+                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s) ${buildReaderSyncUpdatedAfterSummary(
+                      readerSyncUpdatedAfter,
+                    )}, identified ${uniqueParents} changed parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`
+                  : mode === 'snapshot-only-refresh'
+                    ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s) and identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s). Preparing the local snapshot refresh. No page writes will run.`
+                    : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`,
               )
               return
             }
 
-            const totalPages = progress.totalPages ?? progress.pageNumber ?? 0
-            setStatus('fetching')
-            setCurrent(progress.pageNumber ?? 0)
-            setTotal(totalPages)
-            setCurrentBook('')
+            if (progress.phase === 'fetch-notes') {
+              const uniqueParents = progress.uniqueParents ?? 0
+              const totalPages = progress.totalPages ?? progress.pageNumber ?? 0
+              setStatus('fetching')
+              setCurrent(progress.pageNumber ?? 0)
+              setTotal(totalPages)
+              setCurrentBook('')
+              updateReaderSyncEta(
+                'fetch-notes',
+                'note scan',
+                progress.pageNumber ?? 0,
+                totalPages,
+              )
+              setStatusMessage(
+                mode === 'incremental-window'
+                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s) ${buildReaderSyncUpdatedAfterSummary(
+                      readerSyncUpdatedAfter,
+                    )}, attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} changed parent document(s).`
+                  : mode === 'snapshot-only-refresh'
+                    ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s) and attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s). Finalizing the local snapshot refresh. No page writes will run.`
+                    : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s), attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s).`,
+              )
+              return
+            }
+
+            if (progress.phase === 'refresh-snapshot') {
+              const uniqueParents = progress.uniqueParents ?? 0
+              const completed = progress.completed ?? 0
+              const total = progress.total ?? 0
+              setStatus('fetching')
+              setCurrent(completed)
+              setTotal(total)
+              setCurrentBook('')
+              updateReaderSyncEta(
+                'refresh-snapshot',
+                'snapshot refresh',
+                completed,
+                total,
+              )
+              setStatusMessage(
+                mode === 'snapshot-only-refresh'
+                  ? `${statusPrefix}: attaching ${progress.totalNotes ?? 0} comment(s) back onto ${uniqueParents} parent document(s) and refreshing the local snapshot... ${completed} / ${total}. No page writes will run.`
+                  : `${statusPrefix}: attaching ${progress.totalNotes ?? 0} comment(s) back onto ${uniqueParents} parent document(s) and finalizing the Reader highlight cache... ${completed} / ${total}.`,
+              )
+              return
+            }
+
+            setStatus('syncing')
+            setCurrent(progress.completed ?? 0)
+            setTotal(progress.total ?? 0)
+            setCurrentBook(progress.pageTitle ?? '')
             updateReaderSyncEta(
-              'fetch-highlights',
-              'highlight scan',
-              progress.pageNumber ?? 0,
-              totalPages,
+              'fetch-documents',
+              'parent document fetch',
+              progress.completed ?? 0,
+              progress.total ?? 0,
             )
             setStatusMessage(
-              mode === 'incremental-window'
-                ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s) ${buildReaderSyncUpdatedAfterSummary(
-                    readerSyncUpdatedAfter,
-                  )}, identified ${uniqueParents} changed parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`
-                : mode === 'snapshot-only-refresh'
-                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s) and identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s). Preparing the local snapshot refresh. No page writes will run.`
-                  : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} highlight page(s), identified ${uniqueParents} parent document(s) from ${progress.totalHighlights ?? 0} highlight(s).`,
+              mode === 'cached-full-rebuild'
+                ? `${statusPrefix}: resolving cached Reader parent metadata first, then filling any misses from Reader... ${progress.completed ?? 0} / ${progress.total ?? 0}.`
+                : `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? 0}.`,
             )
-            return
-          }
-
-          if (progress.phase === 'fetch-notes') {
-            const uniqueParents = progress.uniqueParents ?? 0
-            const totalPages = progress.totalPages ?? progress.pageNumber ?? 0
-            setStatus('fetching')
-            setCurrent(progress.pageNumber ?? 0)
-            setTotal(totalPages)
-            setCurrentBook('')
-            updateReaderSyncEta(
-              'fetch-notes',
-              'note scan',
-              progress.pageNumber ?? 0,
-              totalPages,
-            )
-            setStatusMessage(
-              mode === 'incremental-window'
-                ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s) ${buildReaderSyncUpdatedAfterSummary(
-                    readerSyncUpdatedAfter,
-                  )}, attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} changed parent document(s).`
-                : mode === 'snapshot-only-refresh'
-                  ? `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s) and attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s). Finalizing the local snapshot refresh. No page writes will run.`
-                  : `${statusPrefix}: scanned ${progress.pageNumber ?? 0} / ${totalPages} note page(s), attached ${progress.totalNotes ?? 0} comment(s) to ${uniqueParents} parent document(s).`,
-            )
-            return
-          }
-
-          if (progress.phase === 'refresh-snapshot') {
-            const uniqueParents = progress.uniqueParents ?? 0
-            const completed = progress.completed ?? 0
-            const total = progress.total ?? 0
-            setStatus('fetching')
-            setCurrent(completed)
-            setTotal(total)
-            setCurrentBook('')
-            updateReaderSyncEta(
-              'refresh-snapshot',
-              'snapshot refresh',
-              completed,
-              total,
-            )
-            setStatusMessage(
-              mode === 'snapshot-only-refresh'
-                ? `${statusPrefix}: attaching ${progress.totalNotes ?? 0} comment(s) back onto ${uniqueParents} parent document(s) and refreshing the local snapshot... ${completed} / ${total}. No page writes will run.`
-                : `${statusPrefix}: attaching ${progress.totalNotes ?? 0} comment(s) back onto ${uniqueParents} parent document(s) and finalizing the Reader highlight cache... ${completed} / ${total}.`,
-            )
-            return
-          }
-
-          setStatus('syncing')
-          setCurrent(progress.completed ?? 0)
-          setTotal(progress.total ?? 0)
-          setCurrentBook(progress.pageTitle ?? '')
-          updateReaderSyncEta(
-            'fetch-documents',
-            'parent document fetch',
-            progress.completed ?? 0,
-            progress.total ?? 0,
-          )
-          setStatusMessage(
-            mode === 'cached-full-rebuild'
-              ? `${statusPrefix}: resolving cached Reader parent metadata first, then filling any misses from Reader... ${progress.completed ?? 0} / ${progress.total ?? 0}.`
-              : `${statusPrefix}: resolving Reader parent documents... ${progress.completed ?? 0} / ${progress.total ?? 0}.`,
-          )
-        },
-      })
-      let previewBooks = previewLoadResult.books
-      loadStats = {
-        ...previewLoadResult.stats,
-        pagesProcessed: 0,
+          },
+        })
+        previewBooks = previewLoadResult.books
+        loadStats = {
+          ...previewLoadResult.stats,
+          pagesProcessed: 0,
+        }
       }
       logReadwiseInfo(logPrefix, 'fetch timing diagnostics', {
         estimatedHighlightPages: loadStats.estimatedHighlightPages,
@@ -5917,76 +6003,101 @@ export const ReadwiseContainer = () => {
         syncHeaderMode === 'formal' && mode !== 'snapshot-only-refresh'
           ? [...queuedRetryEntriesByDocumentId.keys()].filter(
               (readerDocumentId) =>
-                !previewBooks.some((previewBook) => previewBook.document.id === readerDocumentId),
+                isStreamingCachedRebuild
+                  ? !cachedRebuildStreamingParentIds.includes(readerDocumentId)
+                  : !previewBooks.some(
+                      (previewBook) => previewBook.document.id === readerDocumentId,
+                    ),
             )
           : []
 
       if (queuedRetryParentIdsToReload.length > 0) {
-        try {
-          setStatusMessage(
-            `${statusPrefix}: reloading ${queuedRetryParentIdsToReload.length} queued retry page(s) from the local Reader cache...`,
-          )
-
-          const queuedRetryLoadResult = await loadReaderPreviewBooksByParentIds(client, {
-            parentIds: queuedRetryParentIdsToReload,
-            previewCache,
-            parentMetadataMode: 'cache_first',
-            readerAuthToken: token,
+        if (isStreamingCachedRebuild) {
+          cachedRebuildStreamingParentIds = [
+            ...cachedRebuildStreamingParentIds,
+            ...queuedRetryParentIdsToReload,
+          ]
+          loadStats.pagesTargeted = cachedRebuildStreamingParentIds.length
+          logReadwiseInfo(
             logPrefix,
-            highlightCoverage: 'cached-full-rebuild',
-            throwIfCancelled,
-          })
-
-          if (queuedRetryLoadResult.books.length > 0) {
-            previewBooks = [...previewBooks, ...queuedRetryLoadResult.books]
-            loadStats.pagesTargeted += queuedRetryLoadResult.books.length
-            loadStats.parentMetadataCacheHits +=
-              queuedRetryLoadResult.parentMetadataCacheHits
-            loadStats.parentMetadataRemoteFetches +=
-              queuedRetryLoadResult.parentMetadataRemoteFetches
-            loadStats.parentMetadataCacheFallbacks +=
-              queuedRetryLoadResult.parentMetadataCacheFallbacks
-            loadStats.documentHighlightDetailCalls +=
-              queuedRetryLoadResult.documentHighlightDetailCalls
-            loadStats.documentHighlightDetailSkippedNoParentMetadata +=
-              queuedRetryLoadResult.documentHighlightDetailSkippedNoParentMetadata
-            loadStats.documentHighlightDetailSkippedNoRichMedia +=
-              queuedRetryLoadResult.documentHighlightDetailSkippedNoRichMedia
-            loadStats.documentHighlightDetailSkippedVideo +=
-              queuedRetryLoadResult.documentHighlightDetailSkippedVideo
-            loadStats.documentHighlightDetailSkippedResolved +=
-              queuedRetryLoadResult.documentHighlightDetailSkippedResolved
-            loadStats.documentHighlightDetailMissingInReader +=
-              queuedRetryLoadResult.documentHighlightDetailMissingInReader
-            loadStats.documentHighlightDetailOutcomes.push(
-              ...queuedRetryLoadResult.documentHighlightDetailOutcomes,
-            )
-            loadStats.fetchDocumentsDurationMs +=
-              queuedRetryLoadResult.fetchDocumentsDurationMs
-          }
-
-          logReadwiseInfo(logPrefix, 'merged queued retry pages into sync target set', {
-            queuedRetryEntries: queuedRetryEntriesByDocumentId.size,
-            queuedRetryPagesRequested: queuedRetryParentIdsToReload.length,
-            queuedRetryPagesLoaded: queuedRetryLoadResult.books.length,
-            unresolvedQueuedRetryPages:
-              queuedRetryLoadResult.unresolvedParentIds.length,
-            unresolvedQueuedRetryPageIds:
-              queuedRetryLoadResult.unresolvedParentIds,
-          })
-        } catch (error) {
-          logReadwiseWarn(
-            logPrefix,
-            'failed to reload queued retry pages; continuing without them',
+            'appended queued retry pages to streaming cached rebuild target set',
             {
-              queuedRetryEntries: queuedRetryParentIdsToReload.length,
-              formattedError: describeUnknownError(error),
+              queuedRetryEntries: queuedRetryEntriesByDocumentId.size,
+              queuedRetryPagesRequested: queuedRetryParentIdsToReload.length,
+              targetPagesAfterMerge: cachedRebuildStreamingParentIds.length,
             },
           )
+        } else {
+          try {
+            setStatusMessage(
+              `${statusPrefix}: reloading ${queuedRetryParentIdsToReload.length} queued retry page(s) from the local Reader cache...`,
+            )
+
+            const queuedRetryLoadResult = await loadReaderPreviewBooksByParentIds(client, {
+              parentIds: queuedRetryParentIdsToReload,
+              previewCache,
+              parentMetadataMode: 'cache_first',
+              readerAuthToken: token,
+              logPrefix,
+              highlightCoverage: 'cached-full-rebuild',
+              throwIfCancelled,
+            })
+
+            if (queuedRetryLoadResult.books.length > 0) {
+              previewBooks = [...previewBooks, ...queuedRetryLoadResult.books]
+              loadStats.pagesTargeted += queuedRetryLoadResult.books.length
+              loadStats.parentMetadataCacheHits +=
+                queuedRetryLoadResult.parentMetadataCacheHits
+              loadStats.parentMetadataRemoteFetches +=
+                queuedRetryLoadResult.parentMetadataRemoteFetches
+              loadStats.parentMetadataCacheFallbacks +=
+                queuedRetryLoadResult.parentMetadataCacheFallbacks
+              loadStats.documentHighlightDetailCalls +=
+                queuedRetryLoadResult.documentHighlightDetailCalls
+              loadStats.documentHighlightDetailSkippedNoParentMetadata +=
+                queuedRetryLoadResult.documentHighlightDetailSkippedNoParentMetadata
+              loadStats.documentHighlightDetailSkippedNoRichMedia +=
+                queuedRetryLoadResult.documentHighlightDetailSkippedNoRichMedia
+              loadStats.documentHighlightDetailSkippedVideo +=
+                queuedRetryLoadResult.documentHighlightDetailSkippedVideo
+              loadStats.documentHighlightDetailSkippedResolved +=
+                queuedRetryLoadResult.documentHighlightDetailSkippedResolved
+              loadStats.documentHighlightDetailMissingInReader +=
+                queuedRetryLoadResult.documentHighlightDetailMissingInReader
+              loadStats.documentHighlightDetailOutcomes.push(
+                ...queuedRetryLoadResult.documentHighlightDetailOutcomes,
+              )
+              loadStats.fetchDocumentsDurationMs +=
+                queuedRetryLoadResult.fetchDocumentsDurationMs
+            }
+
+            logReadwiseInfo(logPrefix, 'merged queued retry pages into sync target set', {
+              queuedRetryEntries: queuedRetryEntriesByDocumentId.size,
+              queuedRetryPagesRequested: queuedRetryParentIdsToReload.length,
+              queuedRetryPagesLoaded: queuedRetryLoadResult.books.length,
+              unresolvedQueuedRetryPages:
+                queuedRetryLoadResult.unresolvedParentIds.length,
+              unresolvedQueuedRetryPageIds:
+                queuedRetryLoadResult.unresolvedParentIds,
+            })
+          } catch (error) {
+            logReadwiseWarn(
+              logPrefix,
+              'failed to reload queued retry pages; continuing without them',
+              {
+                queuedRetryEntries: queuedRetryParentIdsToReload.length,
+                formattedError: describeUnknownError(error),
+              },
+            )
+          }
         }
       }
 
       if (cancelledRef.current) return
+
+      const plannedWriteCount = isStreamingCachedRebuild
+        ? cachedRebuildStreamingParentIds.length
+        : previewBooks.length
 
       if (mode === 'snapshot-only-refresh') {
         if (syncHeaderMode === 'formal') {
@@ -6132,7 +6243,7 @@ export const ReadwiseContainer = () => {
         return
       }
 
-      if (previewBooks.length === 0) {
+      if (plannedWriteCount === 0) {
         if (syncHeaderMode === 'formal') {
           const summary: GraphLastFormalSyncSummaryV1 = {
             schemaVersion: 1,
@@ -6238,7 +6349,7 @@ export const ReadwiseContainer = () => {
       const writeGuard = buildManagedSyncWriteGuard({
         mode,
         runTrigger,
-        pagesTargeted: previewBooks.length,
+        pagesTargeted: plannedWriteCount,
         loadStats,
         usedCursorFallback,
         previousFormalSummary,
@@ -6251,7 +6362,7 @@ export const ReadwiseContainer = () => {
           {
             mode,
             runTrigger,
-            pagesTargeted: previewBooks.length,
+            pagesTargeted: plannedWriteCount,
             highlightPagesScanned: loadStats.highlightPagesScanned,
             highlightsScanned: loadStats.highlightsScanned,
             usedCursorFallback,
@@ -6264,7 +6375,7 @@ export const ReadwiseContainer = () => {
         const confirmMessage =
           runTrigger === 'auto'
             ? [
-                `Auto Sync paused before writing ${previewBooks.length} page(s).`,
+                `Auto Sync paused before writing ${plannedWriteCount} page(s).`,
                 '',
                 `Reason: ${reasonSummary}.`,
                 `Highlights scanned: ${loadStats.highlightsScanned}.`,
@@ -6274,7 +6385,7 @@ export const ReadwiseContainer = () => {
                 'Press Cancel to skip this automatic run.',
               ].join('\n')
             : [
-                `${statusPrefix} is about to write ${previewBooks.length} page(s).`,
+                `${statusPrefix} is about to write ${plannedWriteCount} page(s).`,
                 '',
                 `Reason: ${reasonSummary}.`,
                 `Highlights scanned: ${loadStats.highlightsScanned}.`,
@@ -6286,7 +6397,7 @@ export const ReadwiseContainer = () => {
         logReadwiseWarn(logPrefix, 'managed sync is awaiting write confirmation', {
           mode,
           runTrigger,
-          pagesTargeted: previewBooks.length,
+          pagesTargeted: plannedWriteCount,
           reasonSummary,
           usedCursorFallback,
           highlightPagesScanned: loadStats.highlightPagesScanned,
@@ -6295,12 +6406,12 @@ export const ReadwiseContainer = () => {
           previousFormalSummaryErrorCount: previousFormalSummary?.errorCount ?? null,
         })
         setStatusMessage(
-          `${statusPrefix}: waiting for confirmation before writing ${previewBooks.length} page(s).`,
+          `${statusPrefix}: waiting for confirmation before writing ${plannedWriteCount} page(s).`,
         )
         if (runTrigger === 'auto') {
           lastAutoSyncPromptAtRef.current = Date.now()
           await logseq.UI.showMsg(
-            `Auto Sync paused because ${previewBooks.length} page(s) would be rewritten. Review the confirmation dialog before continuing.`,
+            `Auto Sync paused because ${plannedWriteCount} page(s) would be rewritten. Review the confirmation dialog before continuing.`,
             'warning',
           )
         }
@@ -6333,7 +6444,7 @@ export const ReadwiseContainer = () => {
                     highlightPagesScanned: loadStats.highlightPagesScanned,
                     highlightsScanned: loadStats.highlightsScanned,
                     parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
-                    pagesTargeted: previewBooks.length,
+                    pagesTargeted: plannedWriteCount,
                     pagesProcessed: 0,
                     fetchHighlightsDurationMs: loadStats.fetchHighlightsDurationMs,
                     fetchDocumentsDurationMs: loadStats.fetchDocumentsDurationMs,
@@ -6343,23 +6454,25 @@ export const ReadwiseContainer = () => {
           )
           setStatusMessage(
             runTrigger === 'auto'
-              ? `Auto Sync skipped before page writes because ${previewBooks.length} page(s) required confirmation.`
-              : `${statusPrefix}: cancelled before writing ${previewBooks.length} page(s).`,
+              ? `Auto Sync skipped before page writes because ${plannedWriteCount} page(s) required confirmation.`
+              : `${statusPrefix}: cancelled before writing ${plannedWriteCount} page(s).`,
           )
           return
         }
       }
 
       setCurrent(0)
-      setTotal(previewBooks.length)
+      setTotal(plannedWriteCount)
       setCurrentBook('')
       beginReaderSyncEtaPhase('write-pages', 'page writes')
       setStatusMessage(
         mode === 'incremental-window'
-          ? `${statusPrefix}: syncing ${previewBooks.length} changed Reader page(s) into ${namespacePrefix}...`
+          ? `${statusPrefix}: syncing ${plannedWriteCount} changed Reader page(s) into ${namespacePrefix}...`
           : mode === 'cached-full-rebuild'
-            ? `${statusPrefix}: syncing ${previewBooks.length} Reader page(s) from the cached highlight snapshot into ${namespacePrefix}...`
-            : `${statusPrefix}: syncing ${previewBooks.length} Reader page(s) from full-library highlight groups into ${namespacePrefix}...`,
+            ? isStreamingCachedRebuild
+              ? `${statusPrefix}: syncing ${plannedWriteCount} Reader page(s) from the cached highlight snapshot into ${namespacePrefix}, resolving and writing one parent at a time...`
+              : `${statusPrefix}: syncing ${plannedWriteCount} Reader page(s) from the cached highlight snapshot into ${namespacePrefix}...`
+            : `${statusPrefix}: syncing ${plannedWriteCount} Reader page(s) from full-library highlight groups into ${namespacePrefix}...`,
       )
       const writePagesStartedAt = Date.now()
       let currentOpenManagedPage =
@@ -6368,10 +6481,11 @@ export const ReadwiseContainer = () => {
           : null
       let lastProtectedPageSampleAt = Date.now()
 
-      for (let index = 0; index < previewBooks.length; index += 1) {
-        if (cancelledRef.current) return
-
-        const previewBook = previewBooks[index]!
+      const syncPreviewBook = async (
+        previewBook: ReaderPreviewBook,
+        index: number,
+        totalCount: number,
+      ) => {
         const pageTitle = previewBook.document.title ?? previewBook.document.id
         setCurrentBook(pageTitle)
 
@@ -6430,7 +6544,7 @@ export const ReadwiseContainer = () => {
                 observedAt: observedAtLabel,
               },
             )
-            continue
+            return
           }
         }
 
@@ -6509,8 +6623,145 @@ export const ReadwiseContainer = () => {
           'write-pages',
           'page writes',
           index + 1,
-          previewBooks.length,
+          totalCount,
         )
+      }
+
+      if (isStreamingCachedRebuild) {
+        for (let index = 0; index < cachedRebuildStreamingParentIds.length; index += 1) {
+          if (cancelledRef.current) return
+
+          const parentId = cachedRebuildStreamingParentIds[index]!
+          const existingRetryEntry = queuedRetryEntriesByDocumentId.get(parentId)
+          setCurrentBook('')
+          setStatusMessage(
+            `${statusPrefix}: resolving cached Reader parent ${index + 1} / ${plannedWriteCount} before writing...`,
+          )
+
+          try {
+            const streamingLoadResult = await loadReaderPreviewBooksByParentIds(client, {
+              parentIds: [parentId],
+              previewCache,
+              parentMetadataMode: 'cache_first',
+              readerAuthToken: token,
+              logPrefix,
+              highlightCoverage: 'cached-full-rebuild',
+              throwIfCancelled,
+            })
+
+            loadStats.parentMetadataCacheHits +=
+              streamingLoadResult.parentMetadataCacheHits
+            loadStats.parentMetadataRemoteFetches +=
+              streamingLoadResult.parentMetadataRemoteFetches
+            loadStats.parentMetadataCacheFallbacks +=
+              streamingLoadResult.parentMetadataCacheFallbacks
+            loadStats.documentHighlightDetailCalls +=
+              streamingLoadResult.documentHighlightDetailCalls
+            loadStats.documentHighlightDetailSkippedNoParentMetadata +=
+              streamingLoadResult.documentHighlightDetailSkippedNoParentMetadata
+            loadStats.documentHighlightDetailSkippedNoRichMedia +=
+              streamingLoadResult.documentHighlightDetailSkippedNoRichMedia
+            loadStats.documentHighlightDetailSkippedVideo +=
+              streamingLoadResult.documentHighlightDetailSkippedVideo
+            loadStats.documentHighlightDetailSkippedResolved +=
+              streamingLoadResult.documentHighlightDetailSkippedResolved
+            loadStats.documentHighlightDetailMissingInReader +=
+              streamingLoadResult.documentHighlightDetailMissingInReader
+            loadStats.documentHighlightDetailOutcomes.push(
+              ...streamingLoadResult.documentHighlightDetailOutcomes,
+            )
+            loadStats.fetchDocumentsDurationMs +=
+              streamingLoadResult.fetchDocumentsDurationMs
+
+            if (streamingLoadResult.unresolvedParentIds.length > 0) {
+              logReadwiseWarn(
+                logPrefix,
+                'streaming cached rebuild could not resolve one or more parent documents',
+                {
+                  requestedParentId: parentId,
+                  unresolvedParentIds: streamingLoadResult.unresolvedParentIds,
+                },
+              )
+            }
+
+            const previewBook = streamingLoadResult.books[0] ?? null
+            if (previewBook == null) {
+              logReadwiseWarn(
+                logPrefix,
+                'no preview book was produced for streaming cached rebuild target',
+                {
+                  requestedParentId: parentId,
+                  unresolvedParentIds: streamingLoadResult.unresolvedParentIds,
+                },
+              )
+              setCurrent(index + 1)
+              updateReaderSyncEta(
+                'write-pages',
+                'page writes',
+                index + 1,
+                plannedWriteCount,
+              )
+              continue
+            }
+
+            previewBooks.push(previewBook)
+            setStatusMessage(
+              `${statusPrefix}: syncing ${index + 1} / ${plannedWriteCount} Reader page(s) from the cached highlight snapshot into ${namespacePrefix}...`,
+            )
+            await syncPreviewBook(previewBook, index, plannedWriteCount)
+          } catch (err: unknown) {
+            const message = describeUnknownError(err)
+            const pageTitle =
+              existingRetryEntry?.pageName ?? `Cached parent ${parentId}`
+            logReadwiseError(
+              logPrefix,
+              'failed to resolve cached Reader parent during streaming rebuild',
+              {
+                pageTitle,
+                readerDocumentId: parentId,
+                namespacePrefix,
+                formattedError: message,
+                error: err,
+              },
+            )
+            const issue = diagnoseRunIssue({
+              book: pageTitle,
+              message,
+              readerDocumentId: parentId,
+              namespacePrefix,
+              pageName: existingRetryEntry?.pageName ?? null,
+            })
+            syncErrorsForRun.push(issue)
+            if (shouldRunIssueBlockReaderSyncCursor(issue)) {
+              blockingSyncErrorsForRun.push(issue)
+            } else if (syncHeaderMode === 'formal') {
+              const now = new Date().toISOString()
+              queuedRetryEntriesToUpsert.set(parentId, {
+                readerDocumentId: parentId,
+                pageName: existingRetryEntry?.pageName ?? pageTitle,
+                category: issue.category,
+                message: issue.message,
+                queuedAt: existingRetryEntry?.queuedAt ?? now,
+                lastSeenAt: now,
+              })
+            }
+            appendRunIssue(issue)
+            setCurrent(index + 1)
+            updateReaderSyncEta(
+              'write-pages',
+              'page writes',
+              index + 1,
+              plannedWriteCount,
+            )
+          }
+        }
+      } else {
+        for (let index = 0; index < previewBooks.length; index += 1) {
+          if (cancelledRef.current) return
+
+          const previewBook = previewBooks[index]!
+          await syncPreviewBook(previewBook, index, previewBooks.length)
+        }
       }
       writePagesDurationMs = Date.now() - writePagesStartedAt
 
@@ -6864,6 +7115,7 @@ export const ReadwiseContainer = () => {
             resumeState: err.resumeState,
             automaticResumeAttempt: automaticResumeAttempt + 1,
             runStartedAtMs: runStartedAt,
+            cachedRebuildExecutionMode,
           })
           return
         }
@@ -6881,6 +7133,7 @@ export const ReadwiseContainer = () => {
               runTrigger,
               resumeState: err.resumeState,
               runStartedAtMs: runStartedAt,
+              cachedRebuildExecutionMode,
             }),
         }
       }
@@ -7185,7 +7438,7 @@ export const ReadwiseContainer = () => {
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
-    'Cached Full Rebuild reuses the local full-library highlight snapshot, prefers cached parent metadata, only refetches missing parent metadata from Reader, and rewrites every managed page without re-scanning the remote highlight and note library.',
+    'Cached Full Rebuild now offers two run-time modes: staged first resolves the full page set and then writes it, while streaming resolves one cached parent at a time and writes it immediately. Both reuse the local full-library highlight snapshot, prefer cached parent metadata, and only refetch missing parent metadata from Reader.',
     'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
@@ -7232,6 +7485,13 @@ export const ReadwiseContainer = () => {
         return `${conflict.label} ${conflict.pages.length} page(s)${sampleText}; clear via ${conflict.clearAction}`
       })
       .join(' | ')
+
+  const buildCachedRebuildStatusPrefix = (
+    executionMode: CachedRebuildExecutionMode,
+  ) =>
+    executionMode === 'streaming'
+      ? 'Cached rebuild (streaming)'
+      : 'Cached rebuild'
 
   const describeReaderResumeTarget = (
     resumeState: ReaderPreviewLoadResumeState,
@@ -8111,21 +8371,31 @@ export const ReadwiseContainer = () => {
                         </div>
                       </div>
 
-                      <div className="rw-maintenance-section">
-                        <div className="rw-maintenance-section-header">
-                          <div className="rw-maintenance-section-title">Snapshots</div>
-                          <div className="rw-maintenance-section-note">
+                        <div className="rw-maintenance-section">
+                          <div className="rw-maintenance-section-header">
+                            <div className="rw-maintenance-section-title">Snapshots</div>
+                            <div className="rw-maintenance-section-note">
                             Refresh the local highlight snapshot, rebuild every managed page
-                            from the cached snapshot, force Logseq to reparse managed pages,
-                            or capture raw page state for diff-based debugging.
+                            from the cached snapshot in staged or streaming mode, force
+                            Logseq to reparse managed pages, or capture raw page state for
+                            diff-based debugging.
                           </div>
                         </div>
                         <div className="rw-action-row">
                           <button className="rw-btn" onClick={handleRefreshLocalSnapshotOnly}>
                             Refresh Local Snapshot Only
                           </button>
-                          <button className="rw-btn" onClick={handleCachedFullRebuild}>
-                            Cached Full Rebuild
+                          <button
+                            className="rw-btn"
+                            onClick={() => void handleCachedFullRebuild('staged')}
+                          >
+                            Cached Full Rebuild (Staged)
+                          </button>
+                          <button
+                            className="rw-btn"
+                            onClick={() => void handleCachedFullRebuild('streaming')}
+                          >
+                            Cached Full Rebuild (Streaming)
                           </button>
                         </div>
                         <div className="rw-action-row">

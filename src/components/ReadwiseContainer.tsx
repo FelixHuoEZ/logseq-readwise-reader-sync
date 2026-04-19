@@ -368,6 +368,7 @@ export const ReadwiseContainer = () => {
   const latestStatusRef = useRef<SyncStatus>('idle')
   const latestPropsReadyRef = useRef(propsReady)
   const latestReaderSyncStateRef = useRef<GraphReaderSyncStateV1 | null>(null)
+  const latestHasPendingInteractiveWorkflowRef = useRef(false)
   const autoSyncInFlightRef = useRef(false)
   const lastAutoSyncAttemptAtRef = useRef<number | null>(null)
   const lastAutoSyncPromptAtRef = useRef<number | null>(null)
@@ -462,6 +463,17 @@ export const ReadwiseContainer = () => {
   useEffect(() => {
     latestReaderSyncStateRef.current = readerSyncState
   }, [readerSyncState])
+
+  useEffect(() => {
+    latestHasPendingInteractiveWorkflowRef.current =
+      pendingLegacyManagedPageIdentityMigration != null ||
+      pendingLegacyBlockRefMigration != null ||
+      pendingCurrentPageLegacyIdMigration != null
+  }, [
+    pendingLegacyManagedPageIdentityMigration,
+    pendingLegacyBlockRefMigration,
+    pendingCurrentPageLegacyIdMigration,
+  ])
 
   useEffect(() => {
     if (
@@ -2867,6 +2879,10 @@ export const ReadwiseContainer = () => {
       return
     }
 
+    if (latestHasPendingInteractiveWorkflowRef.current) {
+      return
+    }
+
     clearPendingAutoSyncSchedule()
 
     if (typeof window.requestIdleCallback === 'function') {
@@ -4313,6 +4329,15 @@ export const ReadwiseContainer = () => {
     if (autoSyncInFlightRef.current) return
     if (!isAutoSyncForegroundReady()) return
 
+    if (latestHasPendingInteractiveWorkflowRef.current) {
+      logReadwiseInfo(
+        formalSyncLogPrefix,
+        'auto sync skipped because an interactive maintenance workflow is still pending in the foreground',
+        { source },
+      )
+      return
+    }
+
     const currentStatus = latestStatusRef.current
     if (currentStatus === 'fetching' || currentStatus === 'syncing') {
       return
@@ -5133,11 +5158,9 @@ export const ReadwiseContainer = () => {
 
   const scanManagedPagesForLegacyIdentityMigration = async ({
     previewCache,
-    client,
     onProgress,
   }: {
     previewCache: ReturnType<typeof createGraphReaderSyncCacheV1>
-    client: ReturnType<typeof createReadwiseClient>
     onProgress?: (progress: {
       total: number
       completed: number
@@ -5245,19 +5268,7 @@ export const ReadwiseContainer = () => {
             return cached
           }
 
-          const loaded = await loadReaderParentDocumentByIdWithRetry(
-            client,
-            readerDocumentId,
-            formalSyncLogPrefix,
-          )
-          if (loaded) {
-            await previewCache.putParentDocuments([loaded])
-            recordReaderDocumentInRepairLookupIndex(
-              replacementLookupIndex,
-              loaded,
-            )
-          }
-          return loaded
+          return null
         }
 
         if (resolvedReaderDocumentId) {
@@ -5272,7 +5283,6 @@ export const ReadwiseContainer = () => {
             pageName,
             rootContent: inspection.searchableContent,
             previewCache,
-            client,
             logPrefix: formalSyncLogPrefix,
           })
           if (inference.readerDocumentId) {
@@ -5412,13 +5422,6 @@ export const ReadwiseContainer = () => {
   }
 
   const handlePreviewLegacyManagedPageMigration = async () => {
-    const token = logseq.settings?.apiToken as string
-    if (!token) {
-      setStatus('error')
-      setStatusMessage('Please set your Readwise API Token first.')
-      return
-    }
-
     clearRunIssues()
     setPageDiffResult(null)
     setCacheSummaryResult(null)
@@ -5441,16 +5444,14 @@ export const ReadwiseContainer = () => {
     })
     beginReaderSyncEtaPhase('fetch-documents', 'legacy page preview')
     setStatusMessage(
-      `Scanning ${formalNamespaceRoot} for non-tweet legacy pages that can be rebound safely...`,
+      `Scanning ${formalNamespaceRoot} for non-tweet legacy pages that can be rebound safely using cached Reader metadata only...`,
     )
 
     try {
       const graphContext = await loadCurrentGraphContextV1()
       const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
-      const client = createReadwiseClient(token)
       const scanResult = await scanManagedPagesForLegacyIdentityMigration({
         previewCache,
-        client,
         onProgress: ({ total, completed, pageName }) => {
           setCurrent(completed)
           setTotal(total)
@@ -6603,7 +6604,15 @@ export const ReadwiseContainer = () => {
           cachedRebuildExecutionMode,
         }),
     }
-    clearRunIssues()
+    clearRunIssues(
+      runTrigger === 'auto'
+        ? {
+            preservePendingLegacyManagedPageIdentityMigration: true,
+            preservePendingLegacyBlockRefMigration: true,
+            preservePendingCurrentPageLegacyIdMigration: true,
+          }
+        : undefined,
+    )
     setPageDiffResult(null)
     setCurrent(0)
     setTotal(

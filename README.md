@@ -142,12 +142,14 @@ Use the highlight page limit only for short debug runs. Set it back to `0` for r
 
 - If a damaged page has no `rw-reader-id`, but still has `View Highlight` links, repair re-looks up the parent through the Reader API instead of trusting cache alone.
 - If a damaged page already has `rw-reader-id`, but its cached highlights are missing, repair now tries to reload the page's highlight documents directly from the embedded `View Highlight` links before giving up.
+- If a damaged page's `rw-reader-id` can be recovered, but Reader no longer returns rebuildable highlights for that document, repair now falls back to metadata-only orphan recovery: it refreshes page-level metadata, preserves the existing local highlight body, and normalizes legacy highlight block ids instead of failing as `no rebuildable highlights`.
 - If a damaged page reloads sparse tweet/media highlights, repair now forces a Reader detail-enrichment pass before writing so image-first highlights do not collapse into blank headings.
 - Repair no longer falls back to a full Reader `article` replacement scan just to guess a missing parent document during this maintenance pass.
 - If Reader still does not provide a unique, high-confidence parent, the page stays as an issue instead of being rebound by guesswork.
+- Damaged-page rewrites now force a follow-up file reparse after the exact rewrite so duplicate page preludes do not reappear after repair.
 - Legacy managed page migration now follows a preview-first flow with tweet-only filtering: pages that still contain `View Highlight` stay in scope even if they are tweets, while tweet-only pages without `View Highlight` are skipped from this migration flow.
 - The apply step now emits a dedicated apply report that records which pages were bound, renamed, rebuilt, or still need manual follow-up.
-- Applying a legacy managed page migration now prefers local cache, but can also reload a page's highlights directly from Reader when the old page still contains `View Highlight` links. If a newly rebound page still lacks both cached highlights and reloadable `View Highlight` entries, run `Refresh Local Snapshot Only` or `Full Refresh` before using current-page rebuild tools.
+- Applying a legacy managed page migration now prefers local cache, but can also reload a page's highlights directly from Reader when the old page still contains `View Highlight` links. If the document id can be recovered but current remote highlights are gone, apply now uses the same metadata-only orphan fallback instead of hard-failing the page.
 - Legacy block ref migration now follows a preview-first flow: the plugin lists every planned `((block ref))` rewrite before you confirm the apply step.
 - Current-page legacy id migration also follows a preview-first flow and rewrites only the current page or whiteboard. It updates proven Readwise legacy ids in `((block refs))`, whiteboard embeds, and `:refdock-item-id:` values, then shows a dedicated apply summary after the rewrite completes.
 

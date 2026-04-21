@@ -44,6 +44,7 @@ import {
   logReadwiseInfo,
   logReadwiseWarn,
 } from '../logging'
+import { extractReaderHighlightContentSegments } from '../reader/extract-reader-highlight-content-segments'
 import {
   assertManagedPageFileNameWithinLimits,
   auditManagedReaderPagesV1,
@@ -203,6 +204,25 @@ interface LegacyManagedPageIdentityMigrationScanResult {
   scannedPages: number
 }
 
+interface LegacyManagedPageApplyReportEntry {
+  previousPageName: string
+  finalPageName: string | null
+  readerDocumentId: string
+  readerDocumentTitle: string | null
+  bound: boolean
+  renamed: boolean
+  rebuildSource: 'none' | 'cache' | 'reader_remote'
+  rebuiltResult: 'created' | 'updated' | 'unchanged' | 'skipped' | 'failed'
+  repairSignaturesBeforeWrite: string[]
+  remainingIntegritySignatures: string[]
+  followUp: string | null
+}
+
+interface LegacyManagedPageApplyReportResult {
+  modeLabel: string
+  entries: LegacyManagedPageApplyReportEntry[]
+}
+
 interface PendingCurrentPageLegacyIdMigrationPlan {
   mapping: Map<string, string>
   pageName: string
@@ -246,6 +266,14 @@ const countReaderDetailWarningEntries = (
 ) =>
   entries.filter((entry) => isReaderDetailEnrichWarningReason(entry.reason))
     .length
+
+const countLegacyManagedPageApplyFollowUps = (
+  entries: readonly LegacyManagedPageApplyReportEntry[],
+) =>
+  entries.filter(
+    (entry) =>
+      entry.followUp != null || entry.remainingIntegritySignatures.length > 0,
+  ).length
 
 interface ManagedPageRepairScanEntryResult {
   pageName: string
@@ -345,6 +373,8 @@ export const ReadwiseContainer = () => {
   ] = useState<CurrentPageLegacyIdPreviewResult | null>(null)
   const [currentPageLegacyIdApplyResult, setCurrentPageLegacyIdApplyResult] =
     useState<CurrentPageLegacyIdApplyResult | null>(null)
+  const [legacyManagedPageApplyReportResult, setLegacyManagedPageApplyReportResult] =
+    useState<LegacyManagedPageApplyReportResult | null>(null)
   const [readerDetailEnrichReportResult, setReaderDetailEnrichReportResult] =
     useState<ReaderDetailEnrichReportResult | null>(null)
   const [pageDiffResult, setPageDiffResult] =
@@ -1247,6 +1277,62 @@ export const ReadwiseContainer = () => {
   const hasReaderHighlightLinks = (rootContent: string) =>
     /\[\[[^\]]+\]\[View Highlight\]\]/i.test(rootContent)
 
+  const isTwitterStatusUrl = (value: string | null | undefined) => {
+    if (typeof value !== 'string') return false
+
+    const trimmed = value.trim()
+    if (trimmed.length === 0) return false
+
+    try {
+      const url = new URL(trimmed)
+      const hostname = url.hostname.toLowerCase()
+      return (
+        (hostname === 'twitter.com' ||
+          hostname === 'www.twitter.com' ||
+          hostname === 'x.com' ||
+          hostname === 'www.x.com') &&
+        /^\/[^/]+\/status\/[^/]+/i.test(url.pathname)
+      )
+    } catch {
+      return /https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/[^/]+\/status\/[^/?#]+/i.test(
+        trimmed,
+      )
+    }
+  }
+
+  const isLegacyTweetOnlyManagedPage = ({
+    pageName,
+    rootContent,
+    category,
+    linkUrl,
+  }: {
+    pageName: string
+    rootContent: string
+    category: string | null | undefined
+    linkUrl: string | null | undefined
+  }) => {
+    if (hasReaderHighlightLinks(rootContent)) {
+      return false
+    }
+
+    if (hasLegacyTweetOnlyLinks(rootContent)) {
+      return true
+    }
+
+    const normalizedPageName = pageName.trim().toLowerCase()
+    if (
+      normalizedPageName.startsWith('tweet by ') ||
+      normalizedPageName.startsWith('tweets from ')
+    ) {
+      return true
+    }
+
+    return (
+      normalizeReaderCategory(category) === 'tweet' &&
+      isTwitterStatusUrl(linkUrl)
+    )
+  }
+
   const listReaderDocumentsWithRetry = async (
     client: ReturnType<typeof createReadwiseClient>,
     params: Parameters<
@@ -1472,12 +1558,14 @@ export const ReadwiseContainer = () => {
     previewCache,
     client,
     logPrefix,
+    allowApiReplacementLookup = true,
   }: {
     rootContent: string
     pageName: string
     previewCache?: ReturnType<typeof createGraphReaderSyncCacheV1>
     client?: ReturnType<typeof createReadwiseClient>
     logPrefix?: string
+    allowApiReplacementLookup?: boolean
   }): Promise<ReaderDocumentInferenceResult> => {
     throwIfCancelled()
     const resolvedLogPrefix = logPrefix ?? formalSyncLogPrefix
@@ -1679,6 +1767,27 @@ export const ReadwiseContainer = () => {
       }
     }
 
+    if (!allowApiReplacementLookup) {
+      logReadwiseDebug(
+        resolvedLogPrefix,
+        'repair infer skipped API replacement lookup by mode',
+        {
+          pageName,
+          attemptedHighlightIds,
+          fetchedHighlightIds: fetchedHighlights.map((highlight) => highlight.id),
+          fetchedParentIds,
+          failedHighlightIds,
+        },
+      )
+
+      return {
+        readerDocumentId: null,
+        shouldRetryAfterScan:
+          sawRetriableNetworkFailure && fetchedHighlights.length === 0,
+        failedHighlightIds,
+      }
+    }
+
     const replacementLookup = await findReplacementReaderParentDocumentByApi({
       client,
       pageName,
@@ -1726,6 +1835,160 @@ export const ReadwiseContainer = () => {
         (sawRetriableNetworkFailure && fetchedHighlights.length === 0),
       failedHighlightIds,
     }
+  }
+
+  const loadLegacyManagedPageRepairHighlightsFromReader = async ({
+    rootContent,
+    pageName,
+    expectedParentId,
+    client,
+    logPrefix,
+  }: {
+    rootContent: string
+    pageName: string
+    expectedParentId: string
+    client: ReturnType<typeof createReadwiseClient>
+    logPrefix: string
+  }): Promise<{
+    highlights: ReaderDocument[]
+    failedHighlightIds: string[]
+    mismatchedHighlightIds: string[]
+  }> => {
+    const highlightIds = extractReaderHighlightIdsFromRootContent(rootContent)
+
+    if (highlightIds.length === 0) {
+      return {
+        highlights: [],
+        failedHighlightIds: [],
+        mismatchedHighlightIds: [],
+      }
+    }
+
+    const fetchedHighlights: ReaderDocument[] = []
+    const failedHighlightIds: string[] = []
+    const mismatchedHighlightIds: string[] = []
+
+    for (const highlightId of highlightIds) {
+      throwIfCancelled()
+
+      try {
+        const highlight = await loadReaderDocumentByIdWithRetry(
+          client,
+          highlightId,
+          logPrefix,
+        )
+
+        if (!highlight) {
+          failedHighlightIds.push(highlightId)
+          continue
+        }
+
+        if (highlight.parent_id !== expectedParentId) {
+          mismatchedHighlightIds.push(
+            `${highlightId}:${highlight.parent_id ?? '(none)'}`,
+          )
+          continue
+        }
+
+        fetchedHighlights.push(highlight)
+      } catch (error) {
+        if (error instanceof Error && error.name === 'ReadwiseRunCancelledError') {
+          throw error
+        }
+
+        logReadwiseWarn(logPrefix, 'failed to reload legacy page highlight by id', {
+          pageName,
+          highlightId,
+          expectedParentId,
+          formattedError: describeUnknownError(error),
+        })
+        failedHighlightIds.push(highlightId)
+      }
+    }
+
+    logReadwiseDebug(
+      logPrefix,
+      'loaded legacy managed page highlights from Reader by embedded highlight links',
+      {
+        pageName,
+        expectedParentId,
+        requestedHighlightCount: highlightIds.length,
+        fetchedHighlightCount: fetchedHighlights.length,
+        failedHighlightCount: failedHighlightIds.length,
+        mismatchedHighlightCount: mismatchedHighlightIds.length,
+      },
+    )
+
+    return {
+      highlights: fetchedHighlights.sort(sortReaderDocumentsByCreatedAtAscending),
+      failedHighlightIds,
+      mismatchedHighlightIds,
+    }
+  }
+
+  const highlightsNeedForcedReaderDetailEnrichment = (
+    highlights: readonly ReaderDocument[],
+  ) =>
+    highlights.some((highlight) => {
+      const primaryText = highlight.content?.trim() ?? ''
+      if (primaryText.length === 0) return true
+
+      const segments = extractReaderHighlightContentSegments({
+        richContent: highlight.render_content ?? highlight.content,
+        imageUrl: highlight.image_url,
+        htmlContent: highlight.html_content,
+        primaryText,
+      })
+
+      return segments.length === 0
+    })
+
+  const maybeEnrichManagedPageWriteHighlights = async ({
+    readerAuthToken,
+    document,
+    highlights,
+    previewCache,
+    logPrefix,
+  }: {
+    readerAuthToken: string | null | undefined
+    document: ReaderDocument
+    highlights: readonly ReaderDocument[]
+    previewCache: ReturnType<typeof createGraphReaderSyncCacheV1>
+    logPrefix: string
+  }) => {
+    if (!readerAuthToken) {
+      return [...highlights]
+    }
+
+    if (!highlightsNeedForcedReaderDetailEnrichment(highlights)) {
+      return [...highlights]
+    }
+
+    const enrichmentResult = await tryEnrichReaderDocumentHighlightsViaMcp({
+      token: readerAuthToken,
+      document,
+      highlights,
+      logPrefix,
+      force: true,
+    })
+
+    if (enrichmentResult.changedCount > 0) {
+      try {
+        await previewCache.putHighlights(enrichmentResult.highlights)
+      } catch (error) {
+        logReadwiseWarn(
+          logPrefix,
+          'failed to persist forced Reader highlight detail enrichment',
+          {
+            readerDocumentId: document.id,
+            highlightCount: enrichmentResult.highlights.length,
+            formattedError: describeUnknownError(error),
+          },
+        )
+      }
+    }
+
+    return enrichmentResult.highlights
   }
 
   const isManagedPageTitleOverlong = (pageTitle: string) => {
@@ -1929,6 +2192,7 @@ export const ReadwiseContainer = () => {
               previewCache: options?.previewCache,
               client: options?.client,
               logPrefix: formalSyncLogPrefix,
+              allowApiReplacementLookup: false,
             })
         const readerDocumentId =
           pageReaderDocumentId ??
@@ -2023,6 +2287,7 @@ export const ReadwiseContainer = () => {
             previewCache: options?.previewCache,
             client: options?.client,
             logPrefix: formalSyncLogPrefix,
+            allowApiReplacementLookup: false,
           })
 
           if (deferredInference.readerDocumentId) {
@@ -2291,6 +2556,46 @@ export const ReadwiseContainer = () => {
     ].join('\n')
   }
 
+  const buildLegacyManagedPageApplyReportBundle = (
+    result: LegacyManagedPageApplyReportResult,
+  ) => {
+    const renamedCount = result.entries.filter((entry) => entry.renamed).length
+    const rebuiltCount = result.entries.filter(
+      (entry) => entry.rebuildSource !== 'none',
+    ).length
+    const followUpCount =
+      countLegacyManagedPageApplyFollowUps(result.entries)
+
+    return [
+      'Legacy Managed Page Apply Report',
+      `Mode: ${result.modeLabel}`,
+      `Entries: ${result.entries.length}`,
+      `Renamed: ${renamedCount}`,
+      `Rebuilt: ${rebuiltCount}`,
+      `Follow-up Pages: ${followUpCount}`,
+      '',
+      'Entries:',
+      ...result.entries.map((entry, index) =>
+        [
+          `${index + 1}. previous=${entry.previousPageName}`,
+          `   final=${entry.finalPageName ?? '(unresolved)'}`,
+          `   readerDocumentId=${entry.readerDocumentId}`,
+          `   readerDocumentTitle=${entry.readerDocumentTitle ?? '(untitled)'}`,
+          `   bound=${entry.bound} renamed=${entry.renamed} rebuildSource=${entry.rebuildSource} rebuiltResult=${entry.rebuiltResult}`,
+          entry.repairSignaturesBeforeWrite.length > 0
+            ? `   repairSignaturesBeforeWrite=${entry.repairSignaturesBeforeWrite.join(', ')}`
+            : null,
+          entry.remainingIntegritySignatures.length > 0
+            ? `   remainingIntegritySignatures=${entry.remainingIntegritySignatures.join(', ')}`
+            : null,
+          entry.followUp ? `   followUp=${entry.followUp}` : null,
+        ]
+          .filter((line): line is string => line != null)
+          .join('\n'),
+      ),
+    ].join('\n')
+  }
+
   const resetLiveRunIssueMetrics = () => {
     liveRunIssueMetricsRef.current = {
       processedItems: null,
@@ -2357,6 +2662,7 @@ export const ReadwiseContainer = () => {
     setRunIssueContext(null)
     setCurrentPageLegacyIdPreviewResult(null)
     setCurrentPageLegacyIdApplyResult(null)
+    setLegacyManagedPageApplyReportResult(null)
     setReaderDetailEnrichReportResult(null)
     if (!options?.preservePendingLegacyManagedPageIdentityMigration) {
       setPendingLegacyManagedPageIdentityMigration(null)
@@ -2436,6 +2742,17 @@ export const ReadwiseContainer = () => {
     await copyText(
       buildReaderDetailEnrichReportBundle(readerDetailEnrichReportResult),
       'Reader detail enrich report',
+    )
+  }
+
+  const handleCopyLegacyManagedPageApplyReport = async () => {
+    if (!legacyManagedPageApplyReportResult) return
+
+    await copyText(
+      buildLegacyManagedPageApplyReportBundle(
+        legacyManagedPageApplyReportResult,
+      ),
+      'Legacy managed page apply report',
     )
   }
 
@@ -4800,7 +5117,7 @@ export const ReadwiseContainer = () => {
       })
       beginReaderSyncEtaPhase('write-pages', 'page repairs')
       setStatusMessage(
-        `Repairing ${scanResult.candidates.length} managed page(s) from the cached highlight snapshot...`,
+        `Repairing ${scanResult.candidates.length} managed page(s) from cached data or direct Reader reload...`,
       )
 
       for (let index = 0; index < scanResult.candidates.length; index += 1) {
@@ -4808,44 +5125,79 @@ export const ReadwiseContainer = () => {
         const candidate = scanResult.candidates[index]!
         setCurrentBook(candidate.pageName)
 
-        const highlights = [
+        let highlights = [
           ...(highlightsByParent.get(candidate.readerDocumentId) ?? []),
         ].sort(sortReaderDocumentsByCreatedAtAscending)
 
         if (highlights.length === 0) {
-          const issue: RunIssue = {
-            book: candidate.pageName,
-            message: `Repair skipped because no cached highlights were found for rw-reader-id=${candidate.readerDocumentId}.`,
-            summary:
-              'Automatic repair needs the cached highlight snapshot for this page.',
-            suggestedAction:
-              'Run Full Refresh first, then rerun Repair Managed Pages.',
-            debugFacts: [
-              `detectedSignatures=${candidate.signatures.join(', ')}`,
-            ],
-            readerDocumentId: candidate.readerDocumentId,
-            namespacePrefix: formalNamespaceRoot,
-            pageName: candidate.pageName,
+          const remoteHighlightReload =
+            await loadLegacyManagedPageRepairHighlightsFromReader({
+              rootContent: candidate.rootContent,
+              pageName: candidate.pageName,
+              expectedParentId: candidate.readerDocumentId,
+              client,
+              logPrefix: formalSyncLogPrefix,
+            })
+
+          if (
+            remoteHighlightReload.failedHighlightIds.length > 0 ||
+            remoteHighlightReload.mismatchedHighlightIds.length > 0 ||
+            remoteHighlightReload.highlights.length === 0
+          ) {
+            const issue: RunIssue = {
+              book: candidate.pageName,
+              message: `Repair skipped because no rebuildable highlights were found for rw-reader-id=${candidate.readerDocumentId}.`,
+              summary:
+                remoteHighlightReload.highlights.length === 0
+                  ? 'Automatic repair could not find cached highlights or reloadable View Highlight entries for this page.'
+                  : 'Automatic repair could not safely reload every View Highlight entry for this page.',
+              suggestedAction:
+                'Run Refresh Local Snapshot Only or Full Refresh, then rerun Repair Managed Pages.',
+              debugFacts: [
+                `detectedSignatures=${candidate.signatures.join(', ')}`,
+                `failedHighlightIds=${remoteHighlightReload.failedHighlightIds.join(', ') || '(none)'}`,
+                `mismatchedHighlightIds=${remoteHighlightReload.mismatchedHighlightIds.join(', ') || '(none)'}`,
+              ],
+              readerDocumentId: candidate.readerDocumentId,
+              namespacePrefix: formalNamespaceRoot,
+              pageName: candidate.pageName,
+            }
+            repairIssues.push(issue)
+            repairIssuesCount = repairIssues.length
+            appendRunIssue(issue)
+            repairProgressCompleted = index + 1
+            updateLiveRunIssueMetrics({
+              processedItems: index + 1,
+              stats: {
+                pagesTargeted: scanResult.candidates.length,
+                pagesProcessed: repairedCount,
+              },
+            })
+            setCurrent(index + 1)
+            updateReaderSyncEta(
+              'write-pages',
+              'page repairs',
+              index + 1,
+              scanResult.candidates.length,
+            )
+            continue
           }
-          repairIssues.push(issue)
-          repairIssuesCount = repairIssues.length
-          appendRunIssue(issue)
-          repairProgressCompleted = index + 1
-          updateLiveRunIssueMetrics({
-            processedItems: index + 1,
-            stats: {
-              pagesTargeted: scanResult.candidates.length,
-              pagesProcessed: repairedCount,
-            },
-          })
-          setCurrent(index + 1)
-          updateReaderSyncEta(
-            'write-pages',
-            'page repairs',
-            index + 1,
-            scanResult.candidates.length,
-          )
-          continue
+
+          highlights = remoteHighlightReload.highlights
+
+          try {
+            await previewCache.putHighlights(highlights)
+          } catch (error) {
+            logReadwiseWarn(
+              formalSyncLogPrefix,
+              'failed to persist remotely reloaded repair highlights',
+              {
+                readerDocumentId: candidate.readerDocumentId,
+                highlightCount: highlights.length,
+                formattedError: describeUnknownError(error),
+              },
+            )
+          }
         }
 
         let document =
@@ -4866,15 +5218,14 @@ export const ReadwiseContainer = () => {
 
         if (!document) {
           throwIfCancelled()
-          const replacementLookup =
-            await findReplacementReaderParentDocumentByApi({
-              client,
+          logReadwiseDebug(
+            formalSyncLogPrefix,
+            'repair write skipped API replacement lookup because parent metadata is unavailable',
+            {
               pageName: candidate.pageName,
-              rootContent: candidate.rootContent,
-              previewCache,
-              logPrefix: formalSyncLogPrefix,
-            })
-          document = replacementLookup.document
+              readerDocumentId: candidate.readerDocumentId,
+            },
+          )
         }
 
         if (!document) {
@@ -4912,6 +5263,14 @@ export const ReadwiseContainer = () => {
           )
           continue
         }
+
+        highlights = await maybeEnrichManagedPageWriteHighlights({
+          readerAuthToken: token,
+          document,
+          highlights,
+          previewCache,
+          logPrefix: formalSyncLogPrefix,
+        })
 
         if (document.id !== candidate.readerDocumentId) {
           logReadwiseInfo(
@@ -5142,7 +5501,7 @@ export const ReadwiseContainer = () => {
           ? `Preview: would bind rw-reader-id=${entry.readerDocumentId} on ${entry.currentPageName}.`
           : `Preview: would bind rw-reader-id=${entry.readerDocumentId} and rename ${entry.currentPageName} to ${entry.targetPageName}.`,
       summary:
-        'Preview only. This legacy managed page can be rebound to a Reader document without touching tweet-only pages.',
+        'Preview only. This legacy managed page can be rebound to a Reader document without touching tweet-only pages that lack View Highlight links.',
       suggestedAction:
         'Review the evidence and target page name. If it looks correct, run Apply Legacy Managed Page Migration.',
       debugFacts: [
@@ -5181,16 +5540,8 @@ export const ReadwiseContainer = () => {
     const missingIdentityPages = managedPages.filter(
       (page) => extractReaderDocumentIdFromPage(page) == null,
     )
-    let skippedTweetPages = missingIdentityPages.filter(
-      (page) =>
-        normalizeReaderCategory(readPagePropertyString(page, 'CATEGORIES')) ===
-        'tweet',
-    ).length
-    const scopedPages = missingIdentityPages.filter(
-      (page) =>
-        normalizeReaderCategory(readPagePropertyString(page, 'CATEGORIES')) !==
-        'tweet',
-    )
+    let skippedTweetPages = 0
+    const scopedPages = missingIdentityPages
     const replacementLookupIndex = buildReaderDocumentRepairLookupIndex(
       await previewCache.loadAllCachedParentDocuments(),
     )
@@ -5234,9 +5585,18 @@ export const ReadwiseContainer = () => {
         const normalizedContentCategory = normalizeReaderCategory(
           extractRootPropertyValue(inspection.rootContent, 'CATEGORIES'),
         )
+        const linkUrl =
+          extractRootPropertyValue(inspection.rootContent, 'LINK') ??
+          readPagePropertyString(page, 'LINK')
         if (
-          normalizedContentCategory === 'tweet' ||
-          hasLegacyTweetOnlyLinks(inspection.searchableContent)
+          isLegacyTweetOnlyManagedPage({
+            pageName,
+            rootContent: inspection.searchableContent,
+            category:
+              normalizedContentCategory ??
+              readPagePropertyString(page, 'CATEGORIES'),
+            linkUrl,
+          })
         ) {
           return {
             pageName,
@@ -5317,7 +5677,7 @@ export const ReadwiseContainer = () => {
             pageName,
             issue: {
               book: pageName,
-              message: `Legacy page migration skipped because no non-tweet Reader document could be proved for ${pageName}.`,
+              message: `Legacy page migration skipped because no Reader document could be proved for ${pageName}.`,
               summary:
                 'The page is outside the tweet-only scope, but the plugin still could not prove a unique Reader parent from embedded ids, highlight links, or cached metadata.',
               suggestedAction:
@@ -5444,7 +5804,7 @@ export const ReadwiseContainer = () => {
     })
     beginReaderSyncEtaPhase('fetch-documents', 'legacy page preview')
     setStatusMessage(
-      `Scanning ${formalNamespaceRoot} for non-tweet legacy pages that can be rebound safely using cached Reader metadata only...`,
+      `Scanning ${formalNamespaceRoot} for legacy pages that can be rebound safely using cached Reader metadata only. Tweet-only pages without View Highlight will be skipped...`,
     )
 
     try {
@@ -5473,9 +5833,9 @@ export const ReadwiseContainer = () => {
               {
                 book: 'Tweet migration scope',
                 category: 'warning' as const,
-                message: `Preview skipped ${scanResult.skippedTweetPages} tweet-category legacy page(s).`,
+                message: `Preview skipped ${scanResult.skippedTweetPages} tweet-only legacy page(s) that had no View Highlight links.`,
                 summary:
-                  'Tweet-only legacy pages are intentionally out of scope for this migration preview.',
+                  'Tweet-only legacy pages without View Highlight are intentionally out of scope for this migration preview.',
                 suggestedAction:
                   'Leave them for the later tweet export/migration workflow.',
                 debugFacts: [
@@ -5513,8 +5873,8 @@ export const ReadwiseContainer = () => {
       )
       setStatusMessage(
         scanResult.entries.length > 0
-          ? `Preview found ${scanResult.entries.length} non-tweet legacy page(s) that can be rebound safely.${scanResult.issues.length > 0 ? ` ${scanResult.issues.length} page(s) still need manual review.` : ''}${scanResult.skippedTweetPages > 0 ? ` Skipped ${scanResult.skippedTweetPages} tweet page(s).` : ''}`
-          : `Preview found no non-tweet legacy pages that can be migrated automatically.${scanResult.skippedTweetPages > 0 ? ` Skipped ${scanResult.skippedTweetPages} tweet page(s).` : ''}`,
+          ? `Preview found ${scanResult.entries.length} legacy page(s) that can be rebound safely.${scanResult.issues.length > 0 ? ` ${scanResult.issues.length} page(s) still need manual review.` : ''}${scanResult.skippedTweetPages > 0 ? ` Skipped ${scanResult.skippedTweetPages} tweet-only page(s).` : ''}`
+          : `Preview found no legacy pages that can be migrated automatically.${scanResult.skippedTweetPages > 0 ? ` Skipped ${scanResult.skippedTweetPages} tweet-only page(s).` : ''}`,
       )
     } catch (err: unknown) {
       const issue = {
@@ -5581,14 +5941,36 @@ export const ReadwiseContainer = () => {
     )
 
     try {
+      const graphContext = await loadCurrentGraphContextV1()
+      const previewCache = createGraphReaderSyncCacheV1(graphContext.graphId)
+      const readerAuthToken =
+        typeof logseq.settings?.token === 'string'
+          ? logseq.settings.token.trim()
+          : ''
+      const readerClient =
+        readerAuthToken.length > 0
+          ? createReadwiseClient(readerAuthToken)
+          : null
       let boundCount = 0
       let renamedCount = 0
       const applyIssues: RunIssue[] = []
+      const applyReportEntries: LegacyManagedPageApplyReportEntry[] = []
 
       for (let index = 0; index < migrationPlan.entries.length; index += 1) {
         throwIfCancelled()
         const entry = migrationPlan.entries[index]!
         setCurrentBook(entry.currentPageName)
+
+        let finalPageName: string | null = entry.currentPageName
+        let bound = false
+        let renamed = false
+        let rebuildSource: LegacyManagedPageApplyReportEntry['rebuildSource'] =
+          'none'
+        let rebuiltResult: LegacyManagedPageApplyReportEntry['rebuiltResult'] =
+          'skipped'
+        let repairSignaturesBeforeWrite: string[] = []
+        let remainingIntegritySignatures: string[] = []
+        let followUp: string | null = null
 
         const currentPages = ((await logseq.Editor.getAllPages()) ??
           []) as PageEntity[]
@@ -5597,6 +5979,9 @@ export const ReadwiseContainer = () => {
           null
 
         if (!page) {
+          finalPageName = null
+          followUp =
+            'The page disappeared or was renamed after the preview was created.'
           applyIssues.push({
             book: entry.currentPageName,
             message: `Legacy page migration skipped because ${entry.currentPageName} no longer exists.`,
@@ -5613,6 +5998,7 @@ export const ReadwiseContainer = () => {
             'rw-reader-id',
             entry.readerDocumentId,
           )
+          bound = true
           boundCount += 1
 
           const currentPageName =
@@ -5621,11 +6007,15 @@ export const ReadwiseContainer = () => {
             page.name ??
             page.title ??
             entry.currentPageName
+
           if (currentPageName !== entry.targetPageName) {
             const conflictingPage = await logseq.Editor.getPage(
               entry.targetPageName,
             )
             if (conflictingPage && conflictingPage.uuid !== page.uuid) {
+              finalPageName = currentPageName
+              followUp =
+                `Bound rw-reader-id, but rename target ${entry.targetPageName} is now occupied.`
               applyIssues.push({
                 book: entry.currentPageName,
                 message: `Legacy page migration bound rw-reader-id, but rename target ${entry.targetPageName} is now occupied.`,
@@ -5643,10 +6033,232 @@ export const ReadwiseContainer = () => {
                 currentPageName,
                 entry.targetPageName,
               )
+              finalPageName = entry.targetPageName
+              renamed = true
               renamedCount += 1
             }
+          } else {
+            finalPageName = currentPageName
+          }
+
+          const migratedPage = ((finalPageName
+            ? await logseq.Editor.getPage(finalPageName)
+            : null) ??
+            (await logseq.Editor.getPage(currentPageName))) as PageEntity | null
+
+          if (!migratedPage) {
+            followUp =
+              followUp ??
+              'The page could not be reloaded after apply, so integrity audit was skipped.'
+          } else {
+            const integrityBeforeWrite =
+              await inspectManagedPageIntegrityV1(migratedPage)
+            repairSignaturesBeforeWrite = integrityBeforeWrite.signatures
+
+            if (repairSignaturesBeforeWrite.length > 0) {
+              let resolvedHighlights = [
+                ...(
+                  (
+                    await previewCache.loadGroupedHighlightsByParent([
+                      entry.readerDocumentId,
+                    ])
+                  ).get(entry.readerDocumentId) ?? []
+                ),
+              ].sort(sortReaderDocumentsByCreatedAtAscending)
+              let resolvedDocument: ReaderDocument | null = (
+                await previewCache.getCachedParentDocuments([
+                  entry.readerDocumentId,
+                ])
+              ).get(entry.readerDocumentId) ?? null
+
+              let usedRemoteHighlightFallback = false
+
+              if (resolvedHighlights.length === 0) {
+                if (!readerClient) {
+                  followUp =
+                    followUp ??
+                    'Integrity issues remain, but no cached highlights were found and no Reader token is available for remote reload. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
+                } else {
+                  const remoteHighlightReload =
+                    await loadLegacyManagedPageRepairHighlightsFromReader({
+                      rootContent: integrityBeforeWrite.searchableContent,
+                      pageName: finalPageName ?? currentPageName,
+                      expectedParentId: entry.readerDocumentId,
+                      client: readerClient,
+                      logPrefix: formalSyncLogPrefix,
+                    })
+
+                  if (
+                    remoteHighlightReload.failedHighlightIds.length > 0 ||
+                    remoteHighlightReload.mismatchedHighlightIds.length > 0
+                  ) {
+                    followUp =
+                      followUp ??
+                      `Integrity issues remain, and Reader highlight reload was incomplete. failed=${remoteHighlightReload.failedHighlightIds.join(', ') || '(none)'} mismatched=${remoteHighlightReload.mismatchedHighlightIds.join(', ') || '(none)'}`
+                  } else if (remoteHighlightReload.highlights.length === 0) {
+                    followUp =
+                      followUp ??
+                      'Integrity issues remain, but the page had no reloadable View Highlight entries. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
+                  } else {
+                    resolvedHighlights = remoteHighlightReload.highlights
+                    usedRemoteHighlightFallback = true
+
+                    try {
+                      await previewCache.putHighlights(resolvedHighlights)
+                    } catch (error) {
+                      logReadwiseWarn(
+                        formalSyncLogPrefix,
+                        'failed to persist remotely reloaded legacy page highlights',
+                        {
+                          readerDocumentId: entry.readerDocumentId,
+                          highlightCount: resolvedHighlights.length,
+                          formattedError: describeUnknownError(error),
+                        },
+                      )
+                    }
+                  }
+                }
+              }
+
+              if (!resolvedDocument) {
+                if (!readerClient) {
+                  followUp =
+                    followUp ??
+                    'Integrity issues remain, but no cached parent metadata was found and no Reader token is available for remote reload.'
+                } else {
+                  try {
+                    resolvedDocument = await loadReaderParentDocumentByIdWithRetry(
+                      readerClient,
+                      entry.readerDocumentId,
+                      formalSyncLogPrefix,
+                    )
+
+                    if (resolvedDocument) {
+                      try {
+                        await previewCache.putParentDocuments([resolvedDocument])
+                      } catch (error) {
+                        logReadwiseWarn(
+                          formalSyncLogPrefix,
+                          'failed to persist remotely reloaded legacy page parent metadata',
+                          {
+                            readerDocumentId: entry.readerDocumentId,
+                            formattedError: describeUnknownError(error),
+                          },
+                        )
+                      }
+                    }
+                  } catch (error) {
+                    followUp =
+                      followUp ??
+                      `Integrity issues remain, and Reader parent metadata reload failed: ${describeUnknownError(error)}`
+                  }
+                }
+              }
+
+              if (resolvedHighlights.length === 0) {
+                followUp =
+                  followUp ??
+                  'Integrity issues remain, but no highlights were available for rebuild. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
+              } else if (!resolvedDocument) {
+                followUp =
+                  followUp ??
+                  'Integrity issues remain, but no parent metadata was available for rebuild. Run Refresh Current Page Metadata or Full Refresh before rebuilding again.'
+              } else {
+                try {
+                  resolvedHighlights = await maybeEnrichManagedPageWriteHighlights({
+                    readerAuthToken,
+                    document: resolvedDocument,
+                    highlights: resolvedHighlights,
+                    previewCache,
+                    logPrefix: formalSyncLogPrefix,
+                  })
+
+                  const pageSyncResult = await syncRenderedReaderPreviewPage(
+                    {
+                      document: resolvedDocument,
+                      highlights: resolvedHighlights,
+                      highlightCoverage: 'cached-full-rebuild',
+                    },
+                    formalNamespaceRoot,
+                    formalSyncLogPrefix,
+                    {
+                      pageResolveMode: 'reader_id_then_title',
+                      identityNamespaceRoot: formalNamespaceRoot,
+                      readerAuthToken,
+                    },
+                  )
+                  rebuildSource = usedRemoteHighlightFallback
+                    ? 'reader_remote'
+                    : 'cache'
+                  rebuiltResult = pageSyncResult.result
+                  finalPageName = pageSyncResult.pageName
+
+                  const rebuiltPage = (await logseq.Editor.getPage(
+                    pageSyncResult.pageName,
+                  )) as PageEntity | null
+                  if (!rebuiltPage) {
+                    followUp =
+                      'Cached rebuild finished, but the page could not be reloaded for integrity verification.'
+                  } else {
+                    remainingIntegritySignatures = (
+                      await inspectManagedPageIntegrityV1(rebuiltPage)
+                    ).signatures
+                    if (remainingIntegritySignatures.length > 0) {
+                      followUp =
+                        `Integrity signatures remain after cached rebuild: ${remainingIntegritySignatures.join(', ')}.`
+                    }
+                  }
+                } catch (error: unknown) {
+                  rebuiltResult = 'failed'
+                  followUp =
+                    `Managed page rebuild after apply failed: ${describeUnknownError(error)}`
+                }
+              }
+            }
+          }
+
+          const shouldAppendFollowUpIssue =
+            followUp != null &&
+            (repairSignaturesBeforeWrite.length > 0 ||
+              remainingIntegritySignatures.length > 0 ||
+              rebuiltResult === 'failed' ||
+              followUp.includes('cached highlights') ||
+              followUp.includes('cached parent metadata') ||
+              followUp.includes('reloaded after apply'))
+
+          if (shouldAppendFollowUpIssue) {
+            applyIssues.push({
+              book: finalPageName ?? entry.currentPageName,
+              category: 'warning',
+              message: `Legacy page migration follow-up required for ${finalPageName ?? entry.currentPageName}.`,
+              summary: followUp ?? undefined,
+              suggestedAction:
+                'Review the apply report, refresh the local snapshot if needed, and rerun a cached rebuild for the affected page.',
+              debugFacts: [
+                `readerDocumentId=${entry.readerDocumentId}`,
+                `repairSignaturesBeforeWrite=${repairSignaturesBeforeWrite.join(', ') || '(none)'}`,
+                `remainingIntegritySignatures=${remainingIntegritySignatures.join(', ') || '(none)'}`,
+              ],
+              namespacePrefix: formalNamespaceRoot,
+              pageName: finalPageName ?? entry.currentPageName,
+              readerDocumentId: entry.readerDocumentId,
+            })
           }
         }
+
+        applyReportEntries.push({
+          previousPageName: entry.currentPageName,
+          finalPageName,
+          readerDocumentId: entry.readerDocumentId,
+          readerDocumentTitle: entry.readerDocumentTitle,
+          bound,
+          renamed,
+          rebuildSource,
+          rebuiltResult,
+          repairSignaturesBeforeWrite,
+          remainingIntegritySignatures,
+          followUp,
+        })
 
         const completed = index + 1
         setCurrent(completed)
@@ -5662,6 +6274,10 @@ export const ReadwiseContainer = () => {
       }
 
       setPendingLegacyManagedPageIdentityMigration(null)
+      setLegacyManagedPageApplyReportResult({
+        modeLabel: 'Apply legacy managed page migration',
+        entries: applyReportEntries,
+      })
       replaceRunIssues(applyIssues)
       setStatus('completed')
       setRunIssueContext((previous) =>
@@ -6308,7 +6924,7 @@ export const ReadwiseContainer = () => {
 
       if (highlights.length === 0) {
         throw new Error(
-          'No cached highlights were found for the current page. Run Full Refresh first.',
+          'No cached highlights were found for the current page. Run Refresh Local Snapshot Only or Full Refresh first.',
         )
       }
 
@@ -6331,7 +6947,7 @@ export const ReadwiseContainer = () => {
       if (!document) {
         if (action === 'rebuild-from-cache') {
           throw new Error(
-            'No cached parent metadata was found for the current page. Use Refresh Current Page Metadata or Full Refresh first.',
+            'No cached parent metadata was found for the current page. Use Refresh Current Page Metadata, Refresh Local Snapshot Only, or Full Refresh first.',
           )
         }
 
@@ -8511,7 +9127,7 @@ export const ReadwiseContainer = () => {
     'These tools stay hidden during normal use. They are exposed automatically when formal sync detects conflicting managed pages that must be cleared first.',
     'Audit Managed IDs checks duplicate rw-reader-id bindings, missing rw-reader-id, and managed page names that would exceed Logseq file-name limits on recreate.',
     'Repair Managed Pages scans ReadwiseHighlights/* for legacy corruption signatures, re-looks up missing identities through the Reader API when needed, and rewrites only the matched pages from the cached highlight snapshot.',
-    'Preview Legacy Managed Page Migration finds non-tweet legacy pages that are missing rw-reader-id, proves a Reader parent from embedded ids, View Highlight links, or cached metadata, and previews the bind-and-rename plan before apply.',
+    'Preview Legacy Managed Page Migration finds legacy pages that are missing rw-reader-id, skips tweet-only pages without View Highlight, proves a Reader parent from embedded ids, View Highlight links, or cached metadata, and previews the bind-and-rename plan before apply.',
     'Cached Full Rebuild now offers two run-time modes: staged first resolves the full page set and then writes it, while streaming resolves one cached parent at a time and writes it immediately. Both reuse the local full-library highlight snapshot, prefer cached parent metadata, and only refetch missing parent metadata from Reader.',
     'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
@@ -9067,6 +9683,140 @@ export const ReadwiseContainer = () => {
               {readerDetailEnrichReportResult.outcomeEntries.length > 60 && (
                 <div className="rw-preview-note">
                   Showing the first 60 entries. Use Copy Detail Report for the
+                  full list.
+                </div>
+              )}
+            </div>
+          )}
+
+          {legacyManagedPageApplyReportResult && (
+            <div className="rw-feedback-block rw-preview-panel">
+              <div className="rw-section-header">
+                <div>
+                  <div className="rw-section-title">Legacy Apply Report</div>
+                  <div className="rw-section-meta">
+                    {countLegacyManagedPageApplyFollowUps(
+                      legacyManagedPageApplyReportResult.entries,
+                    )}{' '}
+                    {countLegacyManagedPageApplyFollowUps(
+                      legacyManagedPageApplyReportResult.entries,
+                    ) === 1
+                      ? 'follow-up page'
+                      : 'follow-up pages'}{' '}
+                    · {legacyManagedPageApplyReportResult.entries.length}{' '}
+                    {legacyManagedPageApplyReportResult.entries.length === 1
+                      ? 'apply entry'
+                      : 'apply entries'}
+                  </div>
+                </div>
+                <div className="rw-section-actions">
+                  <button
+                    className="rw-btn rw-btn-small"
+                    onClick={() =>
+                      void handleCopyLegacyManagedPageApplyReport()
+                    }
+                  >
+                    Copy Apply Report
+                  </button>
+                </div>
+              </div>
+              <div className="rw-preview-summary">
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Mode</span>
+                  <strong>{legacyManagedPageApplyReportResult.modeLabel}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Entries</span>
+                  <strong>{legacyManagedPageApplyReportResult.entries.length}</strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Renamed</span>
+                  <strong>
+                    {
+                      legacyManagedPageApplyReportResult.entries.filter(
+                        (entry) => entry.renamed,
+                      ).length
+                    }
+                  </strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">
+                    Rebuilt
+                  </span>
+                  <strong>
+                    {
+                      legacyManagedPageApplyReportResult.entries.filter(
+                        (entry) => entry.rebuildSource !== 'none',
+                      ).length
+                    }
+                  </strong>
+                </div>
+                <div className="rw-preview-summary-item">
+                  <span className="rw-preview-summary-key">Follow-up Pages</span>
+                  <strong>
+                    {countLegacyManagedPageApplyFollowUps(
+                      legacyManagedPageApplyReportResult.entries,
+                    )}
+                  </strong>
+                </div>
+              </div>
+              <div className="rw-preview-note">
+                This report records which legacy pages were bound, renamed, and
+                rebuilt during the apply step, plus any remaining integrity
+                follow-up.
+              </div>
+              <div className="rw-preview-list">
+                {legacyManagedPageApplyReportResult.entries
+                  .slice(0, 60)
+                  .map((entry) => (
+                    <div
+                      key={`${entry.readerDocumentId}:${entry.previousPageName}`}
+                      className="rw-preview-item"
+                    >
+                      <div className="rw-preview-item-head">
+                        <span className="rw-preview-kind">
+                          {entry.followUp
+                            ? 'follow-up'
+                            : entry.rebuildSource !== 'none'
+                              ? 'rebuilt'
+                              : 'applied'}
+                        </span>
+                      </div>
+                      <div className="rw-preview-block">
+                        {entry.previousPageName}
+                      </div>
+                      <div className="rw-preview-block">
+                        final={entry.finalPageName ?? '(unresolved)'}
+                      </div>
+                      <div className="rw-preview-block">
+                        readerDocumentId={entry.readerDocumentId}
+                      </div>
+                      <div className="rw-preview-block">
+                        bound={String(entry.bound)} renamed=
+                        {String(entry.renamed)} rebuildSource=
+                        {entry.rebuildSource} rebuiltResult=
+                        {entry.rebuiltResult}
+                      </div>
+                      {entry.repairSignaturesBeforeWrite.length > 0 && (
+                        <div className="rw-preview-block">
+                          before={entry.repairSignaturesBeforeWrite.join(', ')}
+                        </div>
+                      )}
+                      {entry.remainingIntegritySignatures.length > 0 && (
+                        <div className="rw-preview-block">
+                          remaining=
+                          {entry.remainingIntegritySignatures.join(', ')}
+                        </div>
+                      )}
+                      {entry.followUp && (
+                        <div className="rw-preview-block">{entry.followUp}</div>
+                      )}
+                    </div>
+                  ))}
+              </div>
+              {legacyManagedPageApplyReportResult.entries.length > 60 && (
+                <div className="rw-preview-note">
+                  Showing the first 60 entries. Use Copy Apply Report for the
                   full list.
                 </div>
               )}

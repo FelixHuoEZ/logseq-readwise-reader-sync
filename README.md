@@ -21,6 +21,7 @@ This project is published as an independent plugin release line. If it is publis
 - `Refresh Local Snapshot Only` for rebuilding the local full-library snapshot without rewriting managed pages
 - `Cached Full Rebuild` for rewriting every managed page from the local snapshot without another full remote highlight scan
 - Cache-first legacy managed-page migration preview, with an in-panel apply step
+- Dedicated legacy managed-page apply report, including bind/rename/rebuild follow-up details
 - Current-page tools for `Rebuild Current Page From Cache` and `Refresh Current Page Metadata`
 - Preview-first current-page legacy ID migration for pages and whiteboards
 - Dedicated current-page preview and apply summaries, instead of burying successful previews in the issue list
@@ -75,7 +76,7 @@ Do not run this project and another Readwise Logseq plugin against the same grap
 8. Use `Rebuild Current Page From Cache` when a single managed page needs a local rebuild.
 9. Use `Refresh Current Page Metadata` when a single managed page needs fresh parent metadata from Reader.
 10. Open `Maintenance Tools > Migration` when you need low-frequency legacy id workflows.
-11. Use `Preview Legacy Managed Page Migration` to inspect safe non-tweet page rebindings from cached Reader metadata before applying them.
+11. Use `Preview Legacy Managed Page Migration` to inspect safe legacy page rebindings from cached Reader metadata before applying them. Tweet-only pages without `View Highlight` are skipped.
 12. Use `Preview Current Page Legacy ID Migration` to inspect legacy Readwise id rewrites on the current page or whiteboard before applying them.
 13. If the preview looks right, apply it from the same `Migration` section before leaving the workflow.
 14. Wait for the plugin to:
@@ -140,9 +141,13 @@ Use the highlight page limit only for short debug runs. Set it back to `0` for r
 `Repair Managed Pages` uses API-authoritative recovery for the hard cases:
 
 - If a damaged page has no `rw-reader-id`, but still has `View Highlight` links, repair re-looks up the parent through the Reader API instead of trusting cache alone.
-- If a damaged page points at a highlight whose original parent metadata is gone, repair scans Reader again for a replacement parent using the page's current metadata.
+- If a damaged page already has `rw-reader-id`, but its cached highlights are missing, repair now tries to reload the page's highlight documents directly from the embedded `View Highlight` links before giving up.
+- If a damaged page reloads sparse tweet/media highlights, repair now forces a Reader detail-enrichment pass before writing so image-first highlights do not collapse into blank headings.
+- Repair no longer falls back to a full Reader `article` replacement scan just to guess a missing parent document during this maintenance pass.
 - If Reader still does not provide a unique, high-confidence parent, the page stays as an issue instead of being rebound by guesswork.
-- Legacy managed page migration now follows a preview-first flow for non-tweet pages: the plugin proves a Reader parent from embedded ids, `View Highlight` links, or cached metadata, then previews the `rw-reader-id` bind plus title rename before you confirm the apply step.
+- Legacy managed page migration now follows a preview-first flow with tweet-only filtering: pages that still contain `View Highlight` stay in scope even if they are tweets, while tweet-only pages without `View Highlight` are skipped from this migration flow.
+- The apply step now emits a dedicated apply report that records which pages were bound, renamed, rebuilt, or still need manual follow-up.
+- Applying a legacy managed page migration now prefers local cache, but can also reload a page's highlights directly from Reader when the old page still contains `View Highlight` links. If a newly rebound page still lacks both cached highlights and reloadable `View Highlight` entries, run `Refresh Local Snapshot Only` or `Full Refresh` before using current-page rebuild tools.
 - Legacy block ref migration now follows a preview-first flow: the plugin lists every planned `((block ref))` rewrite before you confirm the apply step.
 - Current-page legacy id migration also follows a preview-first flow and rewrites only the current page or whiteboard. It updates proven Readwise legacy ids in `((block refs))`, whiteboard embeds, and `:refdock-item-id:` values, then shows a dedicated apply summary after the rewrite completes.
 

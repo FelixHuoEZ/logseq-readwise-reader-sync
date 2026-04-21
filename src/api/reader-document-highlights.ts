@@ -400,14 +400,16 @@ export const documentHasReaderRichMediaHints = (document: ReaderDocument) =>
 export const decideReaderDocumentHighlightDetailsStrategy = ({
   document,
   highlights,
+  force = false,
 }: {
   document: ReaderDocument | null | undefined
   highlights: readonly ReaderDocument[]
+  force?: boolean
 }): {
   shouldEnrich: boolean
   reason: ReaderDocumentHighlightDetailDecisionReason
 } => {
-  if (!highlights.some(highlightNeedsReaderDocumentDetails)) {
+  if (!force && !highlights.some(highlightNeedsReaderDocumentDetails)) {
     return {
       shouldEnrich: false,
       reason: 'already_resolved',
@@ -433,7 +435,7 @@ export const decideReaderDocumentHighlightDetailsStrategy = ({
     }
   }
 
-  if (!documentHasReaderRichMediaHints(document)) {
+  if (!force && !documentHasReaderRichMediaHints(document)) {
     return {
       shouldEnrich: false,
       reason: 'no_rich_media',
@@ -551,15 +553,18 @@ export const enrichReaderDocumentHighlightsViaMcp = async ({
   document,
   highlights,
   logPrefix,
+  force = false,
 }: {
   token: string
   document: ReaderDocument
   highlights: readonly ReaderDocument[]
   logPrefix?: string
+  force?: boolean
 }): Promise<ReaderDocumentHighlightEnrichmentResult> => {
   const strategy = decideReaderDocumentHighlightDetailsStrategy({
     document,
     highlights,
+    force,
   })
 
   if (!strategy.shouldEnrich) {
@@ -609,11 +614,13 @@ export const tryEnrichReaderDocumentHighlightsViaMcp = async ({
   document,
   highlights,
   logPrefix,
+  force = false,
 }: {
   token: string | null | undefined
   document: ReaderDocument
   highlights: readonly ReaderDocument[]
   logPrefix?: string
+  force?: boolean
 }): Promise<ReaderDocumentHighlightEnrichmentResult> => {
   const normalizedToken = normalizeOptionalText(token)
   if (!normalizedToken) {
@@ -633,6 +640,7 @@ export const tryEnrichReaderDocumentHighlightsViaMcp = async ({
       document,
       highlights,
       logPrefix,
+      force,
     })
   } catch (error) {
     if (logPrefix) {

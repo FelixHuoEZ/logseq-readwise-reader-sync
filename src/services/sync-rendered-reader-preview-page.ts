@@ -15,6 +15,7 @@ import {
   type SemanticMetadataEntry,
   type SemanticPage,
 } from '../renderer'
+import type { ReaderDocument } from '../types'
 import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import { rebuildManagedPageIfDamagedV1 } from './managed-page-integrity'
 import { withManagedSyncTimestampPagePropertiesV1 } from './managed-page-sync-timestamps'
@@ -51,6 +52,65 @@ const normalizeOptionalText = (value: string | null | undefined) => {
   return normalized.length > 0 ? normalized : null
 }
 
+const deriveHighlightTextAndSegments = (highlight: ReaderDocument) => {
+  const explicitPrimaryText = normalizeOptionalText(highlight.content) ?? ''
+  const extractedSegments = extractReaderHighlightContentSegments({
+    richContent: highlight.render_content ?? highlight.content,
+    imageUrl: highlight.image_url,
+    htmlContent: highlight.html_content,
+    primaryText: explicitPrimaryText,
+  })
+  const contentSegments = extractedSegments.map((segment) => ({ ...segment }))
+
+  if (explicitPrimaryText.length > 0) {
+    return {
+      text: explicitPrimaryText,
+      contentSegments,
+    }
+  }
+
+  const firstTextIndex = contentSegments.findIndex(
+    (segment) => segment.kind === 'text',
+  )
+
+  if (firstTextIndex >= 0) {
+    const firstTextSegment = contentSegments[firstTextIndex]
+    if (firstTextSegment?.kind === 'text') {
+      const [firstLine = '', ...restLines] = firstTextSegment.value.split('\n')
+      const fallbackText = normalizeOptionalText(firstLine)
+      const remainingText = normalizeOptionalText(restLines.join('\n'))
+
+      if (fallbackText) {
+        if (remainingText) {
+          contentSegments[firstTextIndex] = {
+            kind: 'text',
+            value: remainingText,
+          }
+        } else {
+          contentSegments.splice(firstTextIndex, 1)
+        }
+
+        return {
+          text: fallbackText,
+          contentSegments,
+        }
+      }
+    }
+  }
+
+  if (contentSegments.some((segment) => segment.kind === 'image')) {
+    return {
+      text: 'Media highlight',
+      contentSegments,
+    }
+  }
+
+  return {
+    text: 'View Highlight',
+    contentSegments,
+  }
+}
+
 const buildMetadataEntries = (
   previewBook: ReaderPreviewBook,
   syncDate: string,
@@ -79,19 +139,12 @@ const buildSemanticHighlights = (
   previewBook: ReaderPreviewBook,
 ): SemanticHighlight[] =>
   previewBook.highlights.map((highlight) => {
-    const primaryText = highlight.content?.trim() ?? ''
-    const highlightSegments = extractReaderHighlightContentSegments({
-      richContent: highlight.render_content ?? highlight.content,
-      imageUrl: highlight.image_url,
-      htmlContent: highlight.html_content,
-      primaryText,
-    })
-    const contentSegments = highlightSegments
+    const { text, contentSegments } = deriveHighlightTextAndSegments(highlight)
 
     return {
       highlightId: highlight.id,
       uuid: computeCompatibleHighlightUuid(highlight.url),
-      text: primaryText,
+      text,
       imageUrl: null,
       contentSegments,
       locationLabel: highlight.url ? 'View Highlight' : null,

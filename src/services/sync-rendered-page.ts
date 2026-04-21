@@ -139,8 +139,10 @@ export const syncRenderedPage = async (
     content,
     logPrefix,
   )
-  if (repairedPage.rebuilt && writeResult !== 'unchanged') {
-    await ensureManagedPageFileContentV1(page, pageName, content, logPrefix)
+  if (repairedPage.rebuilt) {
+    await ensureManagedPageFileContentV1(page, pageName, content, logPrefix, {
+      forceReparseAfterExactRewrite: true,
+    })
   }
   const result =
     repairedPage.rebuilt && writeResult === 'created' ? 'updated' : writeResult

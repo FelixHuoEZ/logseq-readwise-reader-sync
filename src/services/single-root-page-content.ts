@@ -9,6 +9,7 @@ const delay = async (ms: number) =>
   })
 
 const INSERTED_ROOT_POST_UPDATE_DELAY_MS = 500
+const FORCE_REPARSE_RESTORE_DELAY_MS = 450
 
 const removeDirectChildren = async (block: BlockEntity) => {
   for (const child of block.children ?? []) {
@@ -44,6 +45,69 @@ const stabilizeInsertedRootBlock = async (
     postUpdateDelayMs: INSERTED_ROOT_POST_UPDATE_DELAY_MS,
     strategy: 'best-effort-post-insert-update',
   })
+}
+
+const detectManagedPageFileFormatV1 = (
+  relativeFilePath: string,
+): 'org' | 'markdown' =>
+  relativeFilePath.toLowerCase().endsWith('.md') ? 'markdown' : 'org'
+
+const buildTemporaryTouchedManagedPageContentV1 = (
+  content: string,
+  format: 'org' | 'markdown',
+) => {
+  const stamp = new Date().toISOString()
+  const marker =
+    format === 'markdown'
+      ? `\n\n<!-- readwise-managed-page-reparse ${stamp} -->\n`
+      : `\n# readwise-managed-page-reparse ${stamp}\n`
+
+  return `${content}${marker}`
+}
+
+const forceReparseManagedPageFileContentV1 = async ({
+  relativeFilePath,
+  content,
+  format,
+}: {
+  relativeFilePath: string
+  content: string
+  format: 'org' | 'markdown'
+}) => {
+  const temporaryContent = buildTemporaryTouchedManagedPageContentV1(
+    content,
+    format,
+  )
+  let restoreError: unknown = null
+
+  try {
+    await logseq.DB.setFileContent(relativeFilePath, temporaryContent)
+    await delay(FORCE_REPARSE_RESTORE_DELAY_MS)
+  } finally {
+    try {
+      await logseq.DB.setFileContent(relativeFilePath, content)
+      await delay(FORCE_REPARSE_RESTORE_DELAY_MS)
+    } catch (error) {
+      restoreError = error
+    }
+  }
+
+  if (restoreError) {
+    throw new Error(
+      `Temporary touch succeeded, but restoring the original content failed for "${relativeFilePath}": ${
+        restoreError instanceof Error
+          ? restoreError.message
+          : String(restoreError)
+      }`,
+    )
+  }
+
+  const restoredContent = await logseq.DB.getFileContent(relativeFilePath)
+  if (restoredContent !== content) {
+    throw new Error(
+      `Original content was not restored cleanly for "${relativeFilePath}".`,
+    )
+  }
 }
 
 export const createManagedPageV1 = async (
@@ -154,9 +218,13 @@ export const ensureManagedPageFileContentV1 = async (
   pageName: string,
   content: string,
   logPrefix = '[Readwise Sync]',
+  options?: {
+    forceReparseAfterExactRewrite?: boolean
+  },
 ) => {
   const relativeFilePath = await resolveManagedPageFilePathV1(page)
   if (!relativeFilePath) return
+  const shouldForceReparse = options?.forceReparseAfterExactRewrite === true
 
   await delay(300)
 
@@ -168,24 +236,43 @@ export const ensureManagedPageFileContentV1 = async (
     currentContent = null
   }
 
-  if (currentContent === content) {
+  if (currentContent === content && !shouldForceReparse) {
     return
   }
 
-  logReadwiseDebug(logPrefix, 'forcing exact managed page file rewrite', {
+  if (currentContent !== content) {
+    logReadwiseDebug(logPrefix, 'forcing exact managed page file rewrite', {
+      pageName,
+      relativeFilePath,
+      currentLength: currentContent?.length ?? null,
+      expectedLength: content.length,
+    })
+
+    await logseq.DB.setFileContent(relativeFilePath, content)
+    await delay(400)
+
+    const confirmedContent = await logseq.DB.getFileContent(relativeFilePath)
+    if (confirmedContent !== content) {
+      throw new Error(
+        `Failed to stabilize managed page file content for "${pageName}"`,
+      )
+    }
+  }
+
+  if (!shouldForceReparse) {
+    return
+  }
+
+  logReadwiseDebug(logPrefix, 'forcing managed page file reparse after rewrite', {
     pageName,
     relativeFilePath,
-    currentLength: currentContent?.length ?? null,
-    expectedLength: content.length,
   })
 
-  await logseq.DB.setFileContent(relativeFilePath, content)
-  await delay(400)
-
-  const confirmedContent = await logseq.DB.getFileContent(relativeFilePath)
-  if (confirmedContent !== content) {
-    throw new Error(`Failed to stabilize managed page file content for "${pageName}"`)
-  }
+  await forceReparseManagedPageFileContentV1({
+    relativeFilePath,
+    content,
+    format: detectManagedPageFileFormatV1(relativeFilePath),
+  })
 }
 
 export const upsertSingleRootPageContentV1 = async (

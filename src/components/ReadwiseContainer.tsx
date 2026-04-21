@@ -1,14 +1,16 @@
 import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
 import './ReadwiseContainer.css'
 
-import { format } from 'date-fns'
+import { format, isValid, parseISO } from 'date-fns'
 import { useEffect, useRef, useState } from 'react'
 
 import {
   createReadwiseClient,
+  getReaderDocumentHighlightsViaMcp,
   isReaderPreviewLoadResumeError,
   loadReaderPreviewBooks,
   loadReaderPreviewBooksByParentIds,
+  mergeReaderDocumentHighlightsWithDetails,
   type ReaderDocumentHighlightDetailOutcome,
   type ReaderPreviewBook,
   type ReaderPreviewLoadMode,
@@ -44,7 +46,11 @@ import {
   logReadwiseInfo,
   logReadwiseWarn,
 } from '../logging'
-import { extractReaderHighlightContentSegments } from '../reader/extract-reader-highlight-content-segments'
+import {
+  extractReaderHighlightContentSegments,
+  normalizeReaderImageUrl,
+} from '../reader/extract-reader-highlight-content-segments'
+import { emitOrgPage, type SemanticPage } from '../renderer'
 import {
   assertManagedPageFileNameWithinLimits,
   auditManagedReaderPagesV1,
@@ -75,10 +81,16 @@ import {
   saveFormalTestSessionManifestV1,
   setupProps,
   softReopenCurrentPageV1,
+  syncManagedPagePropertiesV1,
   syncRenderedDebugPage,
   syncRenderedPage,
   syncRenderedReaderPreviewPage,
 } from '../services'
+import { withManagedSyncTimestampPagePropertiesV1 } from '../services/managed-page-sync-timestamps'
+import {
+  ensureManagedPageFileContentV1,
+  writeSingleRootPageContentV1,
+} from '../services/single-root-page-content'
 import { deriveNextUpdatedAfterV1 } from '../sync'
 import type {
   ExportedBook,
@@ -88,6 +100,7 @@ import type {
   ReaderDocument,
   SyncStatus,
 } from '../types'
+import { computeCompatibleHighlightUuid } from '../uuid-compat'
 import {
   buildRunIssuesBundle,
   diagnoseRunIssue,
@@ -211,7 +224,12 @@ interface LegacyManagedPageApplyReportEntry {
   readerDocumentTitle: string | null
   bound: boolean
   renamed: boolean
-  rebuildSource: 'none' | 'cache' | 'reader_remote' | 'page_metadata'
+  rebuildSource:
+    | 'none'
+    | 'cache'
+    | 'reader_remote'
+    | 'page_metadata'
+    | 'orphan_metadata'
   rebuiltResult: 'created' | 'updated' | 'unchanged' | 'skipped' | 'failed'
   repairSignaturesBeforeWrite: string[]
   remainingIntegritySignatures: string[]
@@ -1088,6 +1106,191 @@ export const ReadwiseContainer = () => {
       last_moved_at: null,
       html_content: null,
       render_content: null,
+    }
+  }
+
+  const toYmd = (value: string | null | undefined) => {
+    if (!value) return null
+
+    const parsed = parseISO(value)
+    if (!isValid(parsed)) return null
+
+    return format(parsed, 'yyyy-MM-dd')
+  }
+
+  const normalizeDocumentTagNames = (
+    value: Record<string, unknown> | null | undefined,
+  ) => Object.keys(value ?? {}).filter((name) => name.trim().length > 0)
+
+  const extractManagedPageHighlightSection = (rootContent: string) => {
+    const prelude = extractManagedPagePrelude(rootContent)
+    const remainder = rootContent.slice(prelude.length).replace(/^\n+/, '')
+    return remainder.trim().length > 0 ? remainder : null
+  }
+
+  const normalizeLegacyHighlightIdsInSection = (section: string) => {
+    if (section.trim().length === 0) {
+      return {
+        content: section,
+        rewritesApplied: 0,
+      }
+    }
+
+    const lines = section.split('\n')
+    let activeHighlightUrl: string | null = null
+    let insideProperties = false
+    let rewritesApplied = 0
+
+    const nextLines = lines.map((line) => {
+      if (/^\*{2}\s/.test(line)) {
+        insideProperties = false
+        const match = line.match(
+          /\[\[(https:\/\/read\.readwise\.io\/read\/[0-9a-z]+)\]\[View Highlight\]\]/i,
+        )
+        activeHighlightUrl = match?.[1] ?? null
+        return line
+      }
+
+      if (/^:PROPERTIES:\s*$/.test(line)) {
+        insideProperties = true
+        return line
+      }
+
+      if (/^:END:\s*$/.test(line)) {
+        insideProperties = false
+        return line
+      }
+
+      if (insideProperties && activeHighlightUrl && /^:id:\s+/i.test(line)) {
+        const nextUuid = computeCompatibleHighlightUuid(activeHighlightUrl)
+        const nextLine = `:id: ${nextUuid}`
+        if (nextLine !== line) {
+          rewritesApplied += 1
+        }
+        return nextLine
+      }
+
+      return line
+    })
+
+    return {
+      content: nextLines.join('\n'),
+      rewritesApplied,
+    }
+  }
+
+  const buildMetadataOnlySemanticPage = ({
+    document,
+    syncDate,
+  }: {
+    document: ReaderDocument
+    syncDate: string
+  }): SemanticPage => {
+    const documentTags = normalizeDocumentTagNames(document.tags)
+
+    return {
+      format: 'org',
+      pageTitle:
+        typeof document.title === 'string' && document.title.trim().length > 0
+          ? document.title
+          : document.id,
+      metadata: [
+        { key: 'rw-reader-id', value: document.id },
+        { key: 'AUTHOR', value: document.author ?? null },
+        { key: 'CATEGORIES', value: document.category ?? null },
+        { key: 'LINK', value: document.source_url ?? document.url ?? null },
+        {
+          key: 'TAGS',
+          value:
+            documentTags.length > 0
+              ? ` ${documentTags.join('  ,  ')}  ,  `
+              : null,
+        },
+        { key: 'summary', value: document.summary ?? null },
+        { key: 'DATE', value: syncDate },
+        { key: 'PUBLISHED', value: toYmd(document.published_date) },
+        { key: 'SAVED', value: toYmd(document.saved_at) },
+      ],
+      pageNote:
+        normalizeRepairFallbackText(document.notes) != null ||
+        normalizeReaderImageUrl(document.image_url) != null
+          ? {
+              imageUrl: normalizeReaderImageUrl(document.image_url),
+              text: normalizeRepairFallbackText(document.notes),
+            }
+          : null,
+      syncHeader: {
+        kind: 'none',
+        text: null,
+      },
+      highlights: [],
+    }
+  }
+
+  const repairOrphanManagedPageFromDocument = async ({
+    page,
+    pageName,
+    document,
+    rootContent,
+    logPrefix,
+  }: {
+    page: PageEntity
+    pageName: string
+    document: ReaderDocument
+    rootContent: string
+    logPrefix: string
+  }) => {
+    const syncDate = format(new Date(), 'yyyy-MM-dd')
+    const semanticPage = buildMetadataOnlySemanticPage({
+      document,
+      syncDate,
+    })
+    const emitResult = emitOrgPage(semanticPage)
+    const existingHighlightSection =
+      extractManagedPageHighlightSection(rootContent) ?? ''
+    const normalizedHighlightSection = normalizeLegacyHighlightIdsInSection(
+      existingHighlightSection,
+    )
+    const nextContent = [
+      emitResult.outputText,
+      normalizedHighlightSection.content.trim().length > 0
+        ? normalizedHighlightSection.content
+        : null,
+    ]
+      .filter((part): part is string => typeof part === 'string' && part.length > 0)
+      .join('\n\n')
+
+    const pageProperties = await withManagedSyncTimestampPagePropertiesV1({
+      page,
+      pageProperties: emitResult.pageProperties,
+      syncDate,
+      fallbackFirstSyncedAt: null,
+    })
+    await syncManagedPagePropertiesV1(page, pageProperties, logPrefix)
+    const writeResult = await writeSingleRootPageContentV1(
+      page,
+      pageName,
+      nextContent,
+      logPrefix,
+    )
+    await ensureManagedPageFileContentV1(page, pageName, nextContent, logPrefix, {
+      forceReparseAfterExactRewrite: true,
+    })
+
+    logReadwiseInfo(logPrefix, 'repaired orphan managed page from document metadata', {
+      pageName,
+      readerDocumentId: document.id,
+      writeResult,
+      normalizedLegacyIdCount: normalizedHighlightSection.rewritesApplied,
+      preservedHighlightSection:
+        normalizedHighlightSection.content.trim().length > 0,
+    })
+
+    return {
+      result: writeResult,
+      normalizedLegacyIdCount: normalizedHighlightSection.rewritesApplied,
+      preservedHighlightSection:
+        normalizedHighlightSection.content.trim().length > 0,
     }
   }
 
@@ -2041,6 +2244,248 @@ export const ReadwiseContainer = () => {
       highlights: fetchedHighlights.sort(sortReaderDocumentsByCreatedAtAscending),
       failedHighlightIds,
       mismatchedHighlightIds,
+    }
+  }
+
+  const loadLegacyManagedPageRepairHighlightsFromRecoveredDocument = async ({
+    pageName,
+    expectedParentId,
+    readerAuthToken,
+    client,
+    logPrefix,
+  }: {
+    pageName: string
+    expectedParentId: string
+    readerAuthToken: string | null | undefined
+    client: ReturnType<typeof createReadwiseClient> | null | undefined
+    logPrefix: string
+  }): Promise<{
+    highlights: ReaderDocument[]
+    failedHighlightIds: string[]
+    mismatchedHighlightIds: string[]
+  }> => {
+    if (!readerAuthToken || !client) {
+      return {
+        highlights: [],
+        failedHighlightIds: [],
+        mismatchedHighlightIds: [],
+      }
+    }
+
+    let detailList: Awaited<ReturnType<typeof getReaderDocumentHighlightsViaMcp>>
+
+    try {
+      detailList = await getReaderDocumentHighlightsViaMcp(
+        readerAuthToken,
+        expectedParentId,
+      )
+    } catch (error) {
+      if (error instanceof Error && error.name === 'ReadwiseRunCancelledError') {
+        throw error
+      }
+
+      logReadwiseWarn(
+        logPrefix,
+        'failed to load recovered Reader document highlights via MCP',
+        {
+          pageName,
+          expectedParentId,
+          formattedError: describeUnknownError(error),
+        },
+      )
+
+      return {
+        highlights: [],
+        failedHighlightIds: [`document:${expectedParentId}`],
+        mismatchedHighlightIds: [],
+      }
+    }
+
+    const highlightIds = uniqueStrings(
+      detailList
+        .map((detail) => detail.id.trim())
+        .filter((detailId) => detailId.length > 0),
+    )
+
+    if (highlightIds.length === 0) {
+      return {
+        highlights: [],
+        failedHighlightIds: [],
+        mismatchedHighlightIds: [],
+      }
+    }
+
+    const failedHighlightIds: string[] = []
+    const mismatchedHighlightIds: string[] = []
+    const fetchedHighlightResults = await mapWithConcurrency(
+      highlightIds,
+      3,
+      async (highlightId) => {
+        throwIfCancelled()
+
+        try {
+          return await loadReaderDocumentByIdWithRetry(client, highlightId, logPrefix)
+        } catch (error) {
+          if (error instanceof Error && error.name === 'ReadwiseRunCancelledError') {
+            throw error
+          }
+
+          logReadwiseWarn(
+            logPrefix,
+            'failed to reload recovered Reader document highlight by id',
+            {
+              pageName,
+              highlightId,
+              expectedParentId,
+              formattedError: describeUnknownError(error),
+            },
+          )
+          failedHighlightIds.push(highlightId)
+          return null
+        }
+      },
+    )
+
+    const fetchedHighlights: ReaderDocument[] = []
+
+    for (const highlight of fetchedHighlightResults) {
+      if (!highlight) continue
+
+      if (highlight.parent_id !== expectedParentId) {
+        mismatchedHighlightIds.push(
+          `${highlight.id}:${highlight.parent_id ?? '(none)'}`,
+        )
+        continue
+      }
+
+      fetchedHighlights.push(highlight)
+    }
+
+    const mergedHighlights = mergeReaderDocumentHighlightsWithDetails(
+      fetchedHighlights,
+      detailList,
+    )
+
+    logReadwiseDebug(
+      logPrefix,
+      'loaded legacy managed page highlights from recovered Reader document',
+      {
+        pageName,
+        expectedParentId,
+        requestedHighlightCount: highlightIds.length,
+        detailCount: detailList.length,
+        fetchedHighlightCount: mergedHighlights.highlights.length,
+        failedHighlightCount: failedHighlightIds.length,
+        mismatchedHighlightCount: mismatchedHighlightIds.length,
+        changedHighlightCount: mergedHighlights.changedCount,
+      },
+    )
+
+    return {
+      highlights: mergedHighlights.highlights.sort(
+        sortReaderDocumentsByCreatedAtAscending,
+      ),
+      failedHighlightIds,
+      mismatchedHighlightIds,
+    }
+  }
+
+  const loadRepairHighlightsForManagedPage = async ({
+    rootContent,
+    pageName,
+    expectedParentId,
+    readerAuthToken,
+    client,
+    logPrefix,
+  }: {
+    rootContent: string
+    pageName: string
+    expectedParentId: string
+    readerAuthToken: string | null | undefined
+    client: ReturnType<typeof createReadwiseClient> | null | undefined
+    logPrefix: string
+  }): Promise<{
+    highlights: ReaderDocument[]
+    failedHighlightIds: string[]
+    mismatchedHighlightIds: string[]
+    source: 'none' | 'embedded_links' | 'recovered_document'
+  }> => {
+    if (!client) {
+      return {
+        highlights: [],
+        failedHighlightIds: [],
+        mismatchedHighlightIds: [],
+        source: 'none',
+      }
+    }
+
+    const embeddedLinkReload =
+      await loadLegacyManagedPageRepairHighlightsFromReader({
+        rootContent,
+        pageName,
+        expectedParentId,
+        client,
+        logPrefix,
+      })
+
+    let bestReload = embeddedLinkReload
+    let source: 'none' | 'embedded_links' | 'recovered_document' =
+      embeddedLinkReload.highlights.length > 0 ? 'embedded_links' : 'none'
+
+    const shouldTryRecoveredDocumentReload =
+      !!readerAuthToken &&
+      !!client &&
+      (embeddedLinkReload.highlights.length === 0 ||
+        embeddedLinkReload.failedHighlightIds.length > 0 ||
+        embeddedLinkReload.mismatchedHighlightIds.length > 0)
+
+    if (!shouldTryRecoveredDocumentReload) {
+      return {
+        ...bestReload,
+        source,
+      }
+    }
+
+    const recoveredDocumentReload =
+      await loadLegacyManagedPageRepairHighlightsFromRecoveredDocument({
+        pageName,
+        expectedParentId,
+        readerAuthToken,
+        client,
+        logPrefix,
+      })
+
+    const shouldPreferRecoveredDocumentReload =
+      recoveredDocumentReload.highlights.length > 0 &&
+      (embeddedLinkReload.highlights.length === 0 ||
+        recoveredDocumentReload.highlights.length >
+          embeddedLinkReload.highlights.length ||
+        embeddedLinkReload.failedHighlightIds.length > 0 ||
+        embeddedLinkReload.mismatchedHighlightIds.length > 0)
+
+    if (shouldPreferRecoveredDocumentReload) {
+      logReadwiseInfo(
+        logPrefix,
+        'repair highlight reload switched to recovered Reader document',
+        {
+          pageName,
+          expectedParentId,
+          previousHighlightCount: embeddedLinkReload.highlights.length,
+          recoveredHighlightCount: recoveredDocumentReload.highlights.length,
+          previousFailedHighlightCount:
+            embeddedLinkReload.failedHighlightIds.length,
+          previousMismatchedHighlightCount:
+            embeddedLinkReload.mismatchedHighlightIds.length,
+        },
+      )
+
+      bestReload = recoveredDocumentReload
+      source = 'recovered_document'
+    }
+
+    return {
+      ...bestReload,
+      source,
     }
   }
 
@@ -5270,79 +5715,44 @@ export const ReadwiseContainer = () => {
         throwIfCancelled()
         const candidate = scanResult.candidates[index]!
         setCurrentBook(candidate.pageName)
+        let remoteHighlightReload:
+          | Awaited<ReturnType<typeof loadRepairHighlightsForManagedPage>>
+          | null = null
 
         let highlights = [
           ...(highlightsByParent.get(candidate.readerDocumentId) ?? []),
         ].sort(sortReaderDocumentsByCreatedAtAscending)
 
         if (highlights.length === 0) {
-          const remoteHighlightReload =
-            await loadLegacyManagedPageRepairHighlightsFromReader({
-              rootContent: candidate.rootContent,
-              pageName: candidate.pageName,
-              expectedParentId: candidate.readerDocumentId,
-              client,
-              logPrefix: formalSyncLogPrefix,
-            })
-
-          if (
-            remoteHighlightReload.failedHighlightIds.length > 0 ||
-            remoteHighlightReload.mismatchedHighlightIds.length > 0 ||
-            remoteHighlightReload.highlights.length === 0
-          ) {
-            const issue: RunIssue = {
-              book: candidate.pageName,
-              message: `Repair skipped because no rebuildable highlights were found for rw-reader-id=${candidate.readerDocumentId}.`,
-              summary:
-                remoteHighlightReload.highlights.length === 0
-                  ? 'Automatic repair could not find cached highlights or reloadable View Highlight entries for this page.'
-                  : 'Automatic repair could not safely reload every View Highlight entry for this page.',
-              suggestedAction:
-                'Run Refresh Local Snapshot Only or Full Refresh, then rerun Repair Managed Pages.',
-              debugFacts: [
-                `detectedSignatures=${candidate.signatures.join(', ')}`,
-                `failedHighlightIds=${remoteHighlightReload.failedHighlightIds.join(', ') || '(none)'}`,
-                `mismatchedHighlightIds=${remoteHighlightReload.mismatchedHighlightIds.join(', ') || '(none)'}`,
-              ],
-              readerDocumentId: candidate.readerDocumentId,
-              namespacePrefix: formalNamespaceRoot,
-              pageName: candidate.pageName,
-            }
-            repairIssues.push(issue)
-            repairIssuesCount = repairIssues.length
-            appendRunIssue(issue)
-            repairProgressCompleted = index + 1
-            updateLiveRunIssueMetrics({
-              processedItems: index + 1,
-              stats: {
-                pagesTargeted: scanResult.candidates.length,
-                pagesProcessed: repairedCount,
-              },
-            })
-            setCurrent(index + 1)
-            updateReaderSyncEta(
-              'write-pages',
-              'page repairs',
-              index + 1,
-              scanResult.candidates.length,
-            )
-            continue
-          }
+          remoteHighlightReload = await loadRepairHighlightsForManagedPage({
+            rootContent: candidate.rootContent,
+            pageName: candidate.pageName,
+            expectedParentId: candidate.readerDocumentId,
+            readerAuthToken: token,
+            client,
+            logPrefix: formalSyncLogPrefix,
+          })
 
           highlights = remoteHighlightReload.highlights
 
-          try {
-            await previewCache.putHighlights(highlights)
-          } catch (error) {
-            logReadwiseWarn(
-              formalSyncLogPrefix,
-              'failed to persist remotely reloaded repair highlights',
-              {
-                readerDocumentId: candidate.readerDocumentId,
-                highlightCount: highlights.length,
-                formattedError: describeUnknownError(error),
-              },
-            )
+          if (
+            remoteHighlightReload.failedHighlightIds.length === 0 &&
+            remoteHighlightReload.mismatchedHighlightIds.length === 0 &&
+            highlights.length > 0
+          ) {
+            try {
+              await previewCache.putHighlights(highlights)
+            } catch (error) {
+              logReadwiseWarn(
+                formalSyncLogPrefix,
+                'failed to persist remotely reloaded repair highlights',
+                {
+                  readerDocumentId: candidate.readerDocumentId,
+                  highlightCount: highlights.length,
+                  formattedError: describeUnknownError(error),
+                },
+              )
+            }
           }
         }
 
@@ -5387,6 +5797,106 @@ export const ReadwiseContainer = () => {
               readerDocumentId: candidate.readerDocumentId,
             },
           )
+        }
+
+        if (highlights.length === 0) {
+          const page = (await logseq.Editor.getPage(
+            candidate.pageName,
+          )) as PageEntity | null
+
+          if (page && document) {
+            try {
+              const orphanRepairResult = await repairOrphanManagedPageFromDocument({
+                page,
+                pageName: candidate.pageName,
+                document,
+                rootContent: candidate.rootContent,
+                logPrefix: formalSyncLogPrefix,
+              })
+
+              repairedCount += 1
+              const orphanRepairIssue: RunIssue = {
+                book: candidate.pageName,
+                category: 'warning',
+                message: `Repair used metadata-only orphan fallback for ${candidate.pageName}.`,
+                summary:
+                  'The Reader document id was recovered, but current remote highlights were unavailable. The page metadata was refreshed, existing local highlights were preserved, and legacy block ids were normalized.',
+                suggestedAction:
+                  'Review the page content if you expect remote highlights to reappear later.',
+                debugFacts: [
+                  `readerDocumentId=${candidate.readerDocumentId}`,
+                  `highlightReloadSource=${remoteHighlightReload?.source ?? 'none'}`,
+                  `normalizedLegacyIdCount=${orphanRepairResult.normalizedLegacyIdCount}`,
+                ],
+                readerDocumentId: candidate.readerDocumentId,
+                namespacePrefix: formalNamespaceRoot,
+                pageName: candidate.pageName,
+              }
+              repairIssues.push(orphanRepairIssue)
+              repairIssuesCount = repairIssues.length
+              appendRunIssue(orphanRepairIssue)
+            } catch (error) {
+              const issue: RunIssue = {
+                book: candidate.pageName,
+                message: `Repair skipped because no rebuildable highlights were found for rw-reader-id=${candidate.readerDocumentId}.`,
+                summary: `Automatic repair could not rebuild highlights, and metadata-only orphan repair failed: ${describeUnknownError(error)}`,
+                suggestedAction:
+                  'Run Refresh Local Snapshot Only or Full Refresh, then rerun Repair Managed Pages.',
+                debugFacts: [
+                  `detectedSignatures=${candidate.signatures.join(', ')}`,
+                  `highlightReloadSource=${remoteHighlightReload?.source ?? 'none'}`,
+                  `failedHighlightIds=${remoteHighlightReload?.failedHighlightIds.join(', ') || '(none)'}`,
+                  `mismatchedHighlightIds=${remoteHighlightReload?.mismatchedHighlightIds.join(', ') || '(none)'}`,
+                ],
+                readerDocumentId: candidate.readerDocumentId,
+                namespacePrefix: formalNamespaceRoot,
+                pageName: candidate.pageName,
+              }
+              repairIssues.push(issue)
+              repairIssuesCount = repairIssues.length
+              appendRunIssue(issue)
+            }
+          } else {
+            const issue: RunIssue = {
+              book: candidate.pageName,
+              message: `Repair skipped because no rebuildable highlights were found for rw-reader-id=${candidate.readerDocumentId}.`,
+              summary:
+                remoteHighlightReload?.highlights.length === 0
+                  ? 'Automatic repair could not find cached highlights, reloadable View Highlight entries, or rebuildable highlights from the recovered Reader document.'
+                  : 'Automatic repair could not safely reload every highlight needed to rebuild this page.',
+              suggestedAction:
+                'Run Refresh Local Snapshot Only or Full Refresh, then rerun Repair Managed Pages.',
+              debugFacts: [
+                `detectedSignatures=${candidate.signatures.join(', ')}`,
+                `highlightReloadSource=${remoteHighlightReload?.source ?? 'none'}`,
+                `failedHighlightIds=${remoteHighlightReload?.failedHighlightIds.join(', ') || '(none)'}`,
+                `mismatchedHighlightIds=${remoteHighlightReload?.mismatchedHighlightIds.join(', ') || '(none)'}`,
+              ],
+              readerDocumentId: candidate.readerDocumentId,
+              namespacePrefix: formalNamespaceRoot,
+              pageName: candidate.pageName,
+            }
+            repairIssues.push(issue)
+            repairIssuesCount = repairIssues.length
+            appendRunIssue(issue)
+          }
+
+          repairProgressCompleted = index + 1
+          updateLiveRunIssueMetrics({
+            processedItems: index + 1,
+            stats: {
+              pagesTargeted: scanResult.candidates.length,
+              pagesProcessed: repairedCount,
+            },
+          })
+          setCurrent(index + 1)
+          updateReaderSyncEta(
+            'write-pages',
+            'page repairs',
+            index + 1,
+            scanResult.candidates.length,
+          )
+          continue
         }
 
         highlights = await maybeEnrichManagedPageWriteHighlights({
@@ -6197,6 +6707,7 @@ export const ReadwiseContainer = () => {
               ).get(entry.readerDocumentId) ?? null
 
               let usedRemoteHighlightFallback = false
+              let usedPageMetadataDocumentFallback = false
 
               if (resolvedHighlights.length === 0) {
                 if (!readerClient) {
@@ -6205,10 +6716,11 @@ export const ReadwiseContainer = () => {
                     'Integrity issues remain, but no cached highlights were found and no Reader token is available for remote reload. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
                 } else {
                   const remoteHighlightReload =
-                    await loadLegacyManagedPageRepairHighlightsFromReader({
+                    await loadRepairHighlightsForManagedPage({
                       rootContent: integrityBeforeWrite.searchableContent,
                       pageName: finalPageName ?? currentPageName,
                       expectedParentId: entry.readerDocumentId,
+                      readerAuthToken,
                       client: readerClient,
                       logPrefix: formalSyncLogPrefix,
                     })
@@ -6219,11 +6731,11 @@ export const ReadwiseContainer = () => {
                   ) {
                     followUp =
                       followUp ??
-                      `Integrity issues remain, and Reader highlight reload was incomplete. failed=${remoteHighlightReload.failedHighlightIds.join(', ') || '(none)'} mismatched=${remoteHighlightReload.mismatchedHighlightIds.join(', ') || '(none)'}`
+                      `Integrity issues remain, and Reader highlight reload was incomplete. source=${remoteHighlightReload.source} failed=${remoteHighlightReload.failedHighlightIds.join(', ') || '(none)'} mismatched=${remoteHighlightReload.mismatchedHighlightIds.join(', ') || '(none)'}`
                   } else if (remoteHighlightReload.highlights.length === 0) {
                     followUp =
                       followUp ??
-                      'Integrity issues remain, but the page had no reloadable View Highlight entries. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
+                      'Integrity issues remain, but the page had no rebuildable highlights in cache, embedded View Highlight links, or the recovered Reader document. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
                   } else {
                     resolvedHighlights = remoteHighlightReload.highlights
                     usedRemoteHighlightFallback = true
@@ -6281,9 +6793,62 @@ export const ReadwiseContainer = () => {
               }
 
               if (resolvedHighlights.length === 0) {
-                followUp =
-                  followUp ??
-                  'Integrity issues remain, but no highlights were available for rebuild. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
+                if (!resolvedDocument) {
+                  resolvedDocument = buildFallbackReaderDocumentFromManagedPage({
+                    pageName: finalPageName ?? currentPageName,
+                    readerDocumentId: entry.readerDocumentId,
+                    rootContent: integrityBeforeWrite.rootContent,
+                  })
+                  usedPageMetadataDocumentFallback = true
+                }
+
+                if (migratedPage && resolvedDocument) {
+                  try {
+                    const orphanRepairResult =
+                      await repairOrphanManagedPageFromDocument({
+                        page: migratedPage,
+                        pageName: finalPageName ?? currentPageName,
+                        document: resolvedDocument,
+                        rootContent: integrityBeforeWrite.rootContent,
+                        logPrefix: formalSyncLogPrefix,
+                      })
+                    rebuildSource = usedPageMetadataDocumentFallback
+                      ? 'page_metadata'
+                      : 'orphan_metadata'
+                    rebuiltResult = orphanRepairResult.result
+
+                    const rebuiltPage = (await logseq.Editor.getPage(
+                      finalPageName ?? currentPageName,
+                    )) as PageEntity | null
+                    if (!rebuiltPage) {
+                      followUp =
+                        'Metadata-only orphan repair finished, but the page could not be reloaded for integrity verification.'
+                    } else {
+                      remainingIntegritySignatures = (
+                        await inspectManagedPageIntegrityV1(rebuiltPage)
+                      ).signatures
+                      const metadataSourceLabel = usedPageMetadataDocumentFallback
+                        ? 'page metadata fallback'
+                        : 'recovered Reader document metadata'
+                      if (remainingIntegritySignatures.length > 0) {
+                        followUp =
+                          `Metadata-only orphan repair completed using ${metadataSourceLabel}, but integrity signatures remain: ${remainingIntegritySignatures.join(', ')}.`
+                      } else {
+                        followUp =
+                          followUp ??
+                          `Metadata-only orphan repair refreshed page metadata using ${metadataSourceLabel} and preserved existing local highlights because current remote highlights were unavailable.`
+                      }
+                    }
+                  } catch (error: unknown) {
+                    rebuiltResult = 'failed'
+                    followUp =
+                      `Metadata-only orphan repair after apply failed: ${describeUnknownError(error)}`
+                  }
+                } else {
+                  followUp =
+                    followUp ??
+                    'Integrity issues remain, but no highlights were available for rebuild. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
+                }
               } else {
                 if (!resolvedDocument) {
                   resolvedDocument = buildFallbackReaderDocumentFromManagedPage({
@@ -6291,6 +6856,7 @@ export const ReadwiseContainer = () => {
                     readerDocumentId: entry.readerDocumentId,
                     rootContent: integrityBeforeWrite.rootContent,
                   })
+                  usedPageMetadataDocumentFallback = true
                   rebuildSource = 'page_metadata'
                   followUp =
                     followUp ??

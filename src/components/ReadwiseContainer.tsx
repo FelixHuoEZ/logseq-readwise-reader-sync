@@ -211,7 +211,7 @@ interface LegacyManagedPageApplyReportEntry {
   readerDocumentTitle: string | null
   bound: boolean
   renamed: boolean
-  rebuildSource: 'none' | 'cache' | 'reader_remote'
+  rebuildSource: 'none' | 'cache' | 'reader_remote' | 'page_metadata'
   rebuiltResult: 'created' | 'updated' | 'unchanged' | 'skipped' | 'failed'
   repairSignaturesBeforeWrite: string[]
   remainingIntegritySignatures: string[]
@@ -970,6 +970,124 @@ export const ReadwiseContainer = () => {
       normalizedAuthor: normalizeComparableText(author),
       category,
       normalizedCategory: normalizeReaderCategory(category),
+    }
+  }
+
+  const extractManagedPagePrelude = (rootContent: string) => {
+    const prelude: string[] = []
+
+    for (const line of rootContent.split('\n')) {
+      if (
+        /^\* Highlights (?:first synced|refreshed) by \[\[Readwise\]\]/.test(
+          line,
+        ) ||
+        /^\*\* /.test(line)
+      ) {
+        break
+      }
+
+      prelude.push(line)
+    }
+
+    return prelude.join('\n')
+  }
+
+  const normalizeRepairFallbackText = (value: string | null | undefined) => {
+    if (typeof value !== 'string') return null
+
+    const normalized = value.trim()
+    if (normalized.length === 0) return null
+    if (/^(?:none|null)$/i.test(normalized)) return null
+
+    return normalized
+  }
+
+  const extractManagedPagePinnedSummary = (rootContent: string) => {
+    const pagePrelude = extractManagedPagePrelude(rootContent)
+    const match = pagePrelude.match(
+      /^#\+BEGIN_PINNED\s*\n([\s\S]*?)\n#\+END_PINNED$/m,
+    )
+
+    return normalizeRepairFallbackText(match?.[1] ?? null)
+  }
+
+  const extractManagedPagePageNote = (rootContent: string) => {
+    const pagePrelude = extractManagedPagePrelude(rootContent)
+    const match = pagePrelude.match(/^#\+BEGIN_NOTE\s*\n([\s\S]*?)\n#\+END_NOTE$/m)
+    const noteBody = match?.[1] ?? null
+
+    if (!noteBody) {
+      return {
+        imageUrl: null,
+        text: null,
+      }
+    }
+
+    const lines = noteBody.split('\n')
+    const [firstLine = ''] = lines
+    const imageMatch = firstLine.trim().match(/^\[\[([^[\]]+)\]\]$/)
+    const imageUrl = imageMatch?.[1]?.trim() ?? null
+    const text = normalizeRepairFallbackText(
+      lines.slice(imageMatch ? 1 : 0).join('\n'),
+    )
+
+    return {
+      imageUrl,
+      text,
+    }
+  }
+
+  const buildFallbackReaderDocumentFromManagedPage = ({
+    pageName,
+    readerDocumentId,
+    rootContent,
+  }: {
+    pageName: string
+    readerDocumentId: string
+    rootContent: string
+  }): ReaderDocument => {
+    const signals = extractManagedPageRepairSignals({
+      pageName,
+      rootContent,
+    })
+    const now = new Date().toISOString()
+    const savedAt =
+      extractRootPropertyValue(rootContent, 'SAVED') ??
+      extractRootPropertyValue(rootContent, 'DATE')
+    const publishedDate = extractRootPropertyValue(rootContent, 'PUBLISHED')
+    const pageNote = extractManagedPagePageNote(rootContent)
+    const summary =
+      extractManagedPagePinnedSummary(rootContent) ??
+      extractRootPropertyValue(rootContent, 'summary')
+
+    return {
+      id: readerDocumentId,
+      url: signals.linkUrl ?? '',
+      parent_id: null,
+      source_url: signals.linkUrl,
+      title: signals.pageTitle || readerDocumentId,
+      author: signals.author,
+      source: null,
+      category: signals.category,
+      location: null,
+      tags: null,
+      site_name: null,
+      word_count: null,
+      reading_time: null,
+      created_at: savedAt ?? publishedDate ?? now,
+      updated_at: now,
+      published_date: publishedDate,
+      summary,
+      image_url: pageNote.imageUrl,
+      content: null,
+      notes: pageNote.text,
+      reading_progress: null,
+      first_opened_at: null,
+      last_opened_at: null,
+      saved_at: savedAt,
+      last_moved_at: null,
+      html_content: null,
+      render_content: null,
     }
   }
 
@@ -2162,6 +2280,11 @@ export const ReadwiseContainer = () => {
     const deferredIdentityRetries: ManagedPageRepairIdentityRetryCandidate[] =
       []
     const issues: RunIssue[] = []
+    const replacementLookupIndex = buildReaderDocumentRepairLookupIndex(
+      options?.previewCache
+        ? await options.previewCache.loadAllCachedParentDocuments()
+        : [],
+    )
 
     const scanResults = await mapWithConcurrency(
       managedPages,
@@ -2194,9 +2317,19 @@ export const ReadwiseContainer = () => {
               logPrefix: formalSyncLogPrefix,
               allowApiReplacementLookup: false,
             })
+        const cachedMetadataReplacement =
+          pageReaderDocumentId || inferredReaderDocument?.readerDocumentId
+            ? null
+            : findReplacementReaderParentDocumentFromLookupIndex({
+                pageName,
+                rootContent: inspection.searchableContent,
+                lookupIndex: replacementLookupIndex,
+                logPrefix: formalSyncLogPrefix,
+              })
         const readerDocumentId =
           pageReaderDocumentId ??
           inferredReaderDocument?.readerDocumentId ??
+          cachedMetadataReplacement?.document?.id ??
           null
 
         if (!readerDocumentId) {
@@ -2289,13 +2422,26 @@ export const ReadwiseContainer = () => {
             logPrefix: formalSyncLogPrefix,
             allowApiReplacementLookup: false,
           })
+          const cachedMetadataReplacement =
+            deferredInference.readerDocumentId != null
+              ? null
+              : findReplacementReaderParentDocumentFromLookupIndex({
+                  pageName: deferredPage.pageName,
+                  rootContent: deferredPage.rootContent,
+                  lookupIndex: replacementLookupIndex,
+                  logPrefix: formalSyncLogPrefix,
+                })
+          const resolvedReaderDocumentId =
+            deferredInference.readerDocumentId ??
+            cachedMetadataReplacement?.document?.id ??
+            null
 
-          if (deferredInference.readerDocumentId) {
+          if (resolvedReaderDocumentId) {
             return {
               pageName: deferredPage.pageName,
               candidate: {
                 pageName: deferredPage.pageName,
-                readerDocumentId: deferredInference.readerDocumentId,
+                readerDocumentId: resolvedReaderDocumentId,
                 signatures: deferredPage.signatures,
                 rootContent: deferredPage.rootContent,
               },
@@ -5226,42 +5372,21 @@ export const ReadwiseContainer = () => {
               readerDocumentId: candidate.readerDocumentId,
             },
           )
-        }
 
-        if (!document) {
-          const issue: RunIssue = {
-            book: candidate.pageName,
-            message: `Repair skipped because Reader did not return parent metadata for rw-reader-id=${candidate.readerDocumentId}.`,
-            summary:
-              'Automatic repair could not rebuild this page without its parent Reader document.',
-            suggestedAction:
-              'Run Full Refresh or inspect the Reader document state, then retry repair.',
-            debugFacts: [
-              `detectedSignatures=${candidate.signatures.join(', ')}`,
-            ],
-            readerDocumentId: candidate.readerDocumentId,
-            namespacePrefix: formalNamespaceRoot,
+          document = buildFallbackReaderDocumentFromManagedPage({
             pageName: candidate.pageName,
-          }
-          repairIssues.push(issue)
-          repairIssuesCount = repairIssues.length
-          appendRunIssue(issue)
-          repairProgressCompleted = index + 1
-          updateLiveRunIssueMetrics({
-            processedItems: index + 1,
-            stats: {
-              pagesTargeted: scanResult.candidates.length,
-              pagesProcessed: repairedCount,
-            },
+            readerDocumentId: candidate.readerDocumentId,
+            rootContent: candidate.rootContent,
           })
-          setCurrent(index + 1)
-          updateReaderSyncEta(
-            'write-pages',
-            'page repairs',
-            index + 1,
-            scanResult.candidates.length,
+
+          logReadwiseInfo(
+            formalSyncLogPrefix,
+            'repair write fell back to page metadata because parent metadata is unavailable',
+            {
+              pageName: candidate.pageName,
+              readerDocumentId: candidate.readerDocumentId,
+            },
           )
-          continue
         }
 
         highlights = await maybeEnrichManagedPageWriteHighlights({
@@ -6159,11 +6284,19 @@ export const ReadwiseContainer = () => {
                 followUp =
                   followUp ??
                   'Integrity issues remain, but no highlights were available for rebuild. Run Refresh Local Snapshot Only or Full Refresh, then rebuild again.'
-              } else if (!resolvedDocument) {
-                followUp =
-                  followUp ??
-                  'Integrity issues remain, but no parent metadata was available for rebuild. Run Refresh Current Page Metadata or Full Refresh before rebuilding again.'
               } else {
+                if (!resolvedDocument) {
+                  resolvedDocument = buildFallbackReaderDocumentFromManagedPage({
+                    pageName: finalPageName ?? currentPageName,
+                    readerDocumentId: entry.readerDocumentId,
+                    rootContent: integrityBeforeWrite.rootContent,
+                  })
+                  rebuildSource = 'page_metadata'
+                  followUp =
+                    followUp ??
+                    'Reader parent metadata was unavailable, so apply rebuilt the page using the current page metadata as a fallback.'
+                }
+
                 try {
                   resolvedHighlights = await maybeEnrichManagedPageWriteHighlights({
                     readerAuthToken,
@@ -6187,9 +6320,11 @@ export const ReadwiseContainer = () => {
                       readerAuthToken,
                     },
                   )
-                  rebuildSource = usedRemoteHighlightFallback
-                    ? 'reader_remote'
-                    : 'cache'
+                  if (rebuildSource === 'none') {
+                    rebuildSource = usedRemoteHighlightFallback
+                      ? 'reader_remote'
+                      : 'cache'
+                  }
                   rebuiltResult = pageSyncResult.result
                   finalPageName = pageSyncResult.pageName
 

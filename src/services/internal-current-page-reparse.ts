@@ -1,7 +1,6 @@
-import type { BlockEntity } from '@logseq/libs/dist/LSPlugin'
+import type { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin'
 
 import { describeUnknownError, logReadwiseDebug } from '../logging'
-import { loadCurrentPageFileContentV1 } from './page-file-diff'
 
 const INTERNAL_REPARSE_LOG_PREFIX = '[Readwise Sync]'
 const INTERNAL_REPARSE_SETTLE_DELAY_MS = 240
@@ -46,6 +45,22 @@ export interface InternalCurrentPageReparseProbeResultV1 {
   diagnostics: string[]
 }
 
+interface CurrentPageFileResolutionV1 {
+  page: PageEntity
+  pageName: string
+  pageAliases: string[]
+  pageFilePath: string | null
+  candidatePaths: string[]
+}
+
+interface CurrentPageDiskFileV1 {
+  absolutePath: string
+  relativeFilePath: string
+  content: string
+  mtime: Date | null
+  readFrom: 'node-fs' | 'rootdir-api' | 'host-rootdir-api'
+}
+
 const delay = async (ms: number) =>
   new Promise((resolve) => {
     window.setTimeout(resolve, ms)
@@ -76,6 +91,57 @@ const getUtf8ByteLength = (value: string) => new Blob([value]).size
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value != null
 
+const uniqueValues = (values: string[]) =>
+  values.filter(
+    (value, index, array) => value.length > 0 && array.indexOf(value) === index,
+  )
+
+const collectAliases = (
+  page: Partial<PageEntity> | Partial<BlockEntity> | null,
+) => {
+  if (!page) return []
+
+  return uniqueValues([
+    typeof page.originalName === 'string' ? page.originalName : '',
+    typeof page.name === 'string' ? page.name : '',
+    typeof page.title === 'string' ? page.title : '',
+    typeof page.fullTitle === 'string' ? page.fullTitle : '',
+  ])
+}
+
+const buildPageFileStem = (pageName: string) => pageName.replaceAll('/', '___')
+
+const encodeReservedPathCharacters = (value: string) =>
+  value.replace(/[#:?*"<>|%]/g, (character) =>
+    encodeURIComponent(character).toUpperCase(),
+  )
+
+const buildCandidateRelativeFilePaths = (
+  pageName: string,
+  expectedFormat: 'org' | 'markdown' | null,
+) => {
+  const fileStems = uniqueValues([
+    buildPageFileStem(pageName),
+    encodeReservedPathCharacters(buildPageFileStem(pageName)),
+  ])
+  const preferredExtensions =
+    expectedFormat === 'markdown' ? ['md', 'org'] : ['org', 'md']
+
+  return fileStems.flatMap((stem) =>
+    preferredExtensions.map((extension) => `pages/${stem}.${extension}`),
+  )
+}
+
+const buildCandidateRelativeFilePathsForAliases = (
+  aliases: string[],
+  expectedFormat: 'org' | 'markdown' | null,
+) =>
+  uniqueValues(
+    aliases.flatMap((alias) =>
+      buildCandidateRelativeFilePaths(alias, expectedFormat),
+    ),
+  )
+
 const describeProbeValue = (value: unknown) => {
   if (typeof value === 'function') return 'function'
   if (Array.isArray(value)) return `array(${value.length})`
@@ -87,7 +153,78 @@ const describeProbeValue = (value: unknown) => {
 
 const getRuntimeRequire = () =>
   (window as unknown as { require?: ((id: string) => unknown) | undefined })
-    .require
+    .require ??
+  (() => {
+    try {
+      return (
+        window.top as unknown as {
+          require?: ((id: string) => unknown) | undefined
+        } | null
+      )?.require
+    } catch {
+      return undefined
+    }
+  })()
+
+const resolveCurrentPageEntity = async (): Promise<PageEntity> => {
+  const currentPage = await logseq.Editor.getCurrentPage()
+  if (!currentPage) {
+    throw new Error('No current page is open.')
+  }
+
+  const aliases = collectAliases(currentPage)
+  for (const alias of aliases) {
+    const page = await logseq.Editor.getPage(alias)
+    if (page) return page
+  }
+
+  if ('name' in currentPage && typeof currentPage.name === 'string') {
+    return currentPage as PageEntity
+  }
+
+  throw new Error('Failed to resolve the current page entity.')
+}
+
+const extractPageFilePath = (page: PageEntity): string | null => {
+  const record = page as unknown as Record<string, unknown>
+  const file = record.file
+
+  if (isRecord(file) && typeof file.path === 'string' && file.path.length > 0) {
+    return file.path
+  }
+
+  if (
+    typeof record['file/path'] === 'string' &&
+    record['file/path'].length > 0
+  ) {
+    return record['file/path']
+  }
+
+  return null
+}
+
+const resolveCurrentPageFileCandidates = async () => {
+  const page = await resolveCurrentPageEntity()
+  const aliases = collectAliases(page)
+  const pageName = aliases[0]
+  if (!pageName) {
+    throw new Error('Current page does not have a stable page name.')
+  }
+
+  const pageFilePath = extractPageFilePath(page)
+  const candidatePaths = uniqueValues([
+    pageFilePath ?? '',
+    ...buildCandidateRelativeFilePathsForAliases(aliases, page.format ?? null),
+  ])
+
+  return {
+    page,
+    pageName,
+    pageAliases: aliases,
+    pageFilePath,
+    candidatePaths,
+  } satisfies CurrentPageFileResolutionV1
+}
 
 const readDiskFileViaNode = async (
   graphPath: string,
@@ -237,6 +374,43 @@ const readCurrentPageDiskFile = async (
   }
 }
 
+const readFirstReadableCurrentPageDiskFile = async (
+  graphPath: string,
+  resolution: CurrentPageFileResolutionV1,
+  diagnostics: string[],
+): Promise<CurrentPageDiskFileV1> => {
+  const failures: string[] = []
+
+  diagnostics.push(
+    `aliases=${resolution.pageAliases.join(',')}`,
+    `pageFilePath=${resolution.pageFilePath ?? 'null'}`,
+    `candidates=${resolution.candidatePaths.join(',')}`,
+  )
+
+  for (const candidatePath of resolution.candidatePaths) {
+    try {
+      const diskFile = await readCurrentPageDiskFile(graphPath, candidatePath)
+      diagnostics.push(
+        `file=${candidatePath}`,
+        `disk=${diskFile.absolutePath}`,
+        `readFrom=${diskFile.readFrom}`,
+      )
+      return {
+        ...diskFile,
+        relativeFilePath: candidatePath,
+      }
+    } catch (error) {
+      const message = describeUnknownError(error)
+      failures.push(`${candidatePath}: ${message}`)
+      diagnostics.push(`readFailed=${candidatePath}: ${message}`)
+    }
+  }
+
+  throw new Error(
+    `Failed to read the current page file. ${diagnostics.join(' | ')} | ${failures.join(' | ')}`,
+  )
+}
+
 const normalizeBlockTreeForHash = (
   blocks: BlockEntity[] | null | undefined,
 ): unknown[] => {
@@ -282,7 +456,11 @@ const resolveFunctionPath = (
 
   for (const key of path) {
     if (!isRecord(cursor)) return null
-    cursor = cursor[key]
+    try {
+      cursor = cursor[key]
+    } catch {
+      return null
+    }
   }
 
   return typeof cursor === 'function'
@@ -293,6 +471,8 @@ const resolveFunctionPath = (
 const collectInternalReparseBridges = (diagnostics: string[]) => {
   const bridges: InternalReparseBridgeV1[] = []
   const hostScope = readHostScope()
+  const hostScopeWindow =
+    isRecord(hostScope) && isRecord(hostScope.window) ? hostScope.window : null
   const hostWindow =
     typeof window.parent === 'object' && window.parent !== window
       ? window.parent
@@ -302,6 +482,7 @@ const collectInternalReparseBridges = (diagnostics: string[]) => {
 
   const scopes = [
     ['hostScope', hostScope],
+    ['hostScope.window', hostScopeWindow],
     ['window.parent', hostWindow],
     ['window.top', hostTop],
   ] as const
@@ -336,30 +517,16 @@ const collectInternalReparseBridges = (diagnostics: string[]) => {
       })
     }
 
-    const pubEventBridge = resolveFunctionPath(scope, [
-      'frontend',
-      'state',
-      'pub_event_BANG_',
-    ])
-    if (pubEventBridge) {
-      bridges.push({
-        label: `${scopeName}.frontend.state.pub_event_BANG_`,
-        invoke: async (payload) =>
-          await pubEventBridge([
-            'file/alter',
-            payload.repo,
-            payload.relativeFilePath,
-            payload.content,
-          ]),
-      })
-    }
-
-    const watcherBridge = resolveFunctionPath(scope, [
-      'frontend',
-      'fs',
-      'watcher_handler',
-      'handle_add_and_change_BANG_',
-    ])
+    const watcherBridge =
+      resolveFunctionPath(scope, [
+        'frontend',
+        'fs',
+        'watcher_handler',
+        'handle_add_and_change_BANG_',
+      ]) ??
+      resolveFunctionPath(scope, [
+        '$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$',
+      ])
     if (watcherBridge) {
       bridges.push({
         label: `${scopeName}.frontend.fs.watcher_handler.handle_add_and_change_BANG_`,
@@ -372,6 +539,22 @@ const collectInternalReparseBridges = (diagnostics: string[]) => {
             payload.mtime,
             false,
           ),
+      })
+    }
+
+    const pubEventBridge =
+      resolveFunctionPath(scope, ['frontend', 'state', 'pub_event_BANG_']) ??
+      resolveFunctionPath(scope, ['$frontend$state$pub_event_BANG_$$'])
+    if (pubEventBridge) {
+      bridges.push({
+        label: `${scopeName}.frontend.state.pub_event_BANG_`,
+        invoke: async (payload) =>
+          await pubEventBridge([
+            'file/alter',
+            payload.repo,
+            payload.relativeFilePath,
+            payload.content,
+          ]),
       })
     }
   }
@@ -394,26 +577,25 @@ export const experimentalInternalReparseCurrentPageV1 =
       )
     }
 
-    const currentPage = await loadCurrentPageFileContentV1()
     const graph = await logseq.App.getCurrentGraph()
     const graphPath = typeof graph?.path === 'string' ? graph.path : ''
     if (!graphPath) {
       throw new Error('Current graph path is unavailable.')
     }
 
-    const diskFile = await readCurrentPageDiskFile(
-      graphPath,
-      currentPage.relativeFilePath,
-    )
+    const currentPage = await resolveCurrentPageFileCandidates()
     const repo = buildLocalRepoId(graphPath)
-    const beforeTreeHash = await hashCurrentPageTree(currentPage.pageName)
     const diagnostics = [
       `page=${currentPage.pageName}`,
-      `file=${currentPage.relativeFilePath}`,
-      `disk=${diskFile.absolutePath}`,
-      `readFrom=${diskFile.readFrom}`,
+      `graphPath=${graphPath}`,
       `repo=${repo}`,
     ]
+    const diskFile = await readFirstReadableCurrentPageDiskFile(
+      graphPath,
+      currentPage,
+      diagnostics,
+    )
+    const beforeTreeHash = await hashCurrentPageTree(currentPage.pageName)
     const bridges = collectInternalReparseBridges(diagnostics)
     const bridge = bridges[0] ?? null
 
@@ -428,27 +610,35 @@ export const experimentalInternalReparseCurrentPageV1 =
       'running experimental internal current-page reparse',
       {
         pageName: currentPage.pageName,
-        relativeFilePath: currentPage.relativeFilePath,
+        relativeFilePath: diskFile.relativeFilePath,
         bridge: bridge.label,
         contentHash: hashString(diskFile.content),
         contentBytes: getUtf8ByteLength(diskFile.content),
       },
     )
 
-    await bridge.invoke({
-      repo,
-      graphPath,
-      relativeFilePath: currentPage.relativeFilePath,
-      content: diskFile.content,
-      mtime: diskFile.mtime,
-    })
+    try {
+      await bridge.invoke({
+        repo,
+        graphPath,
+        relativeFilePath: diskFile.relativeFilePath,
+        content: diskFile.content,
+        mtime: diskFile.mtime,
+      })
+    } catch (error) {
+      throw new Error(
+        `Internal reparse bridge "${bridge.label}" failed: ${describeUnknownError(
+          error,
+        )}. ${diagnostics.join(' | ')}`,
+      )
+    }
     await delay(INTERNAL_REPARSE_SETTLE_DELAY_MS)
 
     const afterTreeHash = await hashCurrentPageTree(currentPage.pageName)
 
     return {
       pageName: currentPage.pageName,
-      relativeFilePath: currentPage.relativeFilePath,
+      relativeFilePath: diskFile.relativeFilePath,
       graphPath,
       repo,
       contentHash: hashString(diskFile.content),

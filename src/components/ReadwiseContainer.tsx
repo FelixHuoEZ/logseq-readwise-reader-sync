@@ -9833,7 +9833,7 @@ export const ReadwiseContainer = () => {
     'Cached Full Rebuild now offers two run-time modes: staged first resolves the full page set and then writes it, while streaming resolves one cached parent at a time and writes it immediately. Both reuse the local full-library highlight snapshot, prefer cached parent metadata, and only refetch missing parent metadata from Reader.',
     'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
-    'Experimental Internal Current Page Reparse probes for a callable Logseq internal single-file reparse bridge. It reads the current page from disk and fails closed when the bridge is unavailable.',
+    'Experimental Internal Current Page Reparse probes for a callable Logseq internal single-file reparse bridge. It reads the current page from disk, tries the private watcher path first and a private file/alter event only if exposed, then fails closed when neither bridge is reachable.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
     'Preview Current Page Legacy ID Migration scans Readwise managed pages for UUID mappings, then previews only the current page or whiteboard rewrites before apply.',
   ]

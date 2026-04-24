@@ -42,6 +42,11 @@ interface InternalReparseBridgePayloadV1 {
   mtime: Date | null
 }
 
+interface CljsFileAlterEventBuilderV1 {
+  label: string
+  build: (payload: InternalReparseBridgePayloadV1) => unknown
+}
+
 export interface InternalCurrentPageReparseProbeResultV1 {
   pageName: string
   relativeFilePath: string
@@ -674,6 +679,87 @@ const resolveInternalFunctionCandidate = (
   return null
 }
 
+const resolveCljsFileAlterEventBuilder = (
+  scope: unknown,
+  scopeName: string,
+): CljsFileAlterEventBuilderV1 | null => {
+  try {
+    const utils = (
+      logseq.Experiments as unknown as {
+        Utils?: {
+          toClj?: (input: unknown) => unknown
+          toKeyword?: (input: string) => unknown
+        }
+      }
+    ).Utils
+    if (
+      typeof utils?.toClj === 'function' &&
+      typeof utils.toKeyword === 'function'
+    ) {
+      const { toClj, toKeyword } = utils
+      return {
+        label: 'logseq.Experiments.Utils.toClj',
+        build: (payload) =>
+          toClj([
+            toKeyword('file/alter'),
+            payload.repo,
+            payload.relativeFilePath,
+            payload.content,
+          ]),
+      }
+    }
+  } catch {
+    // Fall through to the direct $APP constructor probe.
+  }
+
+  if (!isRecord(scope)) return null
+
+  const app = scope.$APP
+  if (!isRecord(app)) return null
+
+  const Keyword = app.$cljs$core$Keyword$$
+  const PersistentVector = app.$cljs$core$PersistentVector$$
+  const emptyNode = app.$cljs$core$PersistentVector$EMPTY_NODE$$
+
+  if (typeof Keyword !== 'function' || typeof PersistentVector !== 'function') {
+    return null
+  }
+
+  return {
+    label: `${scopeName}.$APP.cljs.PersistentVector`,
+    build: (payload) =>
+      new (
+        PersistentVector as new (
+          meta: null,
+          count: number,
+          shift: number,
+          root: unknown,
+          tail: unknown[],
+          hash: null,
+        ) => unknown
+      )(
+        null,
+        4,
+        5,
+        emptyNode,
+        [
+          new (
+            Keyword as new (
+              namespace: string,
+              name: string,
+              fqn: string,
+              hash: number,
+            ) => unknown
+          )('file', 'alter', 'file/alter', 1559248582),
+          payload.repo,
+          payload.relativeFilePath,
+          payload.content,
+        ],
+        null,
+      ),
+  }
+}
+
 const collectInternalReparseBridges = (diagnostics: string[]) => {
   const bridges: InternalReparseBridgeV1[] = []
   const hostScope = readHostScope()
@@ -794,9 +880,27 @@ const collectInternalReparseBridges = (diagnostics: string[]) => {
       },
     ])
     if (pubEventBridge) {
-      diagnostics.push(
-        `${scopeName}: pubEventBridge=${pubEventBridge.label} (skipped: file/alter may write)`,
-      )
+      const eventBuilder = resolveCljsFileAlterEventBuilder(scope, scopeName)
+      if (eventBuilder) {
+        diagnostics.push(
+          `${scopeName}: pubEventBridge=${pubEventBridge.label}; eventBuilder=${eventBuilder.label}; fileAlterBridge=available`,
+        )
+        bridges.push({
+          label: `${pubEventBridge.label}:file/alter`,
+          invoke: async (payload) => {
+            // In the inspected Logseq desktop bundle, :file/alter calls alter_file
+            // with from-disk? true, which reparses DB/UI state without writing
+            // the page file back to disk.
+            await pubEventBridge.fn(eventBuilder.build(payload))
+          },
+        })
+      } else {
+        diagnostics.push(
+          `${scopeName}: pubEventBridge=${pubEventBridge.label} (skipped: cannot build CLJS file/alter event)`,
+        )
+      }
+    } else {
+      diagnostics.push(`${scopeName}: pubEventBridge=missing`)
     }
   }
 

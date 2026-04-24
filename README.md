@@ -119,7 +119,12 @@ Maintenance tools are grouped by purpose:
   - session test pages, preview pages, and restore/clear helpers
 - `Debug`
   - short-lived debug sync pages and cleanup
-  - experimental current-page internal reparse probe that fails closed when Logseq does not expose a callable internal bridge
+  - experimental current-page internal reparse probe that reads the current page from disk and fails closed when Logseq does not expose a callable private watcher or `file/alter` bridge
+
+Current internal-reparse POC status:
+
+- In the inspected Logseq desktop bundle, the `file/alter` event path calls Logseq's internal `alter_file` with `from-disk?` and should not write the page file back to disk.
+- In the current iframe plugin runtime, the page file can be read through Logseq's host `load_file` helper, but the private watcher handler and `pub_event!` bridge are not exposed to the plugin iframe. Treat this button as a diagnostic probe, not a reliable workaround, unless a future Logseq build exposes one of those bridges.
 
 Auto Sync itself is configured in plugin settings, not inside `Maintenance Tools`. Its protection flow still matters during debugging:
 

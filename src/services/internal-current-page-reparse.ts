@@ -58,7 +58,13 @@ interface CurrentPageDiskFileV1 {
   relativeFilePath: string
   content: string
   mtime: Date | null
-  readFrom: 'node-fs' | 'rootdir-api' | 'host-rootdir-api'
+  readFrom:
+    | 'node-fs'
+    | 'host-internal-load-file'
+    | 'host-internal-read-file'
+    | 'db-get-file-content'
+    | 'rootdir-api'
+    | 'host-rootdir-api'
 }
 
 const delay = async (ms: number) =>
@@ -284,6 +290,128 @@ const getHostRootdirFileApi = (): RootdirFileApi | null => {
   }
 }
 
+const resolveHostScopeWindow = (scope: unknown) =>
+  isRecord(scope) && isRecord(scope.window) ? scope.window : null
+
+const getReachableWindowScope = (name: 'parent' | 'top') => {
+  try {
+    const candidate = name === 'parent' ? window.parent : window.top
+    return typeof candidate === 'object' && candidate !== window
+      ? candidate
+      : null
+  } catch {
+    return null
+  }
+}
+
+const collectHostReadScopes = () => {
+  const hostScope = readHostScope()
+
+  return [
+    ['hostScope', hostScope],
+    ['hostScope.window', resolveHostScopeWindow(hostScope)],
+    ['window.parent', getReachableWindowScope('parent')],
+    ['window.top', getReachableWindowScope('top')],
+  ] as const
+}
+
+const readDiskFileViaHostInternalApi = async (
+  graphPath: string,
+  repo: string,
+  relativeFilePath: string,
+) => {
+  const failures: string[] = []
+  let readerCount = 0
+
+  for (const [scopeName, scope] of collectHostReadScopes()) {
+    if (!scope) {
+      failures.push(`${scopeName} unavailable`)
+      continue
+    }
+
+    const loadFile =
+      resolveFunctionPath(scope, [
+        '$APP',
+        '$frontend$handler$file$load_file$$',
+      ]) ?? resolveFunctionPath(scope, ['$frontend$handler$file$load_file$$'])
+    if (loadFile) {
+      readerCount += 1
+      try {
+        const content = await loadFile(repo, relativeFilePath)
+        if (typeof content === 'string') {
+          return {
+            absolutePath: joinAbsolutePath(graphPath, relativeFilePath),
+            content,
+            mtime: null,
+            readFrom: 'host-internal-load-file' as const,
+          }
+        }
+
+        failures.push(
+          `${scopeName}.load_file returned ${describeProbeValue(content)}`,
+        )
+      } catch (error) {
+        failures.push(
+          `${scopeName}.load_file threw ${describeUnknownError(error)}`,
+        )
+      }
+    }
+
+    const readFile =
+      resolveFunctionPath(scope, [
+        '$APP',
+        '$frontend$fs$read_file$cljs$0core$0IFn$0_invoke$0arity$02$$',
+      ]) ??
+      resolveFunctionPath(scope, [
+        '$frontend$fs$read_file$cljs$0core$0IFn$0_invoke$0arity$02$$',
+      ])
+    if (readFile) {
+      readerCount += 1
+      try {
+        const content = await readFile(graphPath, relativeFilePath)
+        if (typeof content === 'string') {
+          return {
+            absolutePath: joinAbsolutePath(graphPath, relativeFilePath),
+            content,
+            mtime: null,
+            readFrom: 'host-internal-read-file' as const,
+          }
+        }
+
+        failures.push(
+          `${scopeName}.read_file returned ${describeProbeValue(content)}`,
+        )
+      } catch (error) {
+        failures.push(
+          `${scopeName}.read_file threw ${describeUnknownError(error)}`,
+        )
+      }
+    }
+  }
+
+  if (readerCount === 0) {
+    throw new Error(
+      `No host internal file reader was found. ${failures.join(' | ')}`,
+    )
+  }
+
+  throw new Error(failures.join(' | '))
+}
+
+const readFileViaLogseqDb = async (relativeFilePath: string) => {
+  const content = await logseq.DB.getFileContent(relativeFilePath)
+  if (typeof content !== 'string') {
+    throw new Error(`DB.getFileContent returned ${describeProbeValue(content)}`)
+  }
+
+  return {
+    absolutePath: relativeFilePath,
+    content,
+    mtime: null,
+    readFrom: 'db-get-file-content' as const,
+  }
+}
+
 const readDiskFileViaRootdirApi = async (
   graphPath: string,
   relativeFilePath: string,
@@ -357,25 +485,47 @@ const readDiskFileViaRootdirApi = async (
 
 const readCurrentPageDiskFile = async (
   graphPath: string,
+  repo: string,
   relativeFilePath: string,
 ) => {
+  const failures: string[] = []
+
   try {
     return await readDiskFileViaNode(graphPath, relativeFilePath)
-  } catch (nodeError) {
-    try {
-      return await readDiskFileViaRootdirApi(graphPath, relativeFilePath)
-    } catch (rootdirError) {
-      throw new Error(
-        `Failed to read current page from disk. node: ${describeUnknownError(
-          nodeError,
-        )}; rootdir: ${describeUnknownError(rootdirError)}`,
-      )
-    }
+  } catch (error) {
+    failures.push(`node: ${describeUnknownError(error)}`)
   }
+
+  try {
+    return await readDiskFileViaHostInternalApi(
+      graphPath,
+      repo,
+      relativeFilePath,
+    )
+  } catch (error) {
+    failures.push(`host-internal: ${describeUnknownError(error)}`)
+  }
+
+  try {
+    return await readFileViaLogseqDb(relativeFilePath)
+  } catch (error) {
+    failures.push(`db: ${describeUnknownError(error)}`)
+  }
+
+  try {
+    return await readDiskFileViaRootdirApi(graphPath, relativeFilePath)
+  } catch (error) {
+    failures.push(`rootdir: ${describeUnknownError(error)}`)
+  }
+
+  throw new Error(
+    `Failed to read current page from disk. ${failures.join('; ')}`,
+  )
 }
 
 const readFirstReadableCurrentPageDiskFile = async (
   graphPath: string,
+  repo: string,
   resolution: CurrentPageFileResolutionV1,
   diagnostics: string[],
 ): Promise<CurrentPageDiskFileV1> => {
@@ -389,7 +539,11 @@ const readFirstReadableCurrentPageDiskFile = async (
 
   for (const candidatePath of resolution.candidatePaths) {
     try {
-      const diskFile = await readCurrentPageDiskFile(graphPath, candidatePath)
+      const diskFile = await readCurrentPageDiskFile(
+        graphPath,
+        repo,
+        candidatePath,
+      )
       diagnostics.push(
         `file=${candidatePath}`,
         `disk=${diskFile.absolutePath}`,
@@ -471,14 +625,9 @@ const resolveFunctionPath = (
 const collectInternalReparseBridges = (diagnostics: string[]) => {
   const bridges: InternalReparseBridgeV1[] = []
   const hostScope = readHostScope()
-  const hostScopeWindow =
-    isRecord(hostScope) && isRecord(hostScope.window) ? hostScope.window : null
-  const hostWindow =
-    typeof window.parent === 'object' && window.parent !== window
-      ? window.parent
-      : null
-  const hostTop =
-    typeof window.top === 'object' && window.top !== window ? window.top : null
+  const hostScopeWindow = resolveHostScopeWindow(hostScope)
+  const hostWindow = getReachableWindowScope('parent')
+  const hostTop = getReachableWindowScope('top')
 
   const scopes = [
     ['hostScope', hostScope],
@@ -592,6 +741,7 @@ export const experimentalInternalReparseCurrentPageV1 =
     ]
     const diskFile = await readFirstReadableCurrentPageDiskFile(
       graphPath,
+      repo,
       currentPage,
       diagnostics,
     )

@@ -113,11 +113,13 @@ Maintenance tools are grouped by purpose:
 - `Snapshots`
   - refresh the local highlight snapshot without rewriting pages
   - rebuild every managed page from the local snapshot without another full remote highlight scan
+  - force managed pages through the legacy touch-and-restore reparse helper
   - capture and diff raw current-page snapshots
 - `Test & Preview`
   - session test pages, preview pages, and restore/clear helpers
 - `Debug`
   - short-lived debug sync pages and cleanup
+  - experimental current-page internal reparse probe that fails closed when Logseq does not expose a callable internal bridge
 
 Auto Sync itself is configured in plugin settings, not inside `Maintenance Tools`. Its protection flow still matters during debugging:
 

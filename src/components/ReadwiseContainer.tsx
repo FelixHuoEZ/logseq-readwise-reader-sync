@@ -64,6 +64,7 @@ import {
   clearManagedPagesByNamespacePrefix,
   clearManagedPagesBySessionNamespaceRoot,
   diffCurrentPageFileSnapshotV1,
+  experimentalInternalReparseCurrentPageV1,
   forceReparseManagedPagesByNamespaceV1,
   inspectManagedPageIntegrityV1,
   type LegacyBlockRefPreviewEntryV1,
@@ -80,7 +81,6 @@ import {
   rotateActiveFormalTestSessionNamespaceV1,
   saveFormalTestSessionManifestV1,
   setupProps,
-  softReopenCurrentPageV1,
   syncManagedPagePropertiesV1,
   syncRenderedDebugPage,
   syncRenderedPage,
@@ -5017,7 +5017,7 @@ export const ReadwiseContainer = () => {
     })
   }
 
-  const handleSoftReopenCurrentPage = async () => {
+  const handleExperimentalInternalReparseCurrentPage = async () => {
     clearRunIssues()
     setPageDiffResult(null)
     setCacheSummaryResult(null)
@@ -5027,7 +5027,7 @@ export const ReadwiseContainer = () => {
     setStatus('syncing')
     const startedAt = new Date().toISOString()
     setRunIssueContext({
-      modeLabel: 'Soft reopen current page',
+      modeLabel: 'Experimental internal current-page reparse',
       namespacePrefix: null,
       logLevel: String(logseq.settings?.logLevel ?? 'warn'),
       statusMessage: '',
@@ -5039,11 +5039,11 @@ export const ReadwiseContainer = () => {
       issuesCount: 0,
     })
     setStatusMessage(
-      'Soft reopening the current page view without touching the page file...',
+      'Probing Logseq internal current-page reparse without touching the page file...',
     )
 
     try {
-      const result = await softReopenCurrentPageV1()
+      const result = await experimentalInternalReparseCurrentPageV1()
       setCurrent(1)
       setCurrentBook(result.pageName)
       setStatus('completed')
@@ -5058,12 +5058,14 @@ export const ReadwiseContainer = () => {
             },
       )
       setStatusMessage(
-        `Soft reopened ${result.pageName} without touching the page file.`,
+        `Internal reparse probe ran for ${result.pageName} via ${result.bridge}. Block tree ${
+          result.changed ? 'changed' : 'hash stayed the same'
+        }.`,
       )
     } catch (err: unknown) {
       logReadwiseError(
         formalSyncLogPrefix,
-        'soft reopen current page failed',
+        'experimental internal current-page reparse failed',
         err,
       )
       setStatus('error')
@@ -5078,7 +5080,7 @@ export const ReadwiseContainer = () => {
             },
       )
       setStatusMessage(
-        `Soft reopen current page failed: ${describeUnknownError(err)}`,
+        `Internal reparse probe failed: ${describeUnknownError(err)}`,
       )
     }
   }
@@ -9821,7 +9823,6 @@ export const ReadwiseContainer = () => {
   const currentPageHelpNotes = [
     'Rebuild Current Page From Cache uses rw-reader-id, reads the cached highlight snapshot for that parent, and rewrites only the current managed page.',
     "Refresh Current Page Metadata re-fetches the current page's parent metadata from Reader, combines it with cached highlights, and rewrites only the current managed page.",
-    'Soft Reopen Current Page reopens the current page route without touching the page file. It is safer for synced graphs, but it only refreshes the current page view and does not guarantee a parser-level reparse.',
     'These are the common page-level recovery actions. Low-frequency migration and audit workflows live under Maintenance Tools.',
   ]
   const maintenanceToolsHelpNotes = [
@@ -9832,6 +9833,7 @@ export const ReadwiseContainer = () => {
     'Cached Full Rebuild now offers two run-time modes: staged first resolves the full page set and then writes it, while streaming resolves one cached parent at a time and writes it immediately. Both reuse the local full-library highlight snapshot, prefer cached parent metadata, and only refetch missing parent metadata from Reader.',
     'Force Reparse Managed Pages temporarily touches each ReadwiseHighlights page file and restores the original content so Logseq reparses the whole namespace without calling Reader APIs.',
     'Refresh Local Snapshot Only rescans the full Reader highlight and note library and refreshes the local full-library snapshot without rewriting any managed pages or advancing the incremental cursor.',
+    'Experimental Internal Current Page Reparse probes for a callable Logseq internal single-file reparse bridge. It reads the current page from disk and fails closed when the bridge is unavailable.',
     'Preview Legacy Block Ref Migration first scans Readwise managed pages for old block UUID mappings, then lists every graph-wide ((block ref)) rewrite before you confirm the apply step.',
     'Preview Current Page Legacy ID Migration scans Readwise managed pages for UUID mappings, then previews only the current page or whiteboard rewrites before apply.',
   ]
@@ -10878,12 +10880,6 @@ export const ReadwiseContainer = () => {
                   >
                     Refresh Current Page Metadata
                   </button>
-                  <button
-                    className="rw-btn"
-                    onClick={handleSoftReopenCurrentPage}
-                  >
-                    Soft Reopen Current Page
-                  </button>
                 </div>
               </div>
 
@@ -11175,6 +11171,14 @@ export const ReadwiseContainer = () => {
                             onClick={handleClearDebugPages}
                           >
                             Clear Debug Pages
+                          </button>
+                          <button
+                            className="rw-btn"
+                            onClick={
+                              handleExperimentalInternalReparseCurrentPage
+                            }
+                          >
+                            Experimental Internal Current Page Reparse
                           </button>
                         </div>
                       </div>

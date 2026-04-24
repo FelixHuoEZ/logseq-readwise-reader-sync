@@ -23,6 +23,17 @@ interface InternalReparseBridgeV1 {
   invoke: (payload: InternalReparseBridgePayloadV1) => Promise<unknown>
 }
 
+interface InternalFunctionCandidateV1 {
+  label: string
+  path?: string[]
+  expression?: string
+}
+
+interface ResolvedInternalFunctionV1 {
+  label: string
+  fn: (...args: unknown[]) => unknown
+}
+
 interface InternalReparseBridgePayloadV1 {
   repo: string
   graphPath: string
@@ -622,6 +633,47 @@ const resolveFunctionPath = (
     : null
 }
 
+const resolveFunctionExpression = (
+  root: unknown,
+  expression: string,
+): ((...args: unknown[]) => unknown) | null => {
+  if (!isRecord(root)) return null
+
+  try {
+    const evaluator = root.eval
+    if (typeof evaluator !== 'function') return null
+    const value = evaluator.call(root, expression)
+    return typeof value === 'function'
+      ? (value as (...args: unknown[]) => unknown)
+      : null
+  } catch {
+    return null
+  }
+}
+
+const resolveInternalFunctionCandidate = (
+  scope: unknown,
+  scopeName: string,
+  candidates: InternalFunctionCandidateV1[],
+): ResolvedInternalFunctionV1 | null => {
+  for (const candidate of candidates) {
+    const fn = candidate.path
+      ? resolveFunctionPath(scope, candidate.path)
+      : candidate.expression
+        ? resolveFunctionExpression(scope, candidate.expression)
+        : null
+
+    if (fn) {
+      return {
+        label: `${scopeName}.${candidate.label}`,
+        fn,
+      }
+    }
+  }
+
+  return null
+}
+
 const collectInternalReparseBridges = (diagnostics: string[]) => {
   const bridges: InternalReparseBridgeV1[] = []
   const hostScope = readHostScope()
@@ -666,21 +718,47 @@ const collectInternalReparseBridges = (diagnostics: string[]) => {
       })
     }
 
-    const watcherBridge =
-      resolveFunctionPath(scope, [
-        'frontend',
-        'fs',
-        'watcher_handler',
-        'handle_add_and_change_BANG_',
-      ]) ??
-      resolveFunctionPath(scope, [
-        '$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$',
-      ])
+    const watcherBridge = resolveInternalFunctionCandidate(scope, scopeName, [
+      {
+        label: 'frontend.fs.watcher_handler.handle_add_and_change_BANG_',
+        path: [
+          'frontend',
+          'fs',
+          'watcher_handler',
+          'handle_add_and_change_BANG_',
+        ],
+      },
+      {
+        label:
+          '$APP.$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$',
+        path: [
+          '$APP',
+          '$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$',
+        ],
+      },
+      {
+        label: '$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$',
+        path: ['$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$'],
+      },
+      {
+        label:
+          'eval($frontend$fs$watcher_handler$handle_add_and_change_BANG_$$)',
+        expression:
+          '$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$',
+      },
+      {
+        label:
+          'eval($APP.$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$)',
+        expression:
+          '$APP.$frontend$fs$watcher_handler$handle_add_and_change_BANG_$$',
+      },
+    ])
     if (watcherBridge) {
+      diagnostics.push(`${scopeName}: watcherBridge=${watcherBridge.label}`)
       bridges.push({
-        label: `${scopeName}.frontend.fs.watcher_handler.handle_add_and_change_BANG_`,
+        label: watcherBridge.label,
         invoke: async (payload) =>
-          await watcherBridge(
+          await watcherBridge.fn(
             payload.repo,
             payload.relativeFilePath,
             payload.content,
@@ -689,22 +767,36 @@ const collectInternalReparseBridges = (diagnostics: string[]) => {
             false,
           ),
       })
+    } else {
+      diagnostics.push(`${scopeName}: watcherBridge=missing`)
     }
 
-    const pubEventBridge =
-      resolveFunctionPath(scope, ['frontend', 'state', 'pub_event_BANG_']) ??
-      resolveFunctionPath(scope, ['$frontend$state$pub_event_BANG_$$'])
+    const pubEventBridge = resolveInternalFunctionCandidate(scope, scopeName, [
+      {
+        label: 'frontend.state.pub_event_BANG_',
+        path: ['frontend', 'state', 'pub_event_BANG_'],
+      },
+      {
+        label: '$APP.$frontend$state$pub_event_BANG_$$',
+        path: ['$APP', '$frontend$state$pub_event_BANG_$$'],
+      },
+      {
+        label: '$frontend$state$pub_event_BANG_$$',
+        path: ['$frontend$state$pub_event_BANG_$$'],
+      },
+      {
+        label: 'eval($frontend$state$pub_event_BANG_$$)',
+        expression: '$frontend$state$pub_event_BANG_$$',
+      },
+      {
+        label: 'eval($APP.$frontend$state$pub_event_BANG_$$)',
+        expression: '$APP.$frontend$state$pub_event_BANG_$$',
+      },
+    ])
     if (pubEventBridge) {
-      bridges.push({
-        label: `${scopeName}.frontend.state.pub_event_BANG_`,
-        invoke: async (payload) =>
-          await pubEventBridge([
-            'file/alter',
-            payload.repo,
-            payload.relativeFilePath,
-            payload.content,
-          ]),
-      })
+      diagnostics.push(
+        `${scopeName}: pubEventBridge=${pubEventBridge.label} (skipped: file/alter may write)`,
+      )
     }
   }
 

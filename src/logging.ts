@@ -1,3 +1,5 @@
+import { appendReadwiseAutoSyncDiagnosticLogEntry } from './services/auto-sync-diagnostics-file'
+
 export type ReadwiseLogLevel = 'error' | 'warn' | 'info' | 'debug'
 
 const LOG_LEVEL_ORDER: Record<ReadwiseLogLevel, number> = {
@@ -135,4 +137,34 @@ export const logReadwiseDebug = (
 ) => {
   if (!shouldLogReadwiseLevel('debug')) return
   emit('info', `${prefix} ${message}`, payload)
+}
+
+export const isReadwiseAutoSyncDiagnosticsEnabled = () =>
+  logseq.settings?.autoSyncFileDiagnosticsEnabled === true
+
+export const logReadwiseAutoSyncDiagnostic = (
+  message: string,
+  payload?: unknown,
+) => {
+  if (!isReadwiseAutoSyncDiagnosticsEnabled()) return
+
+  const timestamp = new Date().toISOString()
+  const diagnosticPayload =
+    payload != null && typeof payload === 'object' && !Array.isArray(payload)
+      ? { timestamp, ...(payload as Record<string, unknown>) }
+      : { timestamp, payload }
+
+  emit('info', `[Readwise Auto Sync Debug] ${message}`, diagnosticPayload)
+  void appendReadwiseAutoSyncDiagnosticLogEntry({
+    schemaVersion: 1,
+    timestamp,
+    message,
+    payload: payload ?? null,
+  }).catch((error: unknown) => {
+    emit(
+      'warn',
+      '[Readwise Auto Sync Debug] failed to write persistent diagnostic log',
+      error,
+    )
+  })
 }

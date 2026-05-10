@@ -3,12 +3,17 @@ import '@logseq/libs'
 import { createRoot } from 'react-dom/client'
 
 import { ReadwiseContainer } from './components'
+import { logReadwiseAutoSyncDiagnostic } from './logging'
 import { setupProps } from './services'
 import { settingsSchema } from './settings'
 import { runSyncPlanPreviewV1 } from './sync'
 
 const main = async () => {
   logseq.UI.showMsg('Readwise Reader Sync loaded')
+  logReadwiseAutoSyncDiagnostic('plugin loaded', {
+    autoSyncEnabled: logseq.settings?.autoSyncEnabled === true,
+    syncIntervalMinutes: logseq.settings?.syncIntervalMinutes ?? null,
+  })
 
   const el = document.getElementById('app')
   if (!el) return

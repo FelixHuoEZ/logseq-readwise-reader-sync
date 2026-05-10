@@ -25,6 +25,8 @@ export const readUserConfig = (): UserConfigV1 => {
   return {
     apiToken: typeof rawToken === 'string' ? rawToken.trim() : '',
     autoSyncEnabled: settings.autoSyncEnabled === true,
+    autoSyncFileDiagnosticsEnabled:
+      settings.autoSyncFileDiagnosticsEnabled === true,
     syncIntervalMinutes: toPositiveInteger(
       settings.syncIntervalMinutes,
       DEFAULT_SYNC_INTERVAL_MINUTES,

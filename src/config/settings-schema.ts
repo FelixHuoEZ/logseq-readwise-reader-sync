@@ -34,6 +34,14 @@ export const settingsSchema: SettingSchemaDesc[] = [
     default: 15,
   },
   {
+    key: 'autoSyncFileDiagnosticsEnabled',
+    type: 'boolean',
+    title: 'Auto Sync File Diagnostics',
+    description:
+      'Debug-only. When enabled, writes detailed Auto Sync scheduler, skip, and completion diagnostics to the plugin private storage path auto-sync-diagnostics/*.jsonl.',
+    default: false,
+  },
+  {
     key: 'pluginStateJson',
     type: 'string',
     title: 'Plugin State JSON',

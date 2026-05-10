@@ -41,6 +41,7 @@ import {
 } from '../graph'
 import {
   describeUnknownError,
+  logReadwiseAutoSyncDiagnostic,
   logReadwiseDebug,
   logReadwiseError,
   logReadwiseInfo,
@@ -3763,8 +3764,15 @@ export const ReadwiseContainer = () => {
     return null
   }
 
-  const isAutoSyncForegroundReady = () =>
-    document.visibilityState === 'visible' && document.hasFocus()
+  const getAutoSyncForegroundDiagnostics = () => ({
+    visibilityState: document.visibilityState,
+    hasFocus: document.hasFocus(),
+  })
+
+  const isAutoSyncForegroundReady = () => {
+    const diagnostics = getAutoSyncForegroundDiagnostics()
+    return diagnostics.visibilityState === 'visible' && diagnostics.hasFocus
+  }
 
   const clearPendingAutoSyncSchedule = () => {
     if (pendingAutoSyncScheduleRef.current == null) {
@@ -3784,19 +3792,32 @@ export const ReadwiseContainer = () => {
     source: 'startup' | 'interval' | 'resume',
   ) => {
     if (!isAutoSyncForegroundReady()) {
+      logReadwiseAutoSyncDiagnostic('schedule skipped: foreground not ready', {
+        source,
+        ...getAutoSyncForegroundDiagnostics(),
+      })
       return
     }
 
     if (latestHasPendingInteractiveWorkflowRef.current) {
+      logReadwiseAutoSyncDiagnostic(
+        'schedule skipped: interactive workflow pending',
+        { source },
+      )
       return
     }
 
     clearPendingAutoSyncSchedule()
 
     if (typeof window.requestIdleCallback === 'function') {
+      logReadwiseAutoSyncDiagnostic('schedule queued with requestIdleCallback', {
+        source,
+        idleTimeoutMs: autoSyncIdleTimeoutMs,
+      })
       const handle = window.requestIdleCallback(
         () => {
           pendingAutoSyncScheduleRef.current = null
+          logReadwiseAutoSyncDiagnostic('idle callback fired', { source })
           void attemptAutoSync(source)
         },
         { timeout: autoSyncIdleTimeoutMs },
@@ -3805,8 +3826,13 @@ export const ReadwiseContainer = () => {
       return
     }
 
+    logReadwiseAutoSyncDiagnostic('schedule queued with timeout fallback', {
+      source,
+      delayMs: autoSyncIdleTimeoutMs,
+    })
     const handle = window.setTimeout(() => {
       pendingAutoSyncScheduleRef.current = null
+      logReadwiseAutoSyncDiagnostic('timeout fallback fired', { source })
       void attemptAutoSync(source)
     }, autoSyncIdleTimeoutMs)
     pendingAutoSyncScheduleRef.current = { kind: 'timeout', handle }
@@ -5234,10 +5260,31 @@ export const ReadwiseContainer = () => {
   }
 
   const attemptAutoSync = async (source: 'startup' | 'interval' | 'resume') => {
-    if (!logseq.settings?.autoSyncEnabled) return
-    if (!latestPropsReadyRef.current) return
-    if (autoSyncInFlightRef.current) return
-    if (!isAutoSyncForegroundReady()) return
+    if (!logseq.settings?.autoSyncEnabled) {
+      logReadwiseAutoSyncDiagnostic('attempt skipped: auto sync disabled', {
+        source,
+      })
+      return
+    }
+    if (!latestPropsReadyRef.current) {
+      logReadwiseAutoSyncDiagnostic('attempt skipped: props not ready', {
+        source,
+      })
+      return
+    }
+    if (autoSyncInFlightRef.current) {
+      logReadwiseAutoSyncDiagnostic('attempt skipped: auto sync in flight', {
+        source,
+      })
+      return
+    }
+    if (!isAutoSyncForegroundReady()) {
+      logReadwiseAutoSyncDiagnostic('attempt skipped: foreground not ready', {
+        source,
+        ...getAutoSyncForegroundDiagnostics(),
+      })
+      return
+    }
 
     if (latestHasPendingInteractiveWorkflowRef.current) {
       logReadwiseInfo(
@@ -5245,11 +5292,19 @@ export const ReadwiseContainer = () => {
         'auto sync skipped because an interactive maintenance workflow is still pending in the foreground',
         { source },
       )
+      logReadwiseAutoSyncDiagnostic(
+        'attempt skipped: interactive workflow pending',
+        { source },
+      )
       return
     }
 
     const currentStatus = latestStatusRef.current
     if (currentStatus === 'fetching' || currentStatus === 'syncing') {
+      logReadwiseAutoSyncDiagnostic('attempt skipped: sync already busy', {
+        source,
+        status: currentStatus,
+      })
       return
     }
 
@@ -5261,6 +5316,13 @@ export const ReadwiseContainer = () => {
       lastAutoSyncAttemptAtRef.current != null &&
       now - lastAutoSyncAttemptAtRef.current < intervalMs
     ) {
+      logReadwiseAutoSyncDiagnostic('attempt skipped: attempt cooldown active', {
+        source,
+        intervalMinutes,
+        remainingMs:
+          intervalMs - (now - lastAutoSyncAttemptAtRef.current),
+        lastAttemptAt: new Date(lastAutoSyncAttemptAtRef.current).toISOString(),
+      })
       return
     }
 
@@ -5268,6 +5330,12 @@ export const ReadwiseContainer = () => {
       lastAutoSyncPromptAtRef.current != null &&
       now - lastAutoSyncPromptAtRef.current < intervalMs
     ) {
+      logReadwiseAutoSyncDiagnostic('attempt skipped: prompt cooldown active', {
+        source,
+        intervalMinutes,
+        remainingMs: intervalMs - (now - lastAutoSyncPromptAtRef.current),
+        lastPromptAt: new Date(lastAutoSyncPromptAtRef.current).toISOString(),
+      })
       return
     }
 
@@ -5282,6 +5350,10 @@ export const ReadwiseContainer = () => {
           intervalMinutes,
         },
       )
+      logReadwiseAutoSyncDiagnostic('attempt skipped: no saved cursor', {
+        source,
+        intervalMinutes,
+      })
       return
     }
 
@@ -5295,6 +5367,11 @@ export const ReadwiseContainer = () => {
           conflictLabels: conflicts.map((conflict) => conflict.label),
         },
       )
+      logReadwiseAutoSyncDiagnostic('attempt skipped: managed page conflicts', {
+        source,
+        conflictCount: conflicts.length,
+        conflictLabels: conflicts.map((conflict) => conflict.label),
+      })
       return
     }
 
@@ -5302,6 +5379,11 @@ export const ReadwiseContainer = () => {
     lastAutoSyncAttemptAtRef.current = now
 
     try {
+      logReadwiseAutoSyncDiagnostic('attempt starting incremental sync', {
+        source,
+        intervalMinutes,
+        updatedAfter: currentReaderSyncState.updatedAfter,
+      })
       logReadwiseInfo(
         formalSyncLogPrefix,
         'starting automatic incremental sync',
@@ -5321,13 +5403,25 @@ export const ReadwiseContainer = () => {
       })
     } finally {
       autoSyncInFlightRef.current = false
+      logReadwiseAutoSyncDiagnostic('attempt finished', {
+        source,
+        intervalMinutes,
+      })
     }
   }
 
   useEffect(() => {
     if (!propsReady || !logseq.settings?.autoSyncEnabled) {
+      logReadwiseAutoSyncDiagnostic('activity observer not armed', {
+        propsReady,
+        autoSyncEnabled: logseq.settings?.autoSyncEnabled === true,
+      })
       return undefined
     }
+
+    logReadwiseAutoSyncDiagnostic('activity observer armed', {
+      pollMs: autoSyncObservedPagePollMs,
+    })
 
     const sampleCurrentManagedPage = () => {
       if (!isAutoSyncForegroundReady()) return
@@ -5355,15 +5449,30 @@ export const ReadwiseContainer = () => {
       window.clearInterval(pollTimer)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('focus', handleFocus)
+      logReadwiseAutoSyncDiagnostic('activity observer cleaned up')
     }
-  }, [propsReady, logseq.settings?.autoSyncEnabled])
+  }, [
+    propsReady,
+    logseq.settings?.autoSyncEnabled,
+    logseq.settings?.autoSyncFileDiagnosticsEnabled,
+  ])
 
   useEffect(() => {
     if (!propsReady || !logseq.settings?.autoSyncEnabled) {
+      logReadwiseAutoSyncDiagnostic('scheduler not armed', {
+        propsReady,
+        autoSyncEnabled: logseq.settings?.autoSyncEnabled === true,
+      })
       return undefined
     }
 
-    const intervalMs = resolveAutoSyncIntervalMinutes() * 60 * 1000
+    const intervalMinutes = resolveAutoSyncIntervalMinutes()
+    const intervalMs = intervalMinutes * 60 * 1000
+    logReadwiseAutoSyncDiagnostic('scheduler armed', {
+      intervalMinutes,
+      intervalMs,
+      startupDelayMs: autoSyncStartupDelayMs,
+    })
     const startupTimer = window.setTimeout(() => {
       scheduleAutoSyncAttempt('startup')
     }, autoSyncStartupDelayMs)
@@ -5388,10 +5497,14 @@ export const ReadwiseContainer = () => {
       clearPendingAutoSyncSchedule()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('focus', handleFocus)
+      logReadwiseAutoSyncDiagnostic('scheduler cleaned up', {
+        intervalMinutes,
+      })
     }
   }, [
     propsReady,
     logseq.settings?.autoSyncEnabled,
+    logseq.settings?.autoSyncFileDiagnosticsEnabled,
     logseq.settings?.syncIntervalMinutes,
   ])
 
@@ -8682,6 +8795,14 @@ export const ReadwiseContainer = () => {
               : `${statusPrefix}: no Reader pages were available.`,
         )
         if (runTrigger === 'auto') {
+          logReadwiseAutoSyncDiagnostic('completed with no page writes', {
+            mode,
+            highlightPagesScanned: loadStats.highlightPagesScanned,
+            highlightsScanned: loadStats.highlightsScanned,
+            parentDocumentsIdentified: loadStats.parentDocumentsIdentified,
+            pagesTargeted: loadStats.pagesTargeted,
+            latestHighlightUpdatedAt: loadStats.latestHighlightUpdatedAt,
+          })
           logReadwiseInfo(
             logPrefix,
             'auto sync completed with no page writes required',
@@ -9403,6 +9524,17 @@ export const ReadwiseContainer = () => {
             : `${statusPrefix}: complete. ${loadStats.pagesProcessed} page(s) written to ${namespacePrefix}.${debugHighlightPageLimit != null ? ` Debug cap ${debugHighlightPageLimit} was active.` : ''}${staleDeletionSuffix}${incompleteSnapshotSuffix}`,
       )
       if (runTrigger === 'auto') {
+        logReadwiseAutoSyncDiagnostic('completed with page write summary', {
+          mode,
+          pagesProcessed: loadStats.pagesProcessed,
+          createdCount,
+          updatedCount,
+          unchangedCount,
+          renamedCount,
+          errorCount: syncErrorsForRun.length,
+          deferredProtectedWrites: deferredProtectedWrites.length,
+          latestHighlightUpdatedAt: loadStats.latestHighlightUpdatedAt,
+        })
         if (syncErrorsForRun.length > 0) {
           await logseq.UI.showMsg(
             `Auto Sync completed with ${syncErrorsForRun.length} error(s).`,
@@ -9479,6 +9611,16 @@ export const ReadwiseContainer = () => {
               formattedError: describeUnknownError(err),
             },
           )
+          if (runTrigger === 'auto') {
+            logReadwiseAutoSyncDiagnostic('resumable step failed; retrying', {
+              retryTarget,
+              automaticRetryOrdinal,
+              retryTotal,
+              retryDelayMs,
+              resumePhase: err.resumeState.phase,
+              formattedError: describeUnknownError(err),
+            })
+          }
           await sleep(retryDelayMs)
 
           if (cancelledRef.current) {
@@ -9576,6 +9718,12 @@ export const ReadwiseContainer = () => {
           : `${statusPrefix} failed: ${describeUnknownError(err)}`,
       )
       if (runTrigger === 'auto') {
+        logReadwiseAutoSyncDiagnostic('failed', {
+          mode,
+          formattedError: describeUnknownError(err),
+          pagesProcessed: loadStats.pagesProcessed,
+          errorCount: syncErrorsForRun.length + 1,
+        })
         await logseq.UI.showMsg(
           `Auto Sync failed: ${describeUnknownError(err)}`,
           'warning',

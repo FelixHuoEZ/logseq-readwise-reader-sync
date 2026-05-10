@@ -59,8 +59,11 @@ This project is published as an independent plugin release line. If it is publis
 4. Auto Sync only arms itself after one successful manual `Incremental Sync` or `Full Refresh` has established a saved cursor.
 5. Leave the Debug section at defaults for normal use:
    - `Log Level = warn`
+   - `Auto Sync File Diagnostics = off`
    - `Reader Full Scan Target Documents = 20`
    - `Reader Full Scan Debug Highlight Page Limit = 0`
+
+`Auto Sync File Diagnostics` is only for temporary debugging. When enabled, the plugin writes dedicated `[Readwise Auto Sync Debug]` events to the plugin's private FileStorage under `auto-sync-diagnostics/auto-sync-diagnostics-YYYY-MM.jsonl`. The same events are mirrored to the console. The log records scheduler arm/cleanup, foreground skips, cooldown skips, saved-cursor gating, conflict skips, run starts, no-op completions, page-write summaries, retries, and failures. It does not write into the current graph.
 
 Do not run this project and another Readwise Logseq plugin against the same graph at the same time. They share managed page namespaces and properties even though the plugin package id is distinct.
 

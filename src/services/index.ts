@@ -1,5 +1,6 @@
 export * from './append-highlights'
 export * from './audit-managed-reader-pages'
+export * from './auto-sync-diagnostics-file'
 export * from './force-reparse-pages'
 export * from './formal-test-pages'
 export * from './internal-current-page-reparse'

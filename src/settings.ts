@@ -37,18 +37,26 @@ export const settingsSchema: SettingSchemaDesc[] = [
     key: 'debugSection',
     type: 'heading',
     title: 'Debug',
-    description: 'Default behavior: do not modify these settings during normal use.',
+    description:
+      'Default behavior: do not modify these settings during normal use.',
     default: null,
   },
   {
     key: 'logLevel',
     type: 'enum',
     title: 'Log Level',
-    description:
-      'Default warn. Normally leave unchanged.',
+    description: 'Default warn. Normally leave unchanged.',
     default: 'warn',
     enumChoices: ['error', 'warn', 'info', 'debug'],
     enumPicker: 'select',
+  },
+  {
+    key: 'autoSyncFileDiagnosticsEnabled',
+    type: 'boolean',
+    title: 'Auto Sync File Diagnostics',
+    description:
+      'Debug-only. When enabled, writes detailed Auto Sync scheduler, skip, and completion diagnostics to the plugin private storage path auto-sync-diagnostics/*.jsonl.',
+    default: false,
   },
   {
     key: 'readerFullScanTargetDocuments',

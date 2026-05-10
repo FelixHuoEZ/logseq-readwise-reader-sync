@@ -63,7 +63,7 @@ This project is published as an independent plugin release line. If it is publis
    - `Reader Full Scan Target Documents = 20`
    - `Reader Full Scan Debug Highlight Page Limit = 0`
 
-`Auto Sync File Diagnostics` is only for temporary debugging. When enabled, the plugin writes dedicated `[Readwise Auto Sync Debug]` events to the plugin's private FileStorage under `~/.logseq/storages/felixhuoez-logseq-readwise-sync/auto-sync-diagnostics/auto-sync-diagnostics-YYYY-MM.jsonl`. The same events are mirrored to the console. The log records scheduler arm/cleanup, foreground skips, cooldown skips, saved-cursor gating, conflict skips, run starts, no-op completions, page-write summaries, retries, and failures. It does not write into the current graph.
+`Auto Sync File Diagnostics` is only for temporary debugging. When enabled, the plugin buffers dedicated `[Readwise Auto Sync Debug]` events in memory and flushes them about every 10 seconds to the plugin's private FileStorage under `~/.logseq/storages/felixhuoez-logseq-readwise-sync/auto-sync-diagnostics/auto-sync-diagnostics-YYYY-MM.jsonl`; it also flushes earlier if the buffer reaches 1,000 lines. The same events are mirrored to the console. The log records scheduler arm/cleanup, foreground skips, cooldown skips, saved-cursor gating, conflict skips, run starts, no-op completions, page-write summaries, retries, and failures. It does not write into the current graph.
 
 Do not run this project and another Readwise Logseq plugin against the same graph at the same time. They share managed page namespaces and properties even though the plugin package id is distinct.
 

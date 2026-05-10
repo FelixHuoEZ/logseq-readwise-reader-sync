@@ -10,6 +10,9 @@ const padTwoDigits = (value: number) => String(value).padStart(2, '0')
 const buildLocalMonthKey = (date: Date) =>
   `${date.getFullYear()}-${padTwoDigits(date.getMonth() + 1)}`
 
+const autoSyncDiagnosticFlushDelayMs = 10_000
+const autoSyncDiagnosticMaxBufferedLines = 1_000
+
 const sanitizeForJson = (value: unknown): unknown => {
   if (value instanceof Error) {
     return {
@@ -47,6 +50,10 @@ const sanitizeForJson = (value: unknown): unknown => {
 }
 
 let pendingAutoSyncDiagnosticWrite: Promise<void> = Promise.resolve()
+let bufferedAutoSyncDiagnosticLines = new Map<string, string[]>()
+let bufferedAutoSyncDiagnosticLineCount = 0
+let autoSyncDiagnosticFlushTimer: number | null = null
+let lifecycleFlushListenersRegistered = false
 
 export const buildReadwiseAutoSyncDiagnosticLogFileName = (date = new Date()) =>
   `auto-sync-diagnostics-${buildLocalMonthKey(date)}.jsonl`
@@ -54,30 +61,104 @@ export const buildReadwiseAutoSyncDiagnosticLogFileName = (date = new Date()) =>
 export const buildReadwiseAutoSyncDiagnosticStorageKey = (date = new Date()) =>
   `auto-sync-diagnostics/${buildReadwiseAutoSyncDiagnosticLogFileName(date)}`
 
-export const appendReadwiseAutoSyncDiagnosticLogEntry = (
-  record: ReadwiseAutoSyncDiagnosticRecordV1,
-) => {
+const clearScheduledAutoSyncDiagnosticFlush = () => {
+  if (autoSyncDiagnosticFlushTimer == null) return
+  window.clearTimeout(autoSyncDiagnosticFlushTimer)
+  autoSyncDiagnosticFlushTimer = null
+}
+
+const scheduleAutoSyncDiagnosticFlush = () => {
+  if (autoSyncDiagnosticFlushTimer != null) return
+
+  autoSyncDiagnosticFlushTimer = window.setTimeout(() => {
+    autoSyncDiagnosticFlushTimer = null
+    void flushReadwiseAutoSyncDiagnosticLogBuffer()
+  }, autoSyncDiagnosticFlushDelayMs)
+}
+
+const registerAutoSyncDiagnosticLifecycleFlush = () => {
+  if (lifecycleFlushListenersRegistered) return
+  lifecycleFlushListenersRegistered = true
+
+  window.addEventListener('pagehide', () => {
+    void flushReadwiseAutoSyncDiagnosticLogBuffer()
+  })
+  window.addEventListener('beforeunload', () => {
+    void flushReadwiseAutoSyncDiagnosticLogBuffer()
+  })
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      void flushReadwiseAutoSyncDiagnosticLogBuffer()
+    }
+  })
+}
+
+export const flushReadwiseAutoSyncDiagnosticLogBuffer = () => {
+  clearScheduledAutoSyncDiagnosticFlush()
+
+  if (bufferedAutoSyncDiagnosticLineCount <= 0) {
+    return pendingAutoSyncDiagnosticWrite
+  }
+
+  const linesByStorageKey = bufferedAutoSyncDiagnosticLines
+  bufferedAutoSyncDiagnosticLines = new Map()
+  bufferedAutoSyncDiagnosticLineCount = 0
+
   pendingAutoSyncDiagnosticWrite = pendingAutoSyncDiagnosticWrite
     .catch(() => undefined)
     .then(async () => {
-      const storageKey = buildReadwiseAutoSyncDiagnosticStorageKey(
-        new Date(record.timestamp),
-      )
-      const line = `${JSON.stringify({
-        ...record,
-        payload: sanitizeForJson(record.payload),
-      })}\n`
-      let existing = ''
+      for (const [storageKey, lines] of linesByStorageKey) {
+        let existing = ''
 
-      try {
-        const raw = await logseq.FileStorage.getItem(storageKey)
-        existing = typeof raw === 'string' ? raw : ''
-      } catch {
-        existing = ''
+        try {
+          const raw = await logseq.FileStorage.getItem(storageKey)
+          existing = typeof raw === 'string' ? raw : ''
+        } catch {
+          existing = ''
+        }
+
+        await logseq.FileStorage.setItem(
+          storageKey,
+          `${existing}${lines.join('')}`,
+        )
       }
-
-      await logseq.FileStorage.setItem(storageKey, `${existing}${line}`)
+    })
+    .catch((error: unknown) => {
+      console.warn(
+        '[Readwise Auto Sync Debug] failed to flush persistent diagnostic log buffer',
+        error,
+      )
     })
 
   return pendingAutoSyncDiagnosticWrite
+}
+
+export const appendReadwiseAutoSyncDiagnosticLogEntry = (
+  record: ReadwiseAutoSyncDiagnosticRecordV1,
+) => {
+  registerAutoSyncDiagnosticLifecycleFlush()
+
+  const storageKey = buildReadwiseAutoSyncDiagnosticStorageKey(
+    new Date(record.timestamp),
+  )
+  const line = `${JSON.stringify({
+    ...record,
+    payload: sanitizeForJson(record.payload),
+  })}\n`
+  const existingLines = bufferedAutoSyncDiagnosticLines.get(storageKey)
+  if (existingLines == null) {
+    bufferedAutoSyncDiagnosticLines.set(storageKey, [line])
+  } else {
+    existingLines.push(line)
+  }
+  bufferedAutoSyncDiagnosticLineCount += 1
+
+  if (
+    bufferedAutoSyncDiagnosticLineCount >= autoSyncDiagnosticMaxBufferedLines
+  ) {
+    return flushReadwiseAutoSyncDiagnosticLogBuffer()
+  }
+
+  scheduleAutoSyncDiagnosticFlush()
+  return Promise.resolve()
 }

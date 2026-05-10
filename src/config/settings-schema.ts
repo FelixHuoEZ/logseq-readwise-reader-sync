@@ -38,7 +38,7 @@ export const settingsSchema: SettingSchemaDesc[] = [
     type: 'boolean',
     title: 'Auto Sync File Diagnostics',
     description:
-      'Debug-only. When enabled, writes detailed Auto Sync scheduler, skip, and completion diagnostics to the plugin private storage path auto-sync-diagnostics/*.jsonl.',
+      'Debug-only. When enabled, writes detailed Auto Sync scheduler, skip, and completion diagnostics to ~/.logseq/storages/felixhuoez-logseq-readwise-sync/auto-sync-diagnostics/*.jsonl.',
     default: false,
   },
   {

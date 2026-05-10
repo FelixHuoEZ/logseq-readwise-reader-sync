@@ -61,6 +61,9 @@ export const buildReadwiseAutoSyncDiagnosticLogFileName = (date = new Date()) =>
 export const buildReadwiseAutoSyncDiagnosticStorageKey = (date = new Date()) =>
   `auto-sync-diagnostics/${buildReadwiseAutoSyncDiagnosticLogFileName(date)}`
 
+const hasBufferedAutoSyncDiagnosticLines = () =>
+  bufferedAutoSyncDiagnosticLineCount > 0
+
 const clearScheduledAutoSyncDiagnosticFlush = () => {
   if (autoSyncDiagnosticFlushTimer == null) return
   window.clearTimeout(autoSyncDiagnosticFlushTimer)
@@ -72,7 +75,9 @@ const scheduleAutoSyncDiagnosticFlush = () => {
 
   autoSyncDiagnosticFlushTimer = window.setTimeout(() => {
     autoSyncDiagnosticFlushTimer = null
-    void flushReadwiseAutoSyncDiagnosticLogBuffer()
+    if (hasBufferedAutoSyncDiagnosticLines()) {
+      void flushReadwiseAutoSyncDiagnosticLogBuffer()
+    }
   }, autoSyncDiagnosticFlushDelayMs)
 }
 
@@ -81,13 +86,20 @@ const registerAutoSyncDiagnosticLifecycleFlush = () => {
   lifecycleFlushListenersRegistered = true
 
   window.addEventListener('pagehide', () => {
-    void flushReadwiseAutoSyncDiagnosticLogBuffer()
+    if (hasBufferedAutoSyncDiagnosticLines()) {
+      void flushReadwiseAutoSyncDiagnosticLogBuffer()
+    }
   })
   window.addEventListener('beforeunload', () => {
-    void flushReadwiseAutoSyncDiagnosticLogBuffer()
+    if (hasBufferedAutoSyncDiagnosticLines()) {
+      void flushReadwiseAutoSyncDiagnosticLogBuffer()
+    }
   })
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') {
+    if (
+      document.visibilityState === 'hidden' &&
+      hasBufferedAutoSyncDiagnosticLines()
+    ) {
       void flushReadwiseAutoSyncDiagnosticLogBuffer()
     }
   })
@@ -96,7 +108,7 @@ const registerAutoSyncDiagnosticLifecycleFlush = () => {
 export const flushReadwiseAutoSyncDiagnosticLogBuffer = () => {
   clearScheduledAutoSyncDiagnosticFlush()
 
-  if (bufferedAutoSyncDiagnosticLineCount <= 0) {
+  if (!hasBufferedAutoSyncDiagnosticLines()) {
     return pendingAutoSyncDiagnosticWrite
   }
 
